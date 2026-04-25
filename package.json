@@ -1,5 +1,20 @@
 {
+  "name": "nidavellir",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names \"BE,FE,EL\" --prefix-colors \"cyan,green,yellow\" \"npm run dev:be\" \"npm run dev:fe\" \"npm run dev:el\"",
+    "dev:be": "cd backend && uv run uvicorn nidavellir.main:app --reload --port 7430",
+    "dev:fe": "cd frontend && npm run dev",
+    "dev:el": "wait-on http://localhost:5173 && cd electron && node node_modules/typescript/bin/tsc && cmd.exe /c \"C:\\Users\\colebienek\\projects\\nidavellir\\electron\\node_modules\\electron\\dist\\electron.exe C:\\Users\\colebienek\\projects\\nidavellir\\electron\\dist\\main.js\"",
+    "install:all": "cd frontend && npm install && cd ../electron && npm install",
+    "test": "cd backend && uv run pytest && cd ../frontend && npm test"
+  },
   "dependencies": {
     "gh": "^2.8.9"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "wait-on": "^8.0.0"
   }
 }
