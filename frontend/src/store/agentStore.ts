@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ProviderInfo } from "@/lib/types";
+import type { ProviderInfo, AgentModelDef } from "@/lib/types";
 import type { StreamEvent } from "@/lib/streamTypes";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -31,6 +31,11 @@ interface AgentStore {
   providers:         ProviderInfo[];
   providersLoaded:   boolean;
 
+  // Agent model selection
+  agentModels:       AgentModelDef[];
+  agentModelsLoaded: boolean;
+  selectedModel:     string;   // "{provider_id}:{model_id}"
+
   // Chat state (Spec 02)
   messages:    Message[];
   isStreaming: boolean;
@@ -39,6 +44,10 @@ interface AgentStore {
   setSelectedProvider: (id: string) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   setProviders:        (providers: ProviderInfo[]) => void;
+
+  // Agent model actions
+  setAgentModels:   (models: AgentModelDef[]) => void;
+  setSelectedModel: (modelId: string) => void;
 
   // Chat actions (Spec 02)
   addMessage:               (role: MessageRole, content: string) => string;
@@ -63,6 +72,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   setSelectedProvider: (id) => set({ selectedProvider: id }),
   setConnectionStatus: (status) => set({ connectionStatus: status }),
   setProviders: (providers) => set({ providers, providersLoaded: true }),
+
+  // ── Agent model selection ─────────────────────────────────────────────────
+  agentModels:       [],
+  agentModelsLoaded: false,
+  selectedModel:     "claude:claude-sonnet-4-6",
+
+  setAgentModels: (models) => set({ agentModels: models, agentModelsLoaded: true }),
+
+  setSelectedModel: (modelId) => {
+    const providerId = modelId.split(":")[0];
+    set({ selectedModel: modelId, selectedProvider: providerId });
+  },
 
   // ── Chat state ────────────────────────────────────────────────────────────
   messages:    [],

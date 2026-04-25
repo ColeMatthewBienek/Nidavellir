@@ -12,6 +12,7 @@ import { SpawnModal }     from './components/SpawnModal';
 import { api } from './api/client';
 import type { ScreenId } from './types';
 import { useProviders } from './hooks/useProviders';
+import { useAgentModels } from './hooks/useAgentModels';
 import { initSocket } from './lib/agentSocket';
 
 const SCREENS: Record<ScreenId, React.ReactElement> = {
@@ -30,7 +31,8 @@ export function App() {
   const setBackendStatus = useAppStore((s) => s.setBackendStatus);
   const [spawnOpen, setSpawnOpen] = useState(false);
 
-  useProviders(); // pre-warms provider store on mount
+  useProviders();    // pre-warms provider store on mount
+  useAgentModels();  // pre-warms agent model list on mount
   useEffect(() => { initSocket(); }, []); // establish WebSocket on app load
 
   useEffect(() => {

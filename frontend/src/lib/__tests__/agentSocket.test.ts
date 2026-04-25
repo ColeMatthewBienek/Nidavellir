@@ -106,28 +106,31 @@ describe("connection", () => {
 describe("chunk handling — raw storage", () => {
   it("stores raw chunk including ANSI codes — stripping is parser responsibility", () => {
     const ws = setupOpenSocket();
-    useAgentStore.getState().addMessage("agent", "");
+    // First chunk creates the agent bubble automatically
     ws.simulateMessage({ type: "chunk", content: "\x1b[32mhello\x1b[0m" });
-    const msg = useAgentStore.getState().messages[0];
+    const msgs = useAgentStore.getState().messages;
+    const msg = msgs[msgs.length - 1];
     expect(msg.rawChunks[0]).toBe("\x1b[32mhello\x1b[0m");
     expect(msg.content).toContain("\x1b[32mhello\x1b[0m");
   });
 
   it("calls appendRawChunk for chunk messages", () => {
     const ws = setupOpenSocket();
-    useAgentStore.getState().addMessage("agent", "");
+    // First chunk creates the agent bubble automatically
     ws.simulateMessage({ type: "chunk", content: "plain text" });
-    const msg = useAgentStore.getState().messages[0];
+    const msgs = useAgentStore.getState().messages;
+    const msg = msgs[msgs.length - 1];
     expect(msg.rawChunks).toContain("plain text");
   });
 
   it("calls finalizeLastAgentMessage on done message", () => {
     const ws = setupOpenSocket();
-    useAgentStore.getState().addMessage("agent", "");
-    useAgentStore.setState({ isStreaming: true });
+    // Simulate chunk first to open the agent message, then done
+    ws.simulateMessage({ type: "chunk", content: "partial" });
     ws.simulateMessage({ type: "done" });
     expect(useAgentStore.getState().isStreaming).toBe(false);
-    expect(useAgentStore.getState().messages[0].streaming).toBe(false);
+    const msgs = useAgentStore.getState().messages;
+    expect(msgs[msgs.length - 1].streaming).toBe(false);
   });
 });
 

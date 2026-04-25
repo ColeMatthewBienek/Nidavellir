@@ -14,9 +14,9 @@ describe('Placeholder screens', () => {
     expect(() => render(<ChatScreen />)).not.toThrow();
   });
 
-  it('ChatScreen renders the thread list', () => {
+  it('ChatScreen renders the thread panel header', () => {
     render(<ChatScreen />);
-    expect(screen.getAllByText('auth-refactor').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Threads').length).toBeGreaterThan(0);
   });
 
   it('PlanScreen renders without crashing', () => {

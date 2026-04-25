@@ -47,3 +47,15 @@ export interface ProviderInfo {
   supports_parallel_slots: boolean;
   max_concurrent_slots:    number | null;
 }
+
+// ── Agent model types ─────────────────────────────────────────────────────────
+
+export interface AgentModelDef {
+  id:           string;   // globally unique: "{provider_id}:{model_id}"
+  provider_id:  string;   // "claude" | "codex" | "ollama"
+  model_id:     string;   // value passed to the CLI --model flag
+  display_name: string;
+  description:  string;
+  cost_tier:    CostTier;
+  available:    boolean;
+}

@@ -1,122 +1,127 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgentStore } from "@/store/agentStore";
 import type { Message } from "@/store/agentStore";
-import { createParser } from "@/lib/parsers";
-import type { StreamEvent } from "@/lib/streamTypes";
-import { StreamRenderer } from "./StreamRenderer";
-import { MarkdownRenderer } from "./MarkdownRenderer";
-import { ThinkingDots } from "./ThinkingDots";
 
-// ── LiveAgentMessage ──────────────────────────────────────────────────────────
-// Used only while message.streaming === true.
-// Holds a stateful parser per message; feeds only new raw chunks incrementally.
+// ── ThinkingBubble ────────────────────────────────────────────────────────────
 
-function LiveAgentMessage({ message }: { message: Message }) {
-  const selectedProvider   = useAgentStore((s) => s.selectedProvider);
-  const appendStreamEvents = useAgentStore((s) => s.appendStreamEvents);
-
-  const parserRef    = useRef(createParser(selectedProvider));
-  const processedRef = useRef(0);
-
-  // Feed new raw chunks to parser — watches length (primitive) not array identity
-  useEffect(() => {
-    const chunks    = message.rawChunks;
-    const newChunks = chunks.slice(processedRef.current);
-    if (newChunks.length === 0) return;
-
-    const events: StreamEvent[] = [];
-    for (const chunk of newChunks) {
-      events.push(...parserRef.current.feed(chunk));
-    }
-    processedRef.current = chunks.length;
-
-    if (events.length > 0) {
-      appendStreamEvents(events);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [message.rawChunks.length, appendStreamEvents]);
-
-  // Flush parser when streaming ends
-  useEffect(() => {
-    if (!message.streaming) {
-      const flushed = parserRef.current.flush();
-      if (flushed.length > 0) {
-        appendStreamEvents(flushed);
-      }
-      parserRef.current.reset();
-    }
-  }, [message.streaming, appendStreamEvents]);
-
+function ThinkingBubble() {
   return (
-    <StreamRenderer
-      events={message.events}
-      streaming={message.streaming}
-      providerId={selectedProvider}
-    />
+    <div style={{ padding: '10px 20px', display: 'flex', gap: 10, marginBottom: 16 }}>
+      <div style={{
+        width: 26, height: 26, borderRadius: '50%', background: 'var(--grnd)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 10, fontWeight: 700, color: '#fff', flexShrink: 0,
+      }}>N</div>
+      <div style={{ paddingTop: 5 }}>
+        <div style={{ fontSize: 11, color: 'var(--t1)', marginBottom: 6 }}>
+          Nidavellir · thinking
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[0, 1, 2].map(i => (
+            <span key={i} style={{
+              width: 6, height: 6, borderRadius: '50%', background: 'var(--t1)',
+              display: 'inline-block',
+              animation: `nidBounce 1.2s ${i * 0.2}s ease-in-out infinite`,
+            }} />
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
-// ── CompletedAgentMessage ─────────────────────────────────────────────────────
-// Used after message.streaming === false.
+// ── Shared code-fence renderer ────────────────────────────────────────────────
 
-function CompletedAgentMessage({ message }: { message: Message }) {
-  const selectedProvider = useAgentStore((s) => s.selectedProvider);
-
-  if (message.events.length > 0) {
-    return (
-      <StreamRenderer
-        events={message.events}
-        streaming={false}
-        providerId={selectedProvider}
-      />
-    );
-  }
-
-  // Fallback for messages with content but no events (historical / error-injected)
-  return <MarkdownRenderer content={message.content} />;
+function renderParts(parts: string[]) {
+  return parts.map((part, i) =>
+    part.startsWith('```') ? (
+      <pre key={i} style={{
+        background: 'var(--bg0)', border: '1px solid var(--bd)', borderRadius: 6,
+        padding: '10px 14px', margin: '6px 0',
+        fontFamily: 'var(--mono)', fontSize: 12, lineHeight: 1.6,
+        overflowX: 'auto', color: 'var(--t0)', whiteSpace: 'pre-wrap',
+      }}>
+        {part.replace(/^```\w*\n?/, '').replace(/```$/, '')}
+      </pre>
+    ) : (
+      <span key={i} style={{ whiteSpace: 'pre-wrap' }}>{part}</span>
+    )
+  );
 }
 
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
 function MessageBubble({ message }: { message: Message }) {
-  if (message.role === "user") {
-    return (
-      <div className="flex justify-end group">
-        <div className="relative max-w-[65%]">
-          <div className="px-3.5 py-2.5 rounded-[12px_12px_4px_12px] bg-[#1f6feb]/10 border border-[#1f6feb]/20 text-[13px] text-[#e6edf3] leading-relaxed whitespace-pre-wrap">
-            {message.content}
-          </div>
-          <button
-            onClick={() => navigator.clipboard.writeText(message.content)}
-            className="absolute -bottom-5 right-0 opacity-0 group-hover:opacity-100 transition-opacity
-                       text-[10px] text-[#484f58] hover:text-[#8b949e] font-mono flex items-center gap-1"
-          >
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="9" y="9" width="13" height="13" rx="2"/>
-              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
-            </svg>
-            copy
-          </button>
-        </div>
-      </div>
-    );
+  const isUser = message.role === 'user';
+  const timestamp = message.timestamp
+    ? message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '';
+
+  // Pre-first-chunk: empty streaming agent message → ThinkingBubble
+  if (!isUser && message.content === '' && message.streaming) {
+    return <ThinkingBubble />;
   }
 
-  // Agent message
-  const isEmpty = !message.content && message.events.length === 0;
+  const parts = message.content.split(/(```[\s\S]*?```)/g);
 
   return (
-    <div className="agent-output flex justify-start gap-2.5">
-      <div className="w-7 h-7 rounded-lg bg-[#1f6feb]/10 border border-[#1f6feb]/20 flex items-center justify-center text-[12px] text-[#3fb950] flex-shrink-0 mt-0.5">
-        ⬡
+    <div style={{
+      padding: '10px 20px',
+      display: 'flex',
+      gap: 10,
+      flexDirection: isUser ? 'row-reverse' : 'row',
+      alignItems: 'flex-start',
+      marginBottom: 16,
+    }}>
+      {/* Circular avatar */}
+      <div style={{
+        width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
+        background: isUser ? 'var(--blu)' : 'var(--grnd)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 10, fontWeight: 700, color: '#fff',
+      }}>
+        {isUser ? 'U' : 'N'}
       </div>
-      <div className="flex flex-col gap-2 max-w-[75%] min-w-0">
-        {isEmpty ? (
-          <ThinkingDots />
-        ) : message.streaming ? (
-          <LiveAgentMessage message={message} />
+
+      {/* Content column */}
+      <div style={{ maxWidth: '68%', fontSize: 13, color: 'var(--t0)', lineHeight: 1.65 }}>
+        {/* Sender label + timestamp + LIVE badge */}
+        <div style={{
+          fontSize: 11, color: 'var(--t1)', marginBottom: 4,
+          textAlign: isUser ? 'right' : 'left',
+        }}>
+          {isUser ? 'You' : 'Nidavellir'}
+          {timestamp ? ` · ${timestamp}` : ''}
+          {message.streaming && (
+            <span style={{
+              marginLeft: 6, color: 'var(--grn)', fontSize: 9,
+              animation: 'nidBlink 1.2s step-start infinite',
+            }}>● LIVE</span>
+          )}
+        </div>
+
+        {/* Bubble wrapper */}
+        {isUser ? (
+          <div style={{
+            background: '#1f6feb22',
+            border: '1px solid #1f6feb33',
+            borderRadius: '12px 12px 4px 12px',
+            padding: '8px 12px',
+          }}>
+            {renderParts(parts)}
+          </div>
         ) : (
-          <CompletedAgentMessage message={message} />
+          <div style={{
+            background: 'var(--bg2)',
+            border: '1px solid var(--bd)',
+            borderRadius: '12px 12px 12px 4px',
+            padding: '8px 12px',
+          }}>
+            {renderParts(parts)}
+            {message.streaming && (
+              <span style={{ color: 'var(--grn)', animation: 'nidBlink 1s step-start infinite' }}>▋</span>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -142,8 +147,6 @@ export function MessageList() {
     setShowJump(!isPinned);
   }, []);
 
-  // Auto-scroll when messages change (new chunks update message refs) and pinned to bottom.
-  // "instant" not "smooth" during streaming — smooth causes visible lag on rapid chunk arrival.
   useEffect(() => {
     if (!pinnedRef.current) return;
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
@@ -157,31 +160,39 @@ export function MessageList() {
 
   if (messages.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[#484f58] text-sm">
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: '#484f58', fontSize: 14,
+      }}>
         Start a conversation with the agent.
       </div>
     );
   }
 
   return (
-    <div className="relative flex-1 min-h-0">
+    <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="h-full overflow-y-auto px-4 py-4 space-y-4"
+        style={{ height: '100%', overflowY: 'auto', padding: '16px 0' }}
       >
         {messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
-        <div ref={bottomRef} className="h-px" />
+        <div ref={bottomRef} style={{ height: 1 }} />
       </div>
 
       {showJump && (
         <button
           onClick={scrollToBottom}
-          className="absolute bottom-4 right-4 flex items-center gap-1.5 px-3 py-1.5 rounded-full
-                     bg-[#161b22] border border-[#30363d] text-[11px] text-[#8b949e]
-                     hover:text-[#e6edf3] hover:border-[#484f58] transition-all shadow-lg"
+          style={{
+            position: 'absolute', bottom: 16, right: 16,
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 12px', borderRadius: 999,
+            background: 'var(--bg1)', border: '1px solid var(--bd)',
+            fontSize: 11, color: 'var(--t1)', cursor: 'pointer',
+            boxShadow: '0 4px 12px #00000044',
+          }}
         >
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <path d="M12 5v14M5 12l7 7 7-7"/>
