@@ -44,6 +44,10 @@ Runs backend pytest suite then frontend vitest suite. All must be green before m
 | FastAPI  | 7430 |
 | Vite dev | 5173 |
 
+## Memory System
+
+Nidavellir includes a hybrid memory system combining SQLite/FTS5 and Qdrant vector search to persist knowledge across sessions, inject relevant context into agent prompts, and log all retrieval decisions for inspection. See [Technical Memory Architecture](Technical%20Memory%20Architecture.md).
+
 ## Notes
 
 - Electron hot reload: the Electron window loads `http://localhost:5173` in dev mode. Vite HMR handles frontend hot reload automatically. Backend changes reload via uvicorn `--reload`.
