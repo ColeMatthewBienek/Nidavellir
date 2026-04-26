@@ -38,7 +38,7 @@ MIN_IMPORTANCE_NEW_SESSION = 5
 
 # ── Pure selection function ───────────────────────────────────────────────────
 
-def select_memories(
+def _fts_select(
     store: MemoryStore,
     query: str,
     workflow: str,
@@ -46,14 +46,7 @@ def select_memories(
     repo_id: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """Pure function: retrieve → score → filter → return final selected list.
-
-    No side effects. Does not write events, does not update use_count.
-    The caller is responsible for calling store.mark_memories_used() on the
-    returned list.
-    """
-    # ── 1. Retrieve candidates ────────────────────────────────────────────────
-
+    """Phase 2B FTS/fallback selection — unchanged from before hybrid."""
     retrieval_reason = "fts_match"
     candidates: list[tuple[dict, float | None]] = []
 
@@ -71,8 +64,6 @@ def select_memories(
         candidates = [
             (m, None) for m in store.get_active_memories(workflow, limit=limit)
         ]
-
-    # ── 2. Score and filter ───────────────────────────────────────────────────
 
     def _scope_boost(m: dict) -> float:
         if repo_id and m.get("repo_id") == repo_id:
@@ -101,19 +92,39 @@ def select_memories(
 
     scored.sort(key=lambda t: t[0], reverse=True)
 
-    # ── 3. Apply injection cap ────────────────────────────────────────────────
-
-    # Fill a ContextPack to enforce budget/category/total limits, then extract
-    # the final list. This keeps selection identical to what the pack renders.
     pack = ContextPack()
     selected: list[dict] = []
-    for score, m in scored[:MAX_INJECTED * 3]:  # oversample slightly for pack limits
+    for score, m in scored[:MAX_INJECTED * 3]:
         if pack.try_add(m):
             selected.append(m)
         if len(selected) >= MAX_INJECTED:
             break
 
     return selected
+
+
+def select_memories(
+    store: MemoryStore,
+    query: str,
+    workflow: str,
+    is_new_session: bool = False,
+    repo_id: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Pure function: retrieve → score → filter → return final selected list.
+
+    When NIDAVELLIR_HYBRID_RETRIEVAL=true, delegates to hybrid_select_memories.
+    When false, uses FTS/fallback path (Phase 2B behaviour).
+    No side effects in either path.
+    """
+    from .hybrid import is_hybrid_enabled, hybrid_select_memories
+    if is_hybrid_enabled():
+        return hybrid_select_memories(
+            store, query, workflow,
+            is_new_session=is_new_session, repo_id=repo_id,
+        )
+    return _fts_select(store, query, workflow, is_new_session=is_new_session,
+                       repo_id=repo_id, limit=limit)
 
 
 # ── Vector observation (Phase 2B — log only, no injection) ───────────────────
@@ -174,6 +185,45 @@ def _observe_vectors(
         return []
 
 
+def _log_hybrid_scored(
+    store: MemoryStore,
+    query: str,
+    selected: list[dict],
+    session_id: str | None,
+) -> None:
+    """Log hybrid_scored event with candidate diagnostics. Never raises."""
+    try:
+        has_strong_fts = any(m.get("_has_strong_fts") for m in selected)
+        candidates_payload = [
+            {
+                "memory_id":   m["id"],
+                "source":      m.get("_retrieval_source", "unknown"),
+                "hybrid_score": m.get("_hybrid_score"),
+                "allowed":     True,
+            }
+            for m in selected
+        ]
+        store.log_event(
+            event_type="hybrid_scored",
+            event_subject="retrieval",
+            session_id=session_id,
+            payload={
+                "query":          query[:200],
+                "hybrid_enabled": True,
+                "has_strong_fts": bool(has_strong_fts),
+                "selected_ids":   [m["id"] for m in selected],
+                "candidates":     candidates_payload,
+                "fts_count":      sum(1 for m in selected
+                                      if m.get("_retrieval_source") in ("fts", "both")),
+                "vector_count":   sum(1 for m in selected
+                                      if m.get("_retrieval_source") in ("vector", "both")),
+                "merged_count":   len(selected),
+            },
+        )
+    except Exception:
+        pass
+
+
 # ── Side-effecting API ────────────────────────────────────────────────────────
 
 def get_context_pack(
@@ -223,8 +273,13 @@ def get_context_pack(
         )
         fts_count = 0
 
-    # 4. Vector search — observational only, logged, DOES NOT affect selection
+    # 4. Vector search — observational only when hybrid is disabled
     _observe_vectors(store, query, fts_count)
+
+    # 4b. Log hybrid_scored event when hybrid retrieval is active
+    from .hybrid import is_hybrid_enabled
+    if is_hybrid_enabled() and query and query.strip():
+        _log_hybrid_scored(store, query, selected, session_id)
 
     # 5. Log injection events and build pack
     pack = ContextPack()
