@@ -221,7 +221,8 @@ async def test_handle_message_prepends_memory_context(tmp_path, monkeypatch):
     assert len(received_content) == 1, "agent.send must be called exactly once"
     assert "## Memory Context" in received_content[0], "agent must receive memory prefix"
     assert "How do I set up the project?" in received_content[0], "agent must receive original content"
-    assert response == "test response", "_handle_message must return full response string"
+    response_text = response[0] if isinstance(response, tuple) else response
+    assert response_text == "test response", "_handle_message must return full response string"
 
     # WebSocket frames
     chunk_frames = [f for f in sent if f.get("type") == "chunk"]
@@ -269,7 +270,8 @@ async def test_db_stores_original_not_prefixed(tmp_path, monkeypatch):
         memory_context=memory_context,
     )
 
-    store.append_message("conv1", str(uuid.uuid4()), "agent", response)
+    response_text = response[0] if isinstance(response, tuple) else response
+    store.append_message("conv1", str(uuid.uuid4()), "agent", response_text)
 
     msgs = store.get_conversation_messages("conv1")
     user_msgs = [m for m in msgs if m["role"] == "user"]

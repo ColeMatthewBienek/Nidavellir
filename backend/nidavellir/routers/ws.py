@@ -108,12 +108,11 @@ async def _handle_message(
     provider_id: str,
     model_id: str | None,
     memory_context: str = "",
-) -> str:
+) -> tuple[str, object]:
     """Runs one full agent turn.
 
-    Prepends memory_context to the outbound prompt but never persists it.
-    Returns the full agent response string. Does NOT persist messages.
-    All exceptions are caught and sent as error frames.
+    Returns (full_response_text, agent_instance).
+    Caller must kill the agent. Does NOT persist messages.
     """
     agent = None
     response_parts: list[str] = []
@@ -130,16 +129,60 @@ async def _handle_message(
             await ws.send_json({"type": "chunk", "content": chunk})
 
         await ws.send_json({"type": "done"})
-        return "".join(response_parts)
+        return "".join(response_parts), agent
     except Exception as exc:
         await ws.send_json({"type": "error", "message": str(exc)})
-        return ""
-    finally:
-        if agent is not None:
-            try:
-                await agent.kill()
-            except Exception:
-                pass
+        return "", agent
+    # Note: caller handles kill so usage can be read first
+
+
+async def _ingest_turn_usage(
+    agent,
+    provider_id: str,
+    model_id: str,
+    session_id: str,
+    token_store,
+) -> dict | None:
+    """Read usage from agent, store record, return context totals dict."""
+    if token_store is None:
+        return None
+    try:
+        from nidavellir.tokens.adapters import (
+            parse_codex_token_lines,
+            parse_ollama_done,
+            parse_claude_jsonl_entry,
+            ProviderUsageResult,
+        )
+        from nidavellir.tokens.ingestion import ingest_provider_response
+        from nidavellir.tokens.claude_reader import read_latest_claude_usage
+
+        usage: ProviderUsageResult | None = None
+        request_id = str(uuid.uuid4())
+
+        if provider_id == "claude":
+            entry = await read_latest_claude_usage(cwd=WORKDIR)
+            if entry:
+                usage = parse_claude_jsonl_entry(entry)
+                if usage and usage.request_id:
+                    request_id = usage.request_id
+        elif provider_id == "codex" and hasattr(agent, "get_usage"):
+            raw = agent.get_usage()
+            if raw:
+                usage = parse_codex_token_lines(raw.get("input_tokens"), raw.get("output_tokens"))
+        elif provider_id == "ollama" and hasattr(agent, "get_usage"):
+            raw = agent.get_usage()
+            if raw:
+                usage = parse_ollama_done({"prompt_eval_count": raw.get("input_tokens"),
+                                           "eval_count": raw.get("output_tokens"),
+                                           "model": model_id, "done": True})
+
+        if usage is None:
+            usage = ProviderUsageResult(accurate=False)
+
+        ingest_provider_response(token_store, request_id, usage, finish_reason="end_turn")
+        return token_store.session_totals(session_id)
+    except Exception:
+        return None
 
 
 @router.websocket("/api/ws")
@@ -207,10 +250,44 @@ async def chat_websocket(ws: WebSocket) -> None:
                             session_id=conversation_id,
                         )
 
-                response = await _handle_message(
+                response, agent = await _handle_message(
                     ws, content, provider_id, model_id or None,
                     memory_context=memory_context,
                 )
+
+                # Read token usage from agent before killing it
+                token_store = getattr(ws.app.state, "token_store", None)
+                session_totals = await _ingest_turn_usage(
+                    agent=agent,
+                    provider_id=provider_id,
+                    model_id=model_id or DEFAULT_MODEL,
+                    session_id=conversation_id or "default",
+                    token_store=token_store,
+                )
+
+                # Kill agent after usage is read
+                if agent is not None:
+                    try:
+                        await agent.kill()
+                    except Exception:
+                        pass
+
+                # Send context_update so frontend can refresh ContextPanel
+                if session_totals is not None:
+                    total_tokens = (
+                        (session_totals.get("total_input") or 0)
+                        + (session_totals.get("total_output") or 0)
+                    )
+                    try:
+                        await ws.send_json({
+                            "type":          "context_update",
+                            "session_id":    conversation_id,
+                            "current_tokens": total_tokens,
+                            "model":         model_id or DEFAULT_MODEL,
+                            "provider":      provider_id,
+                        })
+                    except Exception:
+                        pass
 
                 if store is not None and conversation_id is not None and response:
                     store.append_message(

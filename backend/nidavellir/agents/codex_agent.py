@@ -27,6 +27,17 @@ class CodexAgent(CLIAgent):
     def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
         super().__init__(slot_id, workdir, model_id=model_id)
         self._process: asyncio.subprocess.Process | None = None
+        self._last_input_tokens:  int | None = None
+        self._last_output_tokens: int | None = None
+
+    def get_usage(self) -> dict | None:
+        if self._last_input_tokens is None and self._last_output_tokens is None:
+            return None
+        return {
+            "input_tokens":  self._last_input_tokens,
+            "output_tokens": self._last_output_tokens,
+            "accurate":      self._last_input_tokens is not None,
+        }
 
     @property
     def cmd(self) -> list[str]:
@@ -95,8 +106,16 @@ class CodexAgent(CLIAgent):
             if line.startswith("warning:"):
                 continue
 
-            # ── Footer: stop at 'tokens used' ────────────────────────────────
+            # ── Footer: capture token counts then stop ────────────────────────
             if line.strip() == "tokens used":
+                # Next two non-empty lines are input and output token counts
+                try:
+                    in_line  = (await self._process.stdout.readline()).decode(errors="replace").strip()
+                    out_line = (await self._process.stdout.readline()).decode(errors="replace").strip()
+                    self._last_input_tokens  = int(in_line.replace(",", ""))
+                    self._last_output_tokens = int(out_line.replace(",", ""))
+                except Exception:
+                    pass
                 break
 
             # ── Role labels: 'user' skips, 'codex' starts response ────────────

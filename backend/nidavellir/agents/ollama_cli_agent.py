@@ -19,6 +19,17 @@ class OllamaCliAgent(CLIAgent):
         super().__init__(slot_id, workdir, model_id=model_id)
         self._client: httpx.AsyncClient | None = None
         self._prompt: str | None = None
+        self._last_done_payload: dict | None = None
+
+    def get_usage(self) -> dict | None:
+        p = self._last_done_payload
+        if not p:
+            return None
+        return {
+            "input_tokens":  p.get("prompt_eval_count"),
+            "output_tokens": p.get("eval_count"),
+            "accurate":      p.get("prompt_eval_count") is not None,
+        }
 
     @property
     def cmd(self) -> list[str]:
@@ -61,6 +72,7 @@ class OllamaCliAgent(CLIAgent):
                 if chunk:
                     yield chunk
                 if data.get("done"):
+                    self._last_done_payload = data
                     break
 
     async def kill(self) -> None:

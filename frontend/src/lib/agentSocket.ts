@@ -7,6 +7,25 @@ let _ws: WebSocket | null = null;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _agentMessageOpen = false;
 
+async function _fetchContextUsage(sessionId: string, model: string, provider: string): Promise<void> {
+  try {
+    const params = new URLSearchParams({ session_id: sessionId, model, provider });
+    const resp = await fetch(`${API_BASE}/api/context/usage?${params}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    useAgentStore.getState().setContextUsage({
+      model:         data.model,
+      currentTokens: data.currentTokens,
+      usableTokens:  data.usableTokens,
+      totalLimit:    data.contextLimit,
+      reserved:      data.reservedOutputTokens,
+      accurate:      data.accuracy === "accurate",
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
 async function _fetchMemories(): Promise<void> {
   try {
     const resp = await fetch(`${API_BASE}/api/memory/?workflow=chat&limit=12`);
@@ -27,7 +46,16 @@ function connect(): void {
   };
 
   ws.onmessage = (event: MessageEvent) => {
-    let data: { type: string; content?: string; message?: string; conversation_id?: string };
+    let data: {
+      type: string;
+      content?: string;
+      message?: string;
+      conversation_id?: string;
+      current_tokens?: number;
+      model?: string;
+      provider?: string;
+      session_id?: string;
+    };
     try {
       data = JSON.parse(event.data as string);
     } catch {
@@ -40,6 +68,14 @@ function connect(): void {
           s.setConversationId(data.conversation_id as string);
           _fetchMemories().catch(() => {});
         }
+        break;
+
+      case "context_update":
+        _fetchContextUsage(
+          data.session_id ?? "",
+          data.model ?? "claude-sonnet-4-6",
+          data.provider ?? "claude",
+        ).catch(() => {});
         break;
 
       case "chunk":
