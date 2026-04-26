@@ -17,6 +17,34 @@ DEFAULT_PROVIDER = "claude"
 DEFAULT_MODEL    = "claude-sonnet-4-6"
 WORKDIR          = Path(os.environ.get("NIDAVELLIR_WORKDIR", "./workspace"))
 
+
+def _build_session_ready(
+    *,
+    provider_id: str,
+    model_id: str,
+    conversation_id: str,
+) -> dict:
+    return {
+        "type":            "session_ready",
+        "provider_id":     provider_id,
+        "model_id":        model_id,
+        "conversation_id": conversation_id,
+    }
+
+
+def _build_context_update(
+    *,
+    conversation_id: str | None,
+    model: str,
+    provider: str,
+) -> dict:
+    return {
+        "type":            "context_update",
+        "conversation_id": conversation_id,
+        "model":           model,
+        "provider":        provider,
+    }
+
 _EXTRACTION_MODEL = "claude-haiku-4-5"
 
 _EXTRACTION_PROMPT = """\
@@ -225,12 +253,17 @@ async def chat_websocket(ws: WebSocket) -> None:
                     except Exception:
                         pass
 
-                await ws.send_json({
-                    "type":            "session_ready",
-                    "provider_id":     provider_id,
-                    "model_id":        model_id,
-                    "conversation_id": conversation_id,
-                })
+                await ws.send_json(_build_session_ready(
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    conversation_id=conversation_id,
+                ))
+                # Emit context_update so frontend refreshes pressure for new provider/model
+                await ws.send_json(_build_context_update(
+                    conversation_id=conversation_id,
+                    model=model_id,
+                    provider=provider_id,
+                ))
 
             elif msg_type == "message":
                 content = data.get("content", "").strip()

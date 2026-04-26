@@ -132,9 +132,11 @@ export function initSocket(): void {
   connect();
 }
 
-export function sendNewSession(providerId: string, modelId: string): void {
+export function sendNewSession(providerId: string, modelId: string, conversationId?: string | null): void {
   if (_ws?.readyState !== WebSocket.OPEN) return;
-  _ws.send(JSON.stringify({ type: "new_session", provider_id: providerId, model_id: modelId }));
+  const payload: Record<string, string> = { type: "new_session", provider_id: providerId, model_id: modelId };
+  if (conversationId) payload.conversation_id = conversationId;
+  _ws.send(JSON.stringify(payload));
 }
 
 export function sendMessage(content: string): void {

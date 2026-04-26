@@ -110,6 +110,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const selectedProvider = useAgentStore((s) => s.selectedProvider);
   const setSelectedModel = useAgentStore((s) => s.setSelectedModel);
   const connectionStatus = useAgentStore((s) => s.connectionStatus);
+  const conversationId   = useAgentStore((s) => s.conversationId);
   const { byProvider, loading } = useAgentModels();
 
   const [open, setOpen]       = useState(false);
@@ -157,7 +158,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
     if (!model.available) return;
     setSelectedModel(model.id);
     setOpen(false);
-    sendNewSession(model.provider_id, model.model_id);
+    sendNewSession(model.provider_id, model.model_id, conversationId);
   };
 
   const dotColor =
