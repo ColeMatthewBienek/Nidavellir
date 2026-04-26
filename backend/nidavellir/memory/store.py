@@ -139,6 +139,11 @@ class MemoryStore:
                 warnings.warn(f"VectorStore init failed, running without embeddings: {exc}")
         self._init_schema()
 
+    @property
+    def vector_store(self):
+        """Public accessor for the optional VectorStore instance (may be None)."""
+        return self._vector_store
+
     # ── Schema ────────────────────────────────────────────────────────────────
 
     def _init_schema(self) -> None:

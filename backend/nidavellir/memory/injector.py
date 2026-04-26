@@ -9,6 +9,11 @@ from .context_pack import (
 )
 from .store import MemoryStore
 
+# Lazy import: retrieval module may not be available in all test environments
+def _get_search_vectors():
+    from .retrieval import search_vectors
+    return search_vectors
+
 logger = logging.getLogger(__name__)
 
 # ── Retrieval thresholds ──────────────────────────────────────────────────────
@@ -111,6 +116,30 @@ def select_memories(
     return selected
 
 
+# ── Vector observation (Phase 2B — log only, no injection) ───────────────────
+
+def _observe_vectors(store: MemoryStore, query: str, fts_count: int) -> None:
+    """Run vector search and log results. Never modifies selection or scoring."""
+    if not query or not query.strip():
+        return
+    try:
+        search_vectors = _get_search_vectors()
+        vector_results = search_vectors(store, query)
+    except Exception:
+        vector_results = []
+
+    store.log_event(
+        event_type="vector_searched",
+        event_subject="retrieval",
+        payload={
+            "query":                query[:200],
+            "top_results":          vector_results[:5],
+            "fts_results_count":    fts_count,
+            "vector_results_count": len(vector_results),
+        },
+    )
+
+
 # ── Side-effecting API ────────────────────────────────────────────────────────
 
 def get_context_pack(
@@ -138,7 +167,7 @@ def get_context_pack(
     selected_ids = [m["id"] for m in selected]
     store.mark_memories_used(selected_ids)
 
-    # 3. Determine retrieval reason and log fallback when applicable
+    # 3. Determine retrieval reason, log fallback, run vector observation
     if query and query.strip():
         fts_probe = store.search_fts(query, workflow, limit=1)
         if fts_probe and fts_probe[0].get("relevance_score", 0) <= FTS_SCORE_THRESHOLD:
@@ -150,6 +179,7 @@ def get_context_pack(
                 event_subject="retrieval",
                 payload={"query": query, "reason": "fallback_recency"},
             )
+        fts_count = len(fts_probe)
     else:
         retrieval_reason = "fallback_recency"
         store.log_event(
@@ -157,8 +187,12 @@ def get_context_pack(
             event_subject="retrieval",
             payload={"query": query, "reason": "fallback_recency"},
         )
+        fts_count = 0
 
-    # 4. Log injection events and build pack
+    # 4. Vector search — observational only, logged, DOES NOT affect selection
+    _observe_vectors(store, query, fts_count)
+
+    # 5. Log injection events and build pack
     pack = ContextPack()
     for rank, m in enumerate(selected, start=1):
         if pack.try_add(m):

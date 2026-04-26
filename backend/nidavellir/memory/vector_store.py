@@ -46,6 +46,21 @@ class VectorStore:
             ],
         )
 
+    def search(self, query_embedding: list[float], limit: int = 20) -> list:
+        """Return ScoredPoint list ordered by cosine similarity (descending).
+
+        Uses query_points (qdrant-client >= 1.7; `search` was removed in 1.9+).
+        with_payload=True is required — without it r.payload is empty and
+        memory_id cannot be recovered.
+        """
+        response = self._client.query_points(
+            collection_name=COLLECTION,
+            query=query_embedding,
+            limit=limit,
+            with_payload=True,
+        )
+        return response.points
+
     def get_by_memory_id(self, memory_id: str) -> dict | None:
         """Retrieve a point by its original string memory_id."""
         results = self._client.retrieve(

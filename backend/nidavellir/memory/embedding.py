@@ -20,3 +20,8 @@ def embed(text: str, model: str = DEFAULT_EMBED_MODEL) -> list[float]:
     )
     resp.raise_for_status()
     return resp.json()["embedding"]
+
+
+def embed_query(text: str, model: str = DEFAULT_EMBED_MODEL) -> list[float]:
+    """Embed a query string. Thin alias over embed() for semantic clarity."""
+    return embed(text, model)
