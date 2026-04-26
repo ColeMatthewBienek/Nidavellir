@@ -80,15 +80,15 @@ test.describe('Dropdown opens and shows models from API', () => {
     await expect(page.locator('[data-testid="provider-dropdown"]')).toContainText('Codex');
   });
 
-  test('codex model o4-mini shows "not found" (available: false)', async ({ page }) => {
+  test('codex model GPT-5.4 shows "not found" (available: false)', async ({ page }) => {
     await page.locator('[data-testid="provider-btn"]').click();
-    const codexRow = page.locator('[data-testid="provider-option-codex:o4-mini"]');
+    const codexRow = page.locator('[data-testid="provider-option-codex:gpt-5.4"]');
     await expect(codexRow).toContainText('not found');
   });
 
   test('codex model button is disabled', async ({ page }) => {
     await page.locator('[data-testid="provider-btn"]').click();
-    await expect(page.locator('[data-testid="provider-option-codex:o4-mini"]')).toBeDisabled();
+    await expect(page.locator('[data-testid="provider-option-codex:gpt-5.4"]')).toBeDisabled();
   });
 
   test('dropdown shows the Ollama section header (Qwen shortName)', async ({ page }) => {
@@ -158,7 +158,7 @@ test.describe('Model selection', () => {
   test('clicking disabled codex model does NOT change selection', async ({ page }) => {
     await page.locator('[data-testid="provider-btn"]').click();
     // Force-click disabled button to confirm it does nothing
-    await page.locator('[data-testid="provider-option-codex:o4-mini"]').click({ force: true });
+    await page.locator('[data-testid="provider-option-codex:gpt-5.4"]').click({ force: true });
     // Still shows Claude icon
     await expect(page.locator('[data-testid="provider-btn"]')).toContainText('◆');
   });
@@ -215,7 +215,7 @@ test.describe('Model data integrity', () => {
     await expect(sonnet).toBeEnabled();
 
     // Unavailable codex model is disabled
-    const codex = page.locator('[data-testid="provider-option-codex:o4-mini"]');
+    const codex = page.locator('[data-testid="provider-option-codex:gpt-5.4"]');
     await expect(codex).toBeDisabled();
 
     // Ollama is available and shows local/free label

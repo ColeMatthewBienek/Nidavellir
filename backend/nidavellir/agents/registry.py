@@ -211,10 +211,15 @@ PROVIDER_REGISTRY: dict[str, ProviderManifest] = _build_registry()
 VALID_PROVIDERS:   list[str]                    = list(PROVIDER_REGISTRY.keys())
 
 
-def make_agent(provider_type: str, slot_id: int, workdir: Path) -> "CLIAgent":
+def make_agent(
+    provider_type: str,
+    slot_id: int,
+    workdir: Path,
+    model_id: str | None = None,
+) -> "CLIAgent":
     manifest = PROVIDER_REGISTRY.get(provider_type)
     if manifest is None:
         raise ValueError(
             f"Unknown provider: {provider_type!r}. Valid: {VALID_PROVIDERS}"
         )
-    return manifest.agent_class(slot_id=slot_id, workdir=workdir)
+    return manifest.agent_class(slot_id=slot_id, workdir=workdir, model_id=model_id)

@@ -62,22 +62,32 @@ CLAUDE_MODELS: list[AgentModelDef] = [
 ]
 
 # ── Codex models ──────────────────────────────────────────────────────────────
+# Verified against `codex debug models` — these slugs work with ChatGPT accounts.
+# o4-mini / o3 are API-key-only and return HTTP 400 for ChatGPT account users.
 
 CODEX_MODELS: list[AgentModelDef] = [
     AgentModelDef(
-        id="codex:o4-mini",
+        id="codex:gpt-5.4",
         provider_id="codex",
-        model_id="o4-mini",
-        display_name="o4-mini",
-        description="Fast reasoning model via Codex CLI. Best for straightforward coding tasks.",
+        model_id="gpt-5.4",
+        display_name="GPT-5.4",
+        description="Codex default — most capable model for complex coding tasks.",
         cost_tier="subscription",
     ),
     AgentModelDef(
-        id="codex:o3",
+        id="codex:gpt-5.4-mini",
         provider_id="codex",
-        model_id="o3",
-        display_name="o3",
-        description="Powerful reasoning model via Codex CLI. Best for complex multi-step tasks.",
+        model_id="gpt-5.4-mini",
+        display_name="GPT-5.4 Mini",
+        description="Faster, lighter GPT-5.4 variant. Best for quick edits and boilerplate.",
+        cost_tier="subscription",
+    ),
+    AgentModelDef(
+        id="codex:gpt-5.3-codex",
+        provider_id="codex",
+        model_id="gpt-5.3-codex",
+        display_name="GPT-5.3 Codex",
+        description="Previous-generation coding model. Stable and well-tested.",
         cost_tier="subscription",
     ),
 ]

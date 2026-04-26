@@ -10,8 +10,8 @@ from .base import CLIAgent
 class ClaudeAgent(CLIAgent):
     provider_type: ClassVar[str] = "claude"
 
-    def __init__(self, slot_id: int, workdir: Path) -> None:
-        super().__init__(slot_id, workdir)
+    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
+        super().__init__(slot_id, workdir, model_id=model_id)
         self._process: asyncio.subprocess.Process | None = None
 
     @property
@@ -19,6 +19,8 @@ class ClaudeAgent(CLIAgent):
         from nidavellir.agents.registry import PROVIDER_REGISTRY
         manifest = PROVIDER_REGISTRY["claude"]
         base = ["claude", "--print"]
+        if self.model_id:
+            base += ["--model", self.model_id]
         for flag in manifest.extra_flags:
             if flag not in base:
                 base.append(flag)
@@ -38,7 +40,7 @@ class ClaudeAgent(CLIAgent):
         if self._process and self._process.stdin:
             self._process.stdin.write((text + "\n").encode())
             await self._process.stdin.drain()
-            self._process.stdin.close()  # signal EOF so Claude starts processing
+            self._process.stdin.close()
 
     async def stream(self) -> AsyncIterator[str]:
         if not self._process or not self._process.stdout:
@@ -54,7 +56,7 @@ class ClaudeAgent(CLIAgent):
             try:
                 self._process.terminate()
             except ProcessLookupError:
-                pass  # process already exited — fine
+                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except asyncio.TimeoutError:

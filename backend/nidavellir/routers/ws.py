@@ -12,13 +12,15 @@ DEFAULT_MODEL    = "claude-sonnet-4-6"
 WORKDIR          = Path(os.environ.get("NIDAVELLIR_WORKDIR", "./workspace"))
 
 
-async def _handle_message(ws: WebSocket, content: str, provider_id: str) -> None:
+async def _handle_message(
+    ws: WebSocket, content: str, provider_id: str, model_id: str | None
+) -> None:
     """Runs one full agent turn. All exceptions are caught and sent as error frames.
     Kill failures are swallowed so they never propagate to the connection loop."""
     agent = None
     try:
         WORKDIR.mkdir(parents=True, exist_ok=True)
-        agent = make_agent(provider_id, slot_id=0, workdir=WORKDIR)
+        agent = make_agent(provider_id, slot_id=0, workdir=WORKDIR, model_id=model_id)
         await agent.start()
         await agent.send(content)
         async for chunk in agent.stream():
@@ -63,7 +65,7 @@ async def chat_websocket(ws: WebSocket) -> None:
                 content = data.get("content", "").strip()
                 if not content:
                     continue
-                await _handle_message(ws, content, provider_id)
+                await _handle_message(ws, content, provider_id, model_id or None)
 
     except WebSocketDisconnect:
         pass

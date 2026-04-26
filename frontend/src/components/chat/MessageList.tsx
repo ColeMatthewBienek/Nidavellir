@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgentStore } from "@/store/agentStore";
 import type { Message } from "@/store/agentStore";
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 // ── ThinkingBubble ────────────────────────────────────────────────────────────
 
@@ -62,7 +63,8 @@ function MessageBubble({ message }: { message: Message }) {
     return <ThinkingBubble />;
   }
 
-  const parts = message.content.split(/(```[\s\S]*?```)/g);
+  // parts only needed for user bubble (plain text, no markdown parsing)
+  const parts = isUser ? message.content.split(/(```[\s\S]*?```)/g) : [];
 
   return (
     <div style={{
@@ -117,7 +119,7 @@ function MessageBubble({ message }: { message: Message }) {
             borderRadius: '12px 12px 12px 4px',
             padding: '8px 12px',
           }}>
-            {renderParts(parts)}
+            <MarkdownRenderer content={message.content} />
             {message.streaming && (
               <span style={{ color: 'var(--grn)', animation: 'nidBlink 1s step-start infinite' }}>▋</span>
             )}

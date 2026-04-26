@@ -9,8 +9,8 @@ from .base import CLIAgent
 class OllamaCliAgent(CLIAgent):
     provider_type: ClassVar[str] = "ollama"
 
-    def __init__(self, slot_id: int, workdir: Path) -> None:
-        super().__init__(slot_id, workdir)
+    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
+        super().__init__(slot_id, workdir, model_id=model_id)
 
     @property
     def cmd(self) -> list[str]:

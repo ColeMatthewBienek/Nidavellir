@@ -10,9 +10,10 @@ AgentStatus = Literal["idle", "starting", "running", "stopping", "dead"]
 class CLIAgent(ABC):
     provider_type: ClassVar[str] = "unknown"
 
-    def __init__(self, slot_id: int, workdir: Path) -> None:
-        self.slot_id = slot_id
-        self.workdir = workdir
+    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
+        self.slot_id  = slot_id
+        self.workdir  = workdir
+        self.model_id = model_id
         self.status: AgentStatus = "idle"
 
     @abstractmethod
