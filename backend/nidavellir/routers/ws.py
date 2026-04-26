@@ -272,22 +272,18 @@ async def chat_websocket(ws: WebSocket) -> None:
                     except Exception:
                         pass
 
-                # Send context_update so frontend can refresh ContextPanel
-                if session_totals is not None:
-                    total_tokens = (
-                        (session_totals.get("total_input") or 0)
-                        + (session_totals.get("total_output") or 0)
-                    )
-                    try:
-                        await ws.send_json({
-                            "type":          "context_update",
-                            "session_id":    conversation_id,
-                            "current_tokens": total_tokens,
-                            "model":         model_id or DEFAULT_MODEL,
-                            "provider":      provider_id,
-                        })
-                    except Exception:
-                        pass
+                # Signal the frontend to refresh context pressure from payload
+                # Do NOT compute current_tokens here — the API endpoint calculates
+                # it correctly from conversation_messages (the next request payload).
+                try:
+                    await ws.send_json({
+                        "type":            "context_update",
+                        "conversation_id": conversation_id,
+                        "model":           model_id or DEFAULT_MODEL,
+                        "provider":        provider_id,
+                    })
+                except Exception:
+                    pass
 
                 if store is not None and conversation_id is not None and response:
                     store.append_message(

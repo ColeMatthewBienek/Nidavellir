@@ -6,6 +6,24 @@ from datetime import datetime, UTC
 from .model_limits import get_model_limits
 
 
+# Chars-per-token approximation. Real tokenizers vary but 4 is a well-established
+# heuristic for English/code content across OpenAI and Anthropic models.
+_CHARS_PER_TOKEN = 4
+
+
+def estimate_payload_tokens(messages: list[dict]) -> int:
+    """Estimate token count for the given conversation messages.
+
+    This represents the size of the next provider request payload, which is
+    what the context window limit is actually evaluated against.
+
+    Uses character-count heuristic (len(content) // chars_per_token).
+    Does NOT touch historical token_usage_records.
+    """
+    total_chars = sum(len(m.get("content", "")) for m in messages)
+    return total_chars // _CHARS_PER_TOKEN
+
+
 @dataclass
 class ContextPressure:
     model:                  str

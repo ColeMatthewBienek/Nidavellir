@@ -23,17 +23,33 @@ def _token_store(request: Request):
 
 @router.get("/api/context/usage")
 def context_usage(
-    request:  Request,
-    session_id: str = "",
-    model:      str = "claude-sonnet-4-6",
-    provider:   str = "anthropic",
+    request:         Request,
+    conversation_id: str = "",
+    session_id:      str = "",   # kept for backward compat — ignored for pressure calc
+    model:           str = "claude-sonnet-4-6",
+    provider:        str = "anthropic",
 ):
-    store = _token_store(request)
+    """Calculate context pressure from the next request payload.
 
-    totals = store.session_totals(session_id) if session_id else {"total_input": 0, "total_output": 0}
-    current = (totals.get("total_input") or 0) + (totals.get("total_output") or 0)
+    Uses conversation messages (the actual content that will be sent to the provider),
+    NOT accumulated session token totals from historical records.
+    """
+    from nidavellir.tokens.context_meter import estimate_payload_tokens
 
-    accuracy = "accurate" if totals.get("record_count", 0) > 0 else "unknown"
+    # Resolve conversation messages from memory store
+    messages: list[dict] = []
+    conv_id = conversation_id or session_id
+    if conv_id:
+        try:
+            memory_store = request.app.state.memory_store
+            messages = memory_store.get_conversation_messages(conv_id)
+        except Exception:
+            pass
+
+    # Count tokens from the actual payload — this is what the context window evaluates
+    current = estimate_payload_tokens(messages)
+    accuracy = "estimated"  # local heuristic; becomes "accurate" when provider pre-counts
+
     pressure = compute_context_pressure(current, model, provider, accuracy=accuracy)
 
     return {

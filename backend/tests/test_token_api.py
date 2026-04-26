@@ -70,26 +70,29 @@ async def test_context_usage_response_shape(tmp_path):
 
 @pytest.mark.asyncio
 async def test_context_usage_state_correct(tmp_path):
-    store = _store(tmp_path)
-    # Insert small usage → should be ok state
-    _insert(store, input_t=100, output_t=50)
+    """No conversation_id → no payload → zero tokens → ok state."""
+    _store(tmp_path)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        r = await c.get("/api/context/usage?session_id=s1&model=claude-sonnet-4-6&provider=anthropic")
+        r = await c.get("/api/context/usage?model=claude-sonnet-4-6&provider=anthropic")
     body = r.json()
     assert body["state"] == "ok"
-    assert body["currentTokens"] == 150  # sum of session tokens
+    # Without a conversation_id, payload is empty — currentTokens must be 0
+    assert body["currentTokens"] == 0
 
 
 @pytest.mark.asyncio
 async def test_context_usage_not_from_historical_totals(tmp_path):
+    """Historical token records must NOT influence context pressure calculation."""
     store = _store(tmp_path)
-    # Other sessions must not affect current session
-    _insert(store, session_id="other", input_t=99999, output_t=99999)
-    _insert(store, session_id="s1", input_t=100, output_t=50)
+    # Insert huge historical records — must be ignored by context/usage
+    _insert(store, session_id="s1", input_t=99999, output_t=99999)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        r = await c.get("/api/context/usage?session_id=s1&model=claude-sonnet-4-6&provider=anthropic")
+        # No conversation_id → payload is empty regardless of historical records
+        r = await c.get("/api/context/usage?model=claude-sonnet-4-6&provider=anthropic")
     body = r.json()
-    assert body["currentTokens"] == 150  # only s1 counts
+    assert body["currentTokens"] == 0, (
+        "Historical token records must not influence context pressure"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

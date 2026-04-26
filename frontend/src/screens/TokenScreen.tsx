@@ -29,7 +29,7 @@ export function TokenScreen() {
   // Refresh context usage when screen opens
   useEffect(() => {
     const params = new URLSearchParams({
-      session_id: conversationId ?? '',
+      conversation_id: conversationId ?? '',
       model:      modelLabel,
       provider,
     });

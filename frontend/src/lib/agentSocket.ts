@@ -7,9 +7,9 @@ let _ws: WebSocket | null = null;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _agentMessageOpen = false;
 
-async function _fetchContextUsage(sessionId: string, model: string, provider: string): Promise<void> {
+async function _fetchContextUsage(conversationId: string, model: string, provider: string): Promise<void> {
   try {
-    const params = new URLSearchParams({ session_id: sessionId, model, provider });
+    const params = new URLSearchParams({ conversation_id: conversationId, model, provider });
     const resp = await fetch(`${API_BASE}/api/context/usage?${params}`);
     if (!resp.ok) return;
     const data = await resp.json();
@@ -72,7 +72,7 @@ function connect(): void {
 
       case "context_update":
         _fetchContextUsage(
-          data.session_id ?? "",
+          data.conversation_id ?? "",
           data.model ?? "claude-sonnet-4-6",
           data.provider ?? "claude",
         ).catch(() => {});
