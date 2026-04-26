@@ -7,12 +7,19 @@ import { ContextPanel } from '../components/chat/ContextPanel';
 import { MessageList } from '../components/chat/MessageList';
 import { AgentSelector } from '../components/chat/AgentSelector';
 import { useAgentStore } from '../store/agentStore';
-import { sendMessage } from '../lib/agentSocket';
+import { sendMessage, sendNewSession } from '../lib/agentSocket';
 
 export function ChatScreen() {
-  const addMessage   = useAgentStore((s) => s.addMessage);
+  const addMessage    = useAgentStore((s) => s.addMessage);
   const clearMessages = useAgentStore((s) => s.clearMessages);
-  const isStreaming  = useAgentStore((s) => s.isStreaming);
+  const isStreaming   = useAgentStore((s) => s.isStreaming);
+  const selectedModel = useAgentStore((s) => s.selectedModel);
+
+  const startNewChat = () => {
+    clearMessages();
+    const [providerId, ...rest] = selectedModel.split(':');
+    sendNewSession(providerId, rest.join(':'));
+  };
 
   const [input, setInput]     = useState('');
   const [ctxOpen, setCtxOpen] = useState(true);
@@ -65,7 +72,7 @@ export function ChatScreen() {
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       {/* Thread list — structure preserved; thread items are a future spec */}
-      <SecPanel title="Threads" action="+" onAction={() => {}}>
+      <SecPanel title="Threads" action="+" onAction={startNewChat}>
         <div />
       </SecPanel>
 
