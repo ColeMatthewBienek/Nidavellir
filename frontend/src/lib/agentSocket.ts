@@ -1,10 +1,22 @@
 import { useAgentStore } from "@/store/agentStore";
 
-const WS_URL = "ws://localhost:7430/api/ws";
+const WS_URL      = "ws://localhost:7430/api/ws";
+const API_BASE    = "http://localhost:7430";
 
 let _ws: WebSocket | null = null;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _agentMessageOpen = false;
+
+async function _fetchMemories(): Promise<void> {
+  try {
+    const resp = await fetch(`${API_BASE}/api/memory/?workflow=chat&limit=12`);
+    if (!resp.ok) return;
+    const memories = await resp.json();
+    useAgentStore.getState().setMemories(memories);
+  } catch {
+    // non-fatal — memory panel just shows stale data
+  }
+}
 
 function connect(): void {
   const ws = new WebSocket(WS_URL);
@@ -15,7 +27,7 @@ function connect(): void {
   };
 
   ws.onmessage = (event: MessageEvent) => {
-    let data: { type: string; content?: string; message?: string };
+    let data: { type: string; content?: string; message?: string; conversation_id?: string };
     try {
       data = JSON.parse(event.data as string);
     } catch {
@@ -23,6 +35,13 @@ function connect(): void {
     }
     const s = useAgentStore.getState();
     switch (data.type) {
+      case "session_ready":
+        if (data.conversation_id) {
+          s.setConversationId(data.conversation_id as string);
+          _fetchMemories().catch(() => {});
+        }
+        break;
+
       case "chunk":
         if (!_agentMessageOpen) {
           // First chunk of a new response — create the agent bubble

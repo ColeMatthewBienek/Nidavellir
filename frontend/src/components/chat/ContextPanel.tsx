@@ -1,14 +1,10 @@
 import { useState } from 'react';
+import { useAgentStore } from '@/store/agentStore';
 
 const CTX_FILES_INIT = [
   { name: 'backend/auth.py',     lines: 87,  lang: 'py' },
   { name: 'backend/api/auth.py', lines: 34,  lang: 'py' },
   { name: 'tests/test_auth.py',  lines: 156, lang: 'py' },
-];
-
-const CTX_MEMORY_HITS = [
-  'JWT implementation pattern — session 2024-03',
-  'Redis rate-limiting pattern from infra runbook',
 ];
 
 interface ContextPanelProps {
@@ -17,6 +13,7 @@ interface ContextPanelProps {
 
 export function ContextPanel({ onClose }: ContextPanelProps) {
   const [files, setFiles] = useState(CTX_FILES_INIT);
+  const memories = useAgentStore((s) => s.memories);
 
   return (
     <div style={{
@@ -67,14 +64,22 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
 
         {/* Memory */}
         <div>
-          <div style={{ fontSize: 10, color: 'var(--t1)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.6px' }}>Memory hits</div>
-          {CTX_MEMORY_HITS.map((m, i) => (
-            <div key={i} style={{
-              fontSize: 11, color: 'var(--t1)', lineHeight: 1.65,
-              padding: '7px 9px', borderRadius: 4, background: 'var(--bg0)',
-              border: '1px solid var(--bd)', marginBottom: 4,
-            }}>{m}</div>
-          ))}
+          <div style={{ fontSize: 10, color: 'var(--t1)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.6px' }}>
+            Memory hits {memories.length > 0 && <span style={{ color: 'var(--blu)' }}>({memories.length})</span>}
+          </div>
+          {memories.length === 0 ? (
+            <div style={{ fontSize: 11, color: 'var(--t1)', opacity: 0.5, fontStyle: 'italic' }}>
+              No memories yet
+            </div>
+          ) : (
+            memories.slice(0, 8).map((m) => (
+              <div key={m.id} style={{
+                fontSize: 11, color: 'var(--t1)', lineHeight: 1.65,
+                padding: '7px 9px', borderRadius: 4, background: 'var(--bg0)',
+                border: '1px solid var(--bd)', marginBottom: 4,
+              }}>{m.content}</div>
+            ))
+          )}
         </div>
 
         {/* Agent */}

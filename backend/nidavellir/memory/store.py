@@ -1,0 +1,485 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from typing import Iterator
+
+from .context_pack import CONFIDENCE_STORE_THRESHOLD
+
+# ── Schema DDL ────────────────────────────────────────────────────────────────
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS memories (
+    id                     TEXT PRIMARY KEY,
+    content                TEXT NOT NULL,
+    category               TEXT NOT NULL DEFAULT 'thought',
+    memory_type            TEXT NOT NULL DEFAULT 'fact',
+    workflow               TEXT NOT NULL DEFAULT 'chat',
+    scope_type             TEXT NOT NULL DEFAULT 'workflow',
+    scope_id               TEXT,
+    repo_id                TEXT,
+    repo_name              TEXT,
+    repo_root              TEXT,
+    repo_remote_url        TEXT,
+    tags                   TEXT,
+    confidence             REAL NOT NULL DEFAULT 0.7,
+    importance             INTEGER NOT NULL DEFAULT 5,
+    session_id             TEXT,
+    source_conversation_id TEXT,
+    source_message_ids     TEXT,
+    source_excerpt         TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT,
+    last_used              TEXT,
+    use_count              INTEGER NOT NULL DEFAULT 0,
+    source                 TEXT NOT NULL DEFAULT 'extracted',
+    superseded_by          TEXT,
+    deleted_at             TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_active     ON memories(superseded_by) WHERE superseded_by IS NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_workflow   ON memories(workflow);
+CREATE INDEX IF NOT EXISTS idx_memories_scope      ON memories(scope_type, scope_id);
+CREATE INDEX IF NOT EXISTS idx_memories_repo       ON memories(repo_id) WHERE repo_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_session    ON memories(session_id);
+CREATE INDEX IF NOT EXISTS idx_memories_created    ON memories(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_type       ON memories(memory_type);
+CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    content,
+    category,
+    memory_type,
+    workflow,
+    tags,
+    content='memories',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memory_fts(rowid, content, category, memory_type, workflow, tags)
+    VALUES (new.rowid, new.content, new.category, new.memory_type, new.workflow, new.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content, category, memory_type, workflow, tags)
+    VALUES ('delete', old.rowid, old.content, old.category, old.memory_type, old.workflow, old.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, content, category, memory_type, workflow, tags)
+    VALUES ('delete', old.rowid, old.content, old.category, old.memory_type, old.workflow, old.tags);
+    INSERT INTO memory_fts(rowid, content, category, memory_type, workflow, tags)
+    VALUES (new.rowid, new.content, new.category, new.memory_type, new.workflow, new.tags);
+END;
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,
+    workflow    TEXT NOT NULL DEFAULT 'chat',
+    model_id    TEXT,
+    provider_id TEXT,
+    title       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    archived    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id);
+
+CREATE TABLE IF NOT EXISTS memory_events (
+    id            TEXT PRIMARY KEY,
+    memory_id     TEXT,
+    event_subject TEXT NOT NULL DEFAULT 'memory',
+    event_type    TEXT NOT NULL,
+    session_id    TEXT,
+    payload_json  TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_events_memory  ON memory_events(memory_id);
+CREATE INDEX IF NOT EXISTS idx_memory_events_subject ON memory_events(event_subject);
+CREATE INDEX IF NOT EXISTS idx_memory_events_session ON memory_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_memory_events_type    ON memory_events(event_type);
+"""
+
+
+def _verify_fts5(conn: sqlite3.Connection) -> None:
+    """Module-level so tests can monkeypatch nidavellir.memory.store._verify_fts5."""
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_check USING fts5(x)")
+        conn.execute("DROP TABLE IF EXISTS _fts5_check")
+    except sqlite3.OperationalError as e:
+        raise RuntimeError(
+            "SQLite FTS5 is not available. Nidavellir memory requires FTS5."
+        ) from e
+
+
+class MemoryStore:
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._init_schema()
+
+    # ── Schema ────────────────────────────────────────────────────────────────
+
+    def _init_schema(self) -> None:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            _verify_fts5(conn)
+            conn.executescript(_DDL)
+            conn.commit()
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # ── Event logging — the only write path for memory_events ────────────────
+
+    def log_event(
+        self,
+        event_type: str,
+        memory_id: str | None = None,
+        event_subject: str = "memory",
+        session_id: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO memory_events
+                   (id, memory_id, event_subject, event_type, session_id, payload_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()),
+                    memory_id,
+                    event_subject,
+                    event_type,
+                    session_id,
+                    json.dumps(payload) if payload else None,
+                ),
+            )
+
+    # ── Memory writes ─────────────────────────────────────────────────────────
+
+    def save_memories(self, memories: list[dict]) -> int:
+        saved = 0
+        for m in memories:
+            confidence = float(m.get("confidence", 0.7))
+            if confidence < CONFIDENCE_STORE_THRESHOLD:
+                self.log_event(
+                    event_type="dedup_rejected",
+                    event_subject="dedup",
+                    memory_id=None,
+                    session_id=m.get("session_id"),
+                    payload={
+                        "match_type": "low_confidence",
+                        "content_preview": str(m.get("content", ""))[:80],
+                        "confidence": confidence,
+                    },
+                )
+                continue
+
+            with self._conn() as conn:
+                conn.execute(
+                    """INSERT OR IGNORE INTO memories
+                       (id, content, category, memory_type, workflow, scope_type, scope_id,
+                        repo_id, repo_name, repo_root, repo_remote_url,
+                        tags, confidence, importance,
+                        session_id, source_conversation_id, source_message_ids, source_excerpt,
+                        source, superseded_by)
+                       VALUES
+                       (:id, :content, :category, :memory_type, :workflow, :scope_type, :scope_id,
+                        :repo_id, :repo_name, :repo_root, :repo_remote_url,
+                        :tags, :confidence, :importance,
+                        :session_id, :source_conversation_id, :source_message_ids, :source_excerpt,
+                        :source, :superseded_by)""",
+                    {
+                        "id":                    m.get("id", str(uuid.uuid4())),
+                        "content":               m["content"],
+                        "category":              m.get("category", "thought"),
+                        "memory_type":           m.get("memory_type", "fact"),
+                        "workflow":              m.get("workflow", "chat"),
+                        "scope_type":            m.get("scope_type", "workflow"),
+                        "scope_id":              m.get("scope_id"),
+                        "repo_id":               m.get("repo_id"),
+                        "repo_name":             m.get("repo_name"),
+                        "repo_root":             m.get("repo_root"),
+                        "repo_remote_url":       m.get("repo_remote_url"),
+                        "tags":                  m.get("tags", ""),
+                        "confidence":            confidence,
+                        "importance":            int(m.get("importance", 5)),
+                        "session_id":            m.get("session_id"),
+                        "source_conversation_id": m.get("source_conversation_id"),
+                        "source_message_ids":    m.get("source_message_ids"),
+                        "source_excerpt":        m.get("source_excerpt"),
+                        "source":                m.get("source", "extracted"),
+                        "superseded_by":         m.get("superseded_by"),
+                    },
+                )
+            self.log_event(
+                event_type="created",
+                memory_id=m.get("id"),
+                event_subject="memory",
+                session_id=m.get("session_id"),
+            )
+            saved += 1
+        return saved
+
+    def update_memory(self, memory_id: str, updates: dict) -> bool:
+        if not updates:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [memory_id]
+        with self._conn() as conn:
+            cursor = conn.execute(
+                f"UPDATE memories SET {set_clause}, updated_at = datetime('now') WHERE id = ?",
+                values,
+            )
+            changed = cursor.rowcount > 0
+        if changed and "superseded_by" in updates:
+            self.log_event(
+                event_type="superseded",
+                memory_id=memory_id,
+                event_subject="memory",
+            )
+        return changed
+
+    def soft_delete(self, memory_id: str) -> bool:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE memories SET deleted_at = datetime('now') WHERE id = ?",
+                (memory_id,),
+            )
+            changed = cursor.rowcount > 0
+        if changed:
+            self.log_event(event_type="deleted", memory_id=memory_id)
+        return changed
+
+    def mark_used(self, memory_ids: list[str], session_id: str | None = None) -> None:
+        if not memory_ids:
+            return
+        with self._conn() as conn:
+            for mid in memory_ids:
+                conn.execute(
+                    """UPDATE memories
+                       SET use_count = use_count + 1,
+                           last_used = datetime('now')
+                       WHERE id = ?""",
+                    (mid,),
+                )
+
+    # ── Memory reads ──────────────────────────────────────────────────────────
+
+    def get_active_memories(self, workflow: str = "chat", limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL
+                     AND deleted_at IS NULL
+                     AND (workflow = ? OR scope_type IN ('global', 'user'))
+                   ORDER BY importance DESC, use_count DESC, created_at DESC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_global_memories(self, limit: int = 200) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL
+                     AND deleted_at IS NULL
+                     AND scope_type IN ('global', 'user')
+                   ORDER BY importance DESC, created_at DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_session_memories(self, session_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL
+                     AND deleted_at IS NULL
+                     AND session_id = ?
+                   ORDER BY created_at DESC""",
+                (session_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_fts(self, query: str, workflow: str = "chat", limit: int = 10) -> list[dict]:
+        """Pure FTS search. Returns [] on empty query, bad query, or OperationalError.
+        Callers that need recency fallback must handle the [] case themselves."""
+        if not query or not query.strip():
+            return []
+
+        safe_query = _sanitize_fts_query(query)
+        if not safe_query:
+            return []
+
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    """SELECT m.*, bm25(memory_fts) AS relevance_score
+                       FROM memory_fts
+                       JOIN memories m ON memory_fts.rowid = m.rowid
+                       WHERE memory_fts MATCH ?
+                         AND m.superseded_by IS NULL
+                         AND m.deleted_at IS NULL
+                         AND (m.workflow = ? OR m.scope_type IN ('global', 'user'))
+                       ORDER BY relevance_score, m.importance DESC, m.use_count DESC
+                       LIMIT ?""",
+                    (safe_query, workflow, limit),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+
+    def _fallback_search(self, workflow: str, limit: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL
+                     AND deleted_at IS NULL
+                     AND (workflow = ? OR scope_type IN ('global', 'user'))
+                   ORDER BY importance DESC, use_count DESC, created_at DESC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Conversations ─────────────────────────────────────────────────────────
+
+    def create_conversation(
+        self,
+        id: str,
+        workflow: str = "chat",
+        model_id: str | None = None,
+        provider_id: str | None = None,
+    ) -> dict:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO conversations
+                   (id, workflow, model_id, provider_id)
+                   VALUES (?, ?, ?, ?)""",
+                (id, workflow, model_id, provider_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (id,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def append_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO conversation_messages
+                   (id, conversation_id, role, content)
+                   VALUES (?, ?, ?, ?)""",
+                (message_id, conversation_id, role, content),
+            )
+
+    def count_conversation_messages(self, conversation_id: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def get_conversation_messages(self, conversation_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM conversation_messages
+                   WHERE conversation_id = ?
+                   ORDER BY created_at ASC""",
+                (conversation_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_conversations(self, workflow: str = "chat", limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM conversations
+                   WHERE workflow = ? AND archived = 0
+                   ORDER BY updated_at DESC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Events ────────────────────────────────────────────────────────────────
+
+    def get_events(
+        self,
+        memory_id: str | None = None,
+        session_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list = []
+        if memory_id is not None:
+            clauses.append("memory_id = ?")
+            params.append(memory_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if event_type is not None:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM memory_events {where} ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── FTS query sanitizer ───────────────────────────────────────────────────────
+
+def _sanitize_fts_query(query: str) -> str:
+    """
+    Strip characters that cause FTS5 syntax errors.
+    FTS5 uses double-quotes for phrase queries — an unmatched quote breaks the parser.
+    Strategy: remove all double-quotes and leading/trailing FTS operators,
+    then rejoin as space-separated tokens.
+    """
+    # Remove double-quotes entirely
+    q = query.replace('"', '').replace("'", "")
+    # Strip leading/trailing FTS boolean operators
+    tokens = [t for t in q.split() if t.upper() not in ("AND", "OR", "NOT")]
+    return " ".join(tokens).strip()

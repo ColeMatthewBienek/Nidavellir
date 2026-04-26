@@ -17,6 +17,15 @@ export interface Message {
   events:    StreamEvent[]; // parser output — drives StreamRenderer
 }
 
+export interface MemoryRecord {
+  id:          string;
+  content:     string;
+  category:    string;
+  memory_type: string;
+  confidence:  number;
+  importance:  number;
+}
+
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -37,8 +46,10 @@ interface AgentStore {
   selectedModel:     string;   // "{provider_id}:{model_id}"
 
   // Chat state (Spec 02)
-  messages:    Message[];
-  isStreaming: boolean;
+  messages:       Message[];
+  isStreaming:    boolean;
+  conversationId: string | null;
+  memories:       MemoryRecord[];
 
   // Provider / connection actions (Spec 01)
   setSelectedProvider: (id: string) => void;
@@ -57,6 +68,8 @@ interface AgentStore {
   finalizeLastAgentMessage: () => void;
   finalizeWithError:        (reason: string) => void;
   clearMessages:            () => void;
+  setConversationId:        (id: string | null) => void;
+  setMemories:              (memories: MemoryRecord[]) => void;
 }
 
 // ── Store implementation ───────────────────────────────────────────────────────
@@ -86,8 +99,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   // ── Chat state ────────────────────────────────────────────────────────────
-  messages:    [],
-  isStreaming: false,
+  messages:       [],
+  isStreaming:    false,
+  conversationId: null,
+  memories:       [],
 
   // ── Chat actions ──────────────────────────────────────────────────────────
 
@@ -166,5 +181,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return { messages: msgs, isStreaming: false };
     }),
 
-  clearMessages: () => set({ messages: [], isStreaming: false }),
+  clearMessages:     () => set({ messages: [], isStreaming: false }),
+  setConversationId: (id) => set({ conversationId: id }),
+  setMemories:       (memories) => set({ memories }),
 }));
