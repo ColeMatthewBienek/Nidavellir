@@ -1,448 +1,455 @@
 import { useState } from 'react';
 
-interface TokenUsageData {
+// ── Types ──────────────────────────────────────────────────────────────────────
+
+interface ModelRow {
   model: string;
-  currentTokens: number;
-  usableTokens: number;
-  totalLimit: number;
-  reserved: number;
-  accurate: boolean;
+  total_input: number;
+  total_output: number;
+  request_count: number;
+  last_used?: string;
+}
+
+interface ProviderRow {
+  provider: string;
+  total_input: number;
+  total_output: number;
+  request_count: number;
+  models: ModelRow[];
+}
+
+interface RollingWindow {
+  total_input: number;
+  total_output: number;
+  request_count: number;
+  hours: number;
+}
+
+interface DailyTotals {
+  total_input: number;
+  total_output: number;
+  request_count: number;
+}
+
+interface Anomaly {
+  type: string;
+  severity: string;
+  description: string;
+  record_id: string;
+  created_at: string;
+}
+
+interface RecentIssue {
+  type: string;
+  description: string;
+  time: string;
+}
+
+export interface DashboardData {
+  providers: ProviderRow[];
+  rollingWindow: RollingWindow;
+  dailyTotals: DailyTotals;
+  anomalies: Anomaly[];
+  recentIssues: RecentIssue[];
+  generatedAt: string;
 }
 
 interface TokenUsageDashboardProps {
-  data?: TokenUsageData;
-  onExport?: (format: 'json' | 'csv') => void;
+  data?: DashboardData;
+  onExport?: (format: 'jsonl', range: string) => void;
 }
 
-export function TokenUsageDashboard({
-  data = {
-    model: 'Claude Sonnet',
-    currentTokens: 12847,
-    usableTokens: 192000,
-    totalLimit: 200000,
-    reserved: 8000,
-    accurate: true,
-  },
-  onExport,
-}: TokenUsageDashboardProps) {
-  const [tab, setTab] = useState<'overview' | 'history'>('overview');
-  const percentage = Math.round((data.currentTokens / data.usableTokens) * 100);
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
-  // Determine health state
-  let healthState: string;
-  let healthColor: string;
-  if (percentage >= 85) {
-    healthState = 'Blocked';
-    healthColor = 'var(--red)';
-  } else if (percentage >= 75) {
-    healthState = 'Compaction Required';
-    healthColor = '#ff6b35';
-  } else if (percentage >= 65) {
-    healthState = 'Prepare Compaction';
-    healthColor = 'var(--yel)';
-  } else if (percentage >= 50) {
-    healthState = 'At Risk';
-    healthColor = 'var(--yel)';
-  } else {
-    healthState = 'OK';
-    healthColor = 'var(--grn)';
+const EXPORT_RANGES = [
+  { value: '1h',        label: 'Last 1 Hour' },
+  { value: '6h',        label: 'Last 6 Hours' },
+  { value: '24h',       label: 'Last 24 Hours' },
+  { value: '7d',        label: 'Last 7 Days' },
+  { value: 'all',       label: 'All Time' },
+];
+
+const ANOMALY_TYPE_LABELS: Record<string, string> = {
+  input_spike:       'Large Input Spike',
+  output_spike:      'Large Output Spike',
+  high_discrepancy:  'High Discrepancy',
+};
+
+const SEVERITY_COLORS: Record<string, string> = {
+  high:   'var(--red)',
+  medium: 'var(--yel)',
+  low:    'var(--grn)',
+};
+
+function fmt(n: number): string {
+  return n.toLocaleString();
+}
+
+// ── Section header ─────────────────────────────────────────────────────────────
+
+function SectionHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      fontSize: 10,
+      fontWeight: 700,
+      color: 'var(--t1)',
+      textTransform: 'uppercase',
+      letterSpacing: '0.8px',
+      marginBottom: 10,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+// ── Provider breakdown ─────────────────────────────────────────────────────────
+
+function ProviderBreakdown({ providers }: { providers: ProviderRow[] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(providers.map((p) => p.provider))
+  );
+
+  function toggle(name: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
   }
 
   return (
-    <div
-      style={{
-        background: 'var(--bg1)',
-        border: '1px solid var(--bd)',
-        borderRadius: 8,
-        padding: 20,
-        maxWidth: 600,
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 20,
-        }}
-      >
-        <div>
-          <h2
-            style={{
-              fontSize: 18,
-              fontWeight: 600,
-              color: 'var(--t0)',
-              margin: 0,
-              marginBottom: 4,
-            }}
-          >
-            Token Usage Dashboard
-          </h2>
-          <p
-            style={{
-              fontSize: 12,
-              color: 'var(--t1)',
-              margin: 0,
-            }}
-          >
-            Real-time context consumption monitoring
-          </p>
-        </div>
-        <div
-          style={{
-            display: 'flex',
-            gap: 8,
-          }}
-        >
-          <button
-            onClick={() => onExport?.('json')}
-            style={{
-              padding: '6px 12px',
-              background: 'var(--bg2)',
-              border: '1px solid var(--bd)',
-              borderRadius: 4,
-              fontSize: 10,
-              color: 'var(--t0)',
-              cursor: 'pointer',
-              fontWeight: 500,
-            }}
-          >
-            Export JSON
-          </button>
-          <button
-            onClick={() => onExport?.('csv')}
-            style={{
-              padding: '6px 12px',
-              background: 'var(--bg2)',
-              border: '1px solid var(--bd)',
-              borderRadius: 4,
-              fontSize: 10,
-              color: 'var(--t0)',
-              cursor: 'pointer',
-              fontWeight: 500,
-            }}
-          >
-            Export CSV
-          </button>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div
-        style={{
-          display: 'flex',
-          gap: 16,
-          marginBottom: 20,
-          borderBottom: '1px solid var(--bd)',
-          paddingBottom: 12,
-        }}
-      >
-        {(['overview', 'history'] as const).map((t) => (
-          <div
-            key={t}
-            onClick={() => setTab(t)}
-            style={{
-              fontSize: 12,
-              fontWeight: tab === t ? 600 : 400,
-              color: tab === t ? 'var(--t0)' : 'var(--t1)',
-              cursor: 'pointer',
-              textTransform: 'capitalize',
-              position: 'relative',
-              paddingBottom: 8,
-            }}
-          >
-            {t}
-            {tab === t && (
+    <div style={{ marginBottom: 20 }}>
+      <SectionHeader>Provider Breakdown</SectionHeader>
+      <div style={{ border: '1px solid var(--bd)', borderRadius: 6, overflow: 'hidden' }}>
+        {providers.map((p, idx) => {
+          const total = p.total_input + p.total_output;
+          const open  = expanded.has(p.provider);
+          return (
+            <div key={p.provider}>
+              {idx > 0 && <div style={{ height: 1, background: 'var(--bd)' }} />}
+              {/* Provider row */}
               <div
+                data-testid="provider-row"
+                onClick={() => toggle(p.provider)}
                 style={{
-                  position: 'absolute',
-                  bottom: -12,
-                  left: 0,
-                  right: 0,
-                  height: 2,
-                  background: 'var(--grn)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: '10px 14px',
+                  cursor: 'pointer',
+                  background: 'var(--bg1)',
+                  userSelect: 'none',
                 }}
-              />
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* Overview Tab */}
-      {tab === 'overview' && (
-        <div>
-          {/* Model Info */}
-          <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                fontSize: 10,
-                color: 'var(--t1)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                marginBottom: 8,
-                fontWeight: 600,
-              }}
-            >
-              Active Model
-            </div>
-            <div
-              style={{
-                fontSize: 13,
-                color: 'var(--t0)',
-                fontFamily: 'monospace',
-                padding: '10px 12px',
-                background: 'var(--bg0)',
-                borderRadius: 4,
-                border: '1px solid var(--bd)',
-              }}
-            >
-              {data.model}
-            </div>
-          </div>
-
-          {/* Usage Overview */}
-          <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                fontSize: 10,
-                color: 'var(--t1)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                marginBottom: 8,
-                fontWeight: 600,
-              }}
-            >
-              Context Usage
-            </div>
-
-            {/* Big Numbers */}
-            <div
-              style={{
-                marginBottom: 12,
-                padding: '12px',
-                background: 'var(--bg0)',
-                borderRadius: 4,
-                border: `1px solid ${healthColor}44`,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 24,
-                  fontWeight: 700,
+              >
+                <span style={{ fontSize: 11, color: 'var(--t1)', marginRight: 6 }}>
+                  {open ? '▾' : '▸'}
+                </span>
+                <span style={{
+                  flex: 1,
+                  fontSize: 13,
+                  fontWeight: 600,
                   color: 'var(--t0)',
-                  fontFamily: 'monospace',
-                  marginBottom: 4,
-                }}
-              >
-                {percentage}%
+                  textTransform: 'capitalize',
+                }}>
+                  {p.provider}
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--t1)', marginRight: 16 }}>
+                  {p.request_count} req
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--t0)', fontFamily: 'monospace' }}>
+                  {fmt(total)}
+                </span>
               </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: 'var(--t1)',
-                  fontFamily: 'monospace',
-                }}
-              >
-                {data.currentTokens.toLocaleString()} / {data.usableTokens.toLocaleString()} tokens
-              </div>
-            </div>
-
-            {/* Usage Bar */}
-            <div
-              style={{
-                height: 8,
-                background: 'var(--bd)',
-                borderRadius: 4,
-                overflow: 'hidden',
-                marginBottom: 12,
-              }}
-            >
-              <div
-                style={{
-                  height: '100%',
-                  width: `${percentage}%`,
-                  background: healthColor,
-                  borderRadius: 4,
-                  transition: 'width 0.3s',
-                }}
-              />
-            </div>
-          </div>
-
-          {/* Health State */}
-          <div
-            style={{
-              marginBottom: 20,
-              padding: '12px',
-              background: `${healthColor}12`,
-              borderRadius: 4,
-              border: `1px solid ${healthColor}44`,
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 8,
-              }}
-            >
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: healthColor,
-                }}
-              />
-              <span
-                style={{
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: healthColor,
-                  textTransform: 'uppercase',
-                }}
-              >
-                {healthState}
-              </span>
-            </div>
-            <p
-              style={{
-                fontSize: 11,
-                color: healthColor,
-                margin: 0,
-                lineHeight: 1.5,
-              }}
-            >
-              {percentage >= 85 &&
-                'Context window is blocked. Compaction required immediately.'}
-              {percentage >= 75 &&
-                percentage < 85 &&
-                'Context compaction is required to continue.'}
-              {percentage >= 65 &&
-                percentage < 75 &&
-                'Prepare for context compaction. Consider removing old messages.'}
-              {percentage >= 50 &&
-                percentage < 65 &&
-                'Context usage is at risk. Monitor closely.'}
-              {percentage < 50 && 'Context usage is healthy. Continue normally.'}
-            </p>
-          </div>
-
-          {/* Accuracy */}
-          <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '10px 12px',
-                background: 'var(--bg0)',
-                borderRadius: 4,
-                border: `1px solid ${data.accurate ? 'var(--grn)44' : 'var(--red)44'}`,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 12,
-                  color: data.accurate ? 'var(--grn)' : 'var(--red)',
-                  fontWeight: 600,
-                }}
-              >
-                {data.accurate ? '✔' : '✘'}
-              </span>
-              <span
-                style={{
-                  fontSize: 11,
-                  color: data.accurate ? 'var(--grn)' : 'var(--red)',
-                }}
-              >
-                {data.accurate ? 'Counts Accurate' : 'Counts Estimated'}
-              </span>
-            </div>
-          </div>
-
-          {/* Limits Breakdown */}
-          <div
-            style={{
-              padding: '12px',
-              background: 'var(--bg0)',
-              borderRadius: 4,
-              border: '1px solid var(--bd)',
-            }}
-          >
-            <div
-              style={{
-                fontSize: 10,
-                color: 'var(--t1)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-                marginBottom: 8,
-                fontWeight: 600,
-              }}
-            >
-              Limits Breakdown
-            </div>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: 12,
-                fontSize: 11,
-                color: 'var(--t1)',
-                fontFamily: 'monospace',
-              }}
-            >
-              <div>
-                <div style={{ color: 'var(--t1)' }}>Total Limit</div>
-                <div style={{ color: 'var(--t0)', fontWeight: 600 }}>
-                  {data.totalLimit.toLocaleString()}
+              {/* Model sub-rows */}
+              {open && p.models.map((m) => (
+                <div
+                  key={m.model}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '7px 14px 7px 32px',
+                    background: 'var(--bg0)',
+                    borderTop: '1px solid var(--bd)',
+                  }}
+                >
+                  <span style={{ flex: 1, fontSize: 12, color: 'var(--t1)', fontFamily: 'monospace' }}>
+                    {m.model}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--t1)', marginRight: 14 }}>
+                    {m.request_count} req
+                  </span>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 11, color: 'var(--t0)', fontFamily: 'monospace' }}>
+                      ↑ {fmt(m.total_input)}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--t1)', fontFamily: 'monospace' }}>
+                      ↓ {fmt(m.total_output)}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--t1)' }}>Reserved</div>
-                <div style={{ color: 'var(--yel)', fontWeight: 600 }}>
-                  {data.reserved.toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--t1)' }}>Usable</div>
-                <div style={{ color: 'var(--grn)', fontWeight: 600 }}>
-                  {data.usableTokens.toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div style={{ color: 'var(--t1)' }}>Available</div>
-                <div style={{ color: 'var(--grn)', fontWeight: 600 }}>
-                  {(data.usableTokens - data.currentTokens).toLocaleString()}
-                </div>
-              </div>
+              ))}
             </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Time aggregates ────────────────────────────────────────────────────────────
+
+function AggCard({
+  title,
+  input,
+  output,
+  requests,
+}: {
+  title: string;
+  input: number;
+  output: number;
+  requests: number;
+}) {
+  return (
+    <div style={{
+      flex: 1,
+      border: '1px solid var(--bd)',
+      borderRadius: 6,
+      padding: '12px 14px',
+      background: 'var(--bg1)',
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--t1)', marginBottom: 10 }}>
+        {title}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--t1)', marginBottom: 2 }}>Input</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--t0)', fontFamily: 'monospace' }}>
+            {fmt(input)}
           </div>
         </div>
-      )}
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--t1)', marginBottom: 2 }}>Output</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--t0)', fontFamily: 'monospace' }}>
+            {fmt(output)}
+          </div>
+        </div>
+        <div style={{ gridColumn: '1/-1' }}>
+          <div style={{ fontSize: 10, color: 'var(--t1)', marginBottom: 2 }}>Requests</div>
+          <div style={{ fontSize: 12, color: 'var(--t0)' }}>{requests}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-      {/* History Tab */}
-      {tab === 'history' && (
-        <div
+function TimeAggregates({ rolling, daily }: { rolling: RollingWindow; daily: DailyTotals }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <SectionHeader>Time Aggregates</SectionHeader>
+      <div style={{ display: 'flex', gap: 12 }}>
+        <AggCard
+          title={`Last ${rolling.hours} Hours`}
+          input={rolling.total_input}
+          output={rolling.total_output}
+          requests={rolling.request_count}
+        />
+        <AggCard
+          title="Today (Local)"
+          input={daily.total_input}
+          output={daily.total_output}
+          requests={daily.request_count}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Anomalies ──────────────────────────────────────────────────────────────────
+
+function AnomaliesSection({ anomalies }: { anomalies: Anomaly[] }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <SectionHeader>Anomalies</SectionHeader>
+      {anomalies.length === 0 ? (
+        <div style={{
+          padding: '12px 14px',
+          border: '1px solid var(--bd)',
+          borderRadius: 6,
+          fontSize: 12,
+          color: 'var(--t1)',
+          background: 'var(--bg1)',
+        }}>
+          No anomalies detected.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {anomalies.map((a) => {
+            const color = SEVERITY_COLORS[a.severity] ?? 'var(--t1)';
+            const typeLabel = ANOMALY_TYPE_LABELS[a.type] ?? a.type;
+            return (
+              <div
+                key={a.record_id}
+                style={{
+                  border: '1px solid var(--bd)',
+                  borderLeft: `3px solid ${color}`,
+                  borderRadius: 6,
+                  padding: '10px 14px',
+                  background: 'var(--bg1)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color }}>{typeLabel}</span>
+                  <span style={{
+                    fontSize: 9,
+                    fontWeight: 600,
+                    color,
+                    textTransform: 'uppercase',
+                    padding: '1px 6px',
+                    border: `1px solid ${color}44`,
+                    borderRadius: 10,
+                    background: `${color}14`,
+                  }}>
+                    {a.severity}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--t0)' }}>{a.description}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Recent issues ──────────────────────────────────────────────────────────────
+
+function RecentIssuesSection({ issues }: { issues: RecentIssue[] }) {
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <SectionHeader>Recent Issues</SectionHeader>
+      {issues.length === 0 ? (
+        <div style={{
+          padding: '12px 14px',
+          border: '1px solid var(--bd)',
+          borderRadius: 6,
+          fontSize: 12,
+          color: 'var(--t1)',
+          background: 'var(--bg1)',
+        }}>
+          No recent issues.
+        </div>
+      ) : (
+        <div style={{ border: '1px solid var(--bd)', borderRadius: 6, overflow: 'hidden' }}>
+          {issues.map((issue, idx) => (
+            <div
+              key={idx}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                padding: '9px 14px',
+                background: 'var(--bg1)',
+                borderTop: idx > 0 ? '1px solid var(--bd)' : 'none',
+              }}
+            >
+              <span style={{ flex: 1, fontSize: 12, color: 'var(--t0)' }}>{issue.description}</span>
+              <span style={{ fontSize: 11, color: 'var(--t1)', fontFamily: 'monospace' }}>
+                {issue.time}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Export section ─────────────────────────────────────────────────────────────
+
+function ExportSection({ onExport }: { onExport?: (format: 'jsonl', range: string) => void }) {
+  const [range, setRange] = useState('24h');
+
+  return (
+    <div>
+      <SectionHeader>Export Usage Data</SectionHeader>
+      <div style={{
+        border: '1px solid var(--bd)',
+        borderRadius: 6,
+        padding: '14px',
+        background: 'var(--bg1)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+      }}>
+        <span style={{ fontSize: 12, color: 'var(--t1)', flexShrink: 0 }}>Range:</span>
+        <select
+          value={range}
+          onChange={(e) => setRange(e.target.value)}
           style={{
-            padding: '20px',
+            flex: 1,
+            padding: '5px 8px',
             background: 'var(--bg0)',
-            borderRadius: 4,
             border: '1px solid var(--bd)',
-            textAlign: 'center',
-            color: 'var(--t1)',
+            borderRadius: 4,
+            fontSize: 12,
+            color: 'var(--t0)',
+            cursor: 'pointer',
           }}
         >
-          <p style={{ margin: 0, fontSize: 12 }}>
-            Historical token usage data coming soon.
-          </p>
-          <p style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--t1)' }}>
-            View sparklines and export historical reports.
-          </p>
-        </div>
-      )}
+          {EXPORT_RANGES.map((r) => (
+            <option key={r.value} value={r.value}>{r.label}</option>
+          ))}
+        </select>
+        <button
+          onClick={() => onExport?.('jsonl', range)}
+          style={{
+            padding: '6px 14px',
+            background: 'var(--grn)',
+            border: '1px solid var(--grn)',
+            borderRadius: 5,
+            fontSize: 12,
+            fontWeight: 600,
+            color: '#000',
+            cursor: 'pointer',
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+          }}
+        >
+          ⬇ Download JSONL
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Empty state ────────────────────────────────────────────────────────────────
+
+const EMPTY_DATA: DashboardData = {
+  providers:    [],
+  rollingWindow: { total_input: 0, total_output: 0, request_count: 0, hours: 24 },
+  dailyTotals:  { total_input: 0, total_output: 0, request_count: 0 },
+  anomalies:    [],
+  recentIssues: [],
+  generatedAt:  new Date().toISOString(),
+};
+
+// ── Root component ─────────────────────────────────────────────────────────────
+
+export function TokenUsageDashboard({
+  data,
+  onExport,
+}: TokenUsageDashboardProps) {
+  const d = data ?? EMPTY_DATA;
+
+  return (
+    <div style={{ maxWidth: 760, fontFamily: 'inherit' }}>
+      <ProviderBreakdown providers={d.providers} />
+      <TimeAggregates rolling={d.rollingWindow} daily={d.dailyTotals} />
+      <AnomaliesSection anomalies={d.anomalies} />
+      <RecentIssuesSection issues={d.recentIssues} />
+      <ExportSection onExport={onExport} />
     </div>
   );
 }
