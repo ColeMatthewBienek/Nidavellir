@@ -14,14 +14,13 @@ const MONO = "'JetBrains Mono','Fira Code',monospace";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface MemorySummary {
-  status:              'healthy' | 'warning' | 'critical';
-  totalActive:         number;
-  injected24h:         number;
-  issueCount:          number;
-  staleCount:          number;
-  extractionFailures:  number;
-  lowConfidenceCount:  number;
-  recentAlerts:        { time: string; type: string; count: number }[];
+  status:                  'healthy' | 'warning' | 'critical';
+  active_memories:         number;
+  injected_24h:            number;
+  extraction_failures_24h: number;
+  low_confidence_stored:   number;
+  never_used:              number;
+  recent_alerts:           { time: string; type: string; count: number }[];
   trend24h?: {
     injections:  number[];
     failures:    number[];
@@ -123,23 +122,23 @@ export function MemoryHealthWidget() {
         </div>
 
         <div style={{ fontSize: 11, color: T0, fontFamily: MONO }}>
-          Active: {data.totalActive} | 24h: {data.injected24h}
+          Active: {data.active_memories} | 24h: {data.injected_24h}
         </div>
 
         <div style={{ fontSize: 11, fontFamily: MONO }}>
-          <span style={{ color: data.issueCount > 0 ? RED : T0 }}>Issues: {data.issueCount}</span>
+          <span style={{ color: data.extraction_failures_24h > 0 ? RED : T0 }}>Fails: {data.extraction_failures_24h}</span>
           <span style={{ color: T1 }}>{' | '}</span>
-          <span style={{ color: data.staleCount > 10 ? YEL : T0 }}>Stale: {data.staleCount}</span>
+          <span style={{ color: data.never_used > 10 ? YEL : T0 }}>Unused: {data.never_used}</span>
         </div>
 
-        {data.extractionFailures > 0 && (
+        {data.extraction_failures_24h > 0 && (
           <div style={{ fontSize: 10, color: RED, padding: '4px 8px', background: `${RED}12`, borderRadius: 3, border: `1px solid ${RED}22` }}>
-            ⚠ {data.extractionFailures} Extraction Failures
+            ⚠ {data.extraction_failures_24h} Extraction Failures
           </div>
         )}
-        {data.lowConfidenceCount > 0 && (
+        {data.low_confidence_stored > 0 && (
           <div style={{ fontSize: 10, color: YEL, padding: '4px 8px', background: `${YEL}12`, borderRadius: 3, border: `1px solid ${YEL}22` }}>
-            ⚠ {data.lowConfidenceCount} Low Confidence
+            ⚠ {data.low_confidence_stored} Low Confidence
           </div>
         )}
 
@@ -163,10 +162,10 @@ export function MemoryHealthWidget() {
             <div style={{ fontSize: 10, fontWeight: 600, color: T1, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
               Recent Issues
             </div>
-            {data.recentAlerts.length === 0 ? (
+            {(data.recent_alerts ?? []).length === 0 ? (
               <div style={{ fontSize: 9, color: T1, fontFamily: MONO }}>No recent issues</div>
             ) : (
-              data.recentAlerts.map((alert, i) => (
+              (data.recent_alerts ?? []).map((alert, i) => (
                 <div key={i} style={{ fontSize: 9, color: T1, fontFamily: MONO, marginBottom: 4 }}>
                   {alert.time} {alert.type} ×{alert.count}
                 </div>

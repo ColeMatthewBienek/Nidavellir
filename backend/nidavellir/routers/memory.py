@@ -75,8 +75,49 @@ def get_conversation_messages(conversation_id: str, request: Request):
 
 
 @router.get("/quality/summary")
-def quality_summary(request: Request):
-    return _store(request).get_quality_summary()
+def quality_summary(request: Request, workflow: str = "chat"):
+    return _store(request).quality_summary(workflow)
+
+
+@router.get("/quality/stale")
+def quality_stale(request: Request, workflow: str = "chat", limit: int = 25):
+    return {"items": _store(request).quality_stale(workflow, limit)}
+
+
+@router.get("/quality/low-confidence")
+def quality_low_confidence(request: Request, workflow: str = "chat", limit: int = 25):
+    return {"items": _store(request).quality_low_confidence(workflow, limit)}
+
+
+@router.get("/quality/never-used")
+def quality_never_used(request: Request, workflow: str = "chat", limit: int = 25):
+    return {"items": _store(request).quality_never_used(workflow, limit)}
+
+
+@router.get("/quality/frequent")
+def quality_frequent(request: Request, workflow: str = "chat", limit: int = 25):
+    return {"items": _store(request).quality_frequent(workflow, limit)}
+
+
+@router.get("/quality/events")
+def quality_events(request: Request, workflow: str = "chat", limit: int = 50):
+    return {"items": _store(request).quality_events(workflow, limit)}
+
+
+@router.get("/quality/top-scored")
+def quality_top_scored(request: Request, workflow: str = "chat", q: str = "", limit: int = 25):
+    return {"items": _store(request).quality_top_scored(workflow, q, limit)}
+
+
+@router.get("/quality/duplicates")
+def quality_duplicates(request: Request, workflow: str = "chat", limit: int = 25):
+    return _store(request).quality_duplicates(workflow, limit, dry_run=True)
+
+
+@router.post("/consolidate")
+def consolidate(request: Request, workflow: str = "chat", dry_run: bool = True):
+    from nidavellir.memory.consolidator import consolidate_memories
+    return consolidate_memories(_store(request), workflow=workflow, dry_run=dry_run)
 
 
 @router.get("/context")

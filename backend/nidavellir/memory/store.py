@@ -468,47 +468,65 @@ class MemoryStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_quality_summary(self) -> dict:
+    # ── Quality diagnostic methods ────────────────────────────────────────────
+
+    def quality_summary(self, workflow: str = "chat") -> dict:
         from datetime import datetime, UTC
 
         with self._conn() as conn:
-            total_active = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL"
+            active_memories = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND (workflow=? OR scope_type IN ('global','user'))",
+                (workflow,),
             ).fetchone()[0]
+
+            total_memories = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
 
             injected_24h = conn.execute(
-                "SELECT COUNT(*) FROM memory_events WHERE event_type='injected' AND created_at > datetime('now','-1 day')"
+                "SELECT COUNT(*) FROM memory_events WHERE event_type='injected' AND created_at >= datetime('now','-1 day')"
             ).fetchone()[0]
 
-            extract_fails = conn.execute(
-                "SELECT COUNT(*) FROM memory_events WHERE event_type='extraction_failed' AND created_at > datetime('now','-1 day')"
+            extraction_failures_24h = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_subject='extraction' AND event_type IN ('extraction_failed','parse_failed') AND created_at >= datetime('now','-1 day')"
             ).fetchone()[0]
 
-            dedup_rejections = conn.execute(
-                "SELECT COUNT(*) FROM memory_events WHERE event_type='dedup_rejected' AND created_at > datetime('now','-1 day')"
+            parse_failures_24h = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_type='parse_failed' AND created_at >= datetime('now','-1 day')"
             ).fetchone()[0]
 
-            low_confidence = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND confidence >= 0.50 AND confidence < 0.70"
+            dedup_rejections_24h = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_subject='dedup' AND event_type='dedup_rejected' AND created_at >= datetime('now','-1 day')"
+            ).fetchone()[0]
+
+            low_confidence_stored = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND confidence>=0.50 AND confidence<0.70 AND (workflow=? OR scope_type IN ('global','user'))",
+                (workflow,),
             ).fetchone()[0]
 
             never_used = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND use_count = 0"
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND use_count=0 AND (workflow=? OR scope_type IN ('global','user'))",
+                (workflow,),
             ).fetchone()[0]
 
             superseded = conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NOT NULL"
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NOT NULL AND (workflow=? OR scope_type IN ('global','user'))",
+                (workflow,),
+            ).fetchone()[0]
+
+            deleted = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL"
+            ).fetchone()[0]
+
+            fallback_events_24h = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_subject='retrieval' AND event_type IN ('searched','retrieval_fallback') AND payload_json LIKE '%fallback_recency%' AND created_at >= datetime('now','-1 day')"
             ).fetchone()[0]
 
             recent_rows = conn.execute(
-                """SELECT event_type, created_at FROM memory_events
-                   WHERE event_type IN ('extraction_failed', 'dedup_rejected')
-                   ORDER BY created_at DESC LIMIT 5"""
+                "SELECT event_type, created_at FROM memory_events WHERE event_type IN ('extraction_failed','dedup_rejected') ORDER BY created_at DESC LIMIT 5"
             ).fetchall()
 
-        if extract_fails > 3 or (total_active > 0 and low_confidence > total_active * 0.20):
+        if extraction_failures_24h > 3 or (active_memories > 0 and low_confidence_stored > active_memories * 0.20):
             status = "critical"
-        elif extract_fails > 0 or low_confidence > 10 or (total_active > 0 and never_used > total_active * 0.05):
+        elif extraction_failures_24h > 0 or low_confidence_stored > 10 or (active_memories > 0 and never_used > active_memories * 0.05):
             status = "warning"
         else:
             status = "healthy"
@@ -527,18 +545,149 @@ class MemoryStore:
             })
 
         return {
-            "status":             status,
-            "totalActive":        total_active,
-            "injected24h":        injected_24h,
-            "issueCount":         extract_fails,
-            "staleCount":         never_used,
-            "extractionFailures": extract_fails,
-            "lowConfidenceCount": low_confidence,
-            "superseded":         superseded,
-            "dedupRejections":    dedup_rejections,
-            "recentAlerts":       recent_alerts,
-            "trend24h":           None,
+            "status":                  status,
+            "active_memories":         active_memories,
+            "total_memories":          total_memories,
+            "injected_24h":            injected_24h,
+            "extraction_failures_24h": extraction_failures_24h,
+            "parse_failures_24h":      parse_failures_24h,
+            "dedup_rejections_24h":    dedup_rejections_24h,
+            "low_confidence_stored":   low_confidence_stored,
+            "never_used":              never_used,
+            "superseded":              superseded,
+            "deleted":                 deleted,
+            "fallback_events_24h":     fallback_events_24h,
+            "last_updated":            datetime.now(UTC).isoformat(),
+            # widget compat fields
+            "recent_alerts":           recent_alerts,
+            "trend24h":                None,
         }
+
+    def quality_stale(self, workflow: str = "chat", limit: int = 25) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT *,
+                     CAST(julianday('now') - julianday(created_at) AS INTEGER) AS age_days,
+                     CASE WHEN last_used IS NOT NULL
+                          THEN CAST(julianday('now') - julianday(last_used) AS INTEGER)
+                          ELSE NULL
+                     END AS days_since_last_used
+                   FROM memories
+                   WHERE superseded_by IS NULL AND deleted_at IS NULL
+                     AND (workflow = ? OR scope_type IN ('global','user'))
+                     AND (
+                       (last_used IS NULL AND created_at < datetime('now','-30 days'))
+                       OR last_used < datetime('now','-30 days')
+                     )
+                   ORDER BY COALESCE(last_used, created_at) ASC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def quality_low_confidence(self, workflow: str = "chat", limit: int = 25) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL AND deleted_at IS NULL
+                     AND confidence >= 0.50 AND confidence < 0.70
+                     AND (workflow = ? OR scope_type IN ('global','user'))
+                   ORDER BY confidence ASC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def quality_never_used(self, workflow: str = "chat", limit: int = 25) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL AND deleted_at IS NULL
+                     AND use_count = 0
+                     AND (workflow = ? OR scope_type IN ('global','user'))
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def quality_frequent(self, workflow: str = "chat", limit: int = 25) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE superseded_by IS NULL AND deleted_at IS NULL
+                     AND use_count > 0
+                     AND (workflow = ? OR scope_type IN ('global','user'))
+                   ORDER BY use_count DESC, last_used DESC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def quality_events(self, workflow: str = "chat", limit: int = 50) -> list[dict]:
+        relevant = (
+            "extraction_failed", "parse_failed", "dedup_rejected",
+            "retrieval_fallback", "consolidation_applied", "consolidation_proposed",
+        )
+        placeholders = ",".join("?" * len(relevant))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM memory_events
+                    WHERE event_type IN ({placeholders})
+                    ORDER BY created_at DESC
+                    LIMIT ?""",
+                (*relevant, limit),
+            ).fetchall()
+
+        result = []
+        for row in rows:
+            d = dict(row)
+            raw = d.pop("payload_json", None)
+            try:
+                d["payload"] = json.loads(raw) if raw else None
+            except Exception:
+                d["payload"] = None
+                d["payload_json"] = raw
+            result.append(d)
+        return result
+
+    def quality_top_scored(
+        self, workflow: str = "chat", query: str = "", limit: int = 25
+    ) -> list[dict]:
+        from .context_pack import compute_final_score
+
+        fts_results = self.search_fts(query, workflow, limit=limit) if query.strip() else []
+        if fts_results:
+            candidates = [(m, m.get("relevance_score")) for m in fts_results]
+            reason = "fts_match"
+        else:
+            candidates = [(m, None) for m in self.get_active_memories(workflow, limit=limit)]
+            reason = "fallback_recency"
+
+        scored = []
+        for m, rank in candidates:
+            score = compute_final_score(
+                relevance_score=rank,
+                importance=int(m.get("importance", 5)),
+                scope_boost=0.1,
+                memory_type=m.get("memory_type", "fact"),
+                created_at=m.get("created_at", ""),
+                use_count=int(m.get("use_count", 0)),
+            )
+            entry = dict(m)
+            entry["score"] = round(score, 4)
+            entry["relevance_score"] = rank
+            entry["reason"] = reason
+            scored.append((score, entry))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [e for _, e in scored[:limit]]
+
+    def quality_duplicates(
+        self, workflow: str = "chat", limit: int = 25, dry_run: bool = True
+    ) -> dict:
+        from .consolidator import consolidate_memories
+        return consolidate_memories(self, workflow=workflow, dry_run=dry_run, limit=limit)
 
 
 # ── FTS query sanitizer ───────────────────────────────────────────────────────
