@@ -140,12 +140,14 @@ def _observe_vectors(
         vector_results = outcome["results"]
         diag           = outcome["diagnostics"]
 
+        top_memory_ids = [r["memory_id"] for r in vector_results[:5] if r.get("memory_id")]
         store.log_event(
             event_type="vector_searched",
             event_subject="retrieval",
             payload={
                 "query":                query[:200],
                 "top_results":          vector_results[:5],
+                "top_memory_ids":       top_memory_ids,
                 "fts_results_count":    fts_count,
                 "vector_results_count": len(vector_results),
                 "raw_results_count":    diag.get("raw_results_count", 0),

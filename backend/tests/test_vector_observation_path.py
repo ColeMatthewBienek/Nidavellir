@@ -269,3 +269,130 @@ def test_quality_events_includes_retrieval_fallback(tmp_path):
     events = store.quality_events("chat")
     types = {e["event_type"] for e in events}
     assert "retrieval_fallback" in types
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SPEC-12D Phase 2B Addendum — top_memory_ids in vector_searched payload
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _two_results_diag(query="q", ids=("m1", "m2")):
+    return {
+        "results": [
+            {"memory_id": ids[0], "score": 0.71, "source": "vector"},
+            {"memory_id": ids[1], "score": 0.68, "source": "vector"},
+        ],
+        "diagnostics": {
+            "query": query, "raw_results_count": 2, "filtered_results_count": 2,
+            "raw_top_scores": [0.71, 0.68], "min_vector_sim": 0.55,
+            "vector_store_count": 5, "query_vector_dim": 768,
+        },
+    }
+
+
+def test_vector_searched_event_includes_top_memory_ids(tmp_path, monkeypatch):
+    """vector_searched payload must include top_memory_ids from filtered results."""
+    _mock_embed(monkeypatch)
+    store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
+    store.save_memories([_mem("m1", "Memory 1", importance=8), _mem("m2", "Memory 2", importance=8)])
+
+    import nidavellir.memory.retrieval as ret_mod
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics",
+                        lambda *a, **kw: _two_results_diag())
+
+    get_context_pack(store, "some query", "chat")
+
+    events = store.get_events(event_type="vector_searched")
+    assert events
+    payload = json.loads(events[0]["payload_json"])
+    assert "top_memory_ids" in payload
+    assert payload["top_memory_ids"] == ["m1", "m2"]
+
+
+def test_top_memory_ids_preserve_vector_result_order(tmp_path, monkeypatch):
+    """top_memory_ids must preserve the vector result score ranking order."""
+    _mock_embed(monkeypatch)
+    store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
+    store.save_memories([_mem("high", "High scorer", importance=8),
+                         _mem("low",  "Low scorer",  importance=8)])
+
+    import nidavellir.memory.retrieval as ret_mod
+    # high score first, then low score
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics",
+                        lambda *a, **kw: _two_results_diag(ids=("high", "low")))
+
+    get_context_pack(store, "some query", "chat")
+
+    events = store.get_events(event_type="vector_searched")
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["top_memory_ids"][0] == "high"
+    assert payload["top_memory_ids"][1] == "low"
+
+
+def test_vector_searched_empty_results_has_empty_top_memory_ids(tmp_path, monkeypatch):
+    """Successful search with zero filtered results must log top_memory_ids=[]."""
+    _mock_embed(monkeypatch)
+    store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
+
+    import nidavellir.memory.retrieval as ret_mod
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics", lambda *a, **kw: {
+        "results": [],
+        "diagnostics": {
+            "query": "q", "raw_results_count": 0, "filtered_results_count": 0,
+            "raw_top_scores": [], "min_vector_sim": 0.55,
+            "vector_store_count": 0, "query_vector_dim": 768,
+        },
+    })
+
+    get_context_pack(store, "some query", "chat")
+
+    events = store.get_events(event_type="vector_searched")
+    assert events
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["top_memory_ids"] == []
+
+
+def test_vector_search_failed_does_not_include_top_memory_ids(tmp_path, monkeypatch):
+    """vector_search_failed payload must NOT include top_memory_ids."""
+    _mock_embed(monkeypatch)
+    store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
+
+    import nidavellir.memory.retrieval as ret_mod
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("down")))
+
+    get_context_pack(store, "some query", "chat")
+
+    failed = store.get_events(event_type="vector_search_failed")
+    assert failed
+    payload = json.loads(failed[0]["payload_json"])
+    assert "top_memory_ids" not in payload
+
+
+def test_activity_export_includes_top_memory_ids_for_vector_events(tmp_path, monkeypatch):
+    """Activity export JSONL must include top_memory_ids in vector_searched lines."""
+    from httpx import AsyncClient, ASGITransport
+    import asyncio
+    from nidavellir.main import app
+
+    _mock_embed(monkeypatch)
+    store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
+    store.save_memories([_mem("m1", "Memory 1", importance=8)])
+    app.state.memory_store = store
+
+    import nidavellir.memory.retrieval as ret_mod
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics",
+                        lambda *a, **kw: _two_results_diag(ids=("m1", "m99")))
+
+    get_context_pack(store, "some query", "chat")
+
+    async def _fetch():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            return await c.get("/api/memory/export/activity?hours=24")
+
+    r = asyncio.get_event_loop().run_until_complete(_fetch())
+    assert r.status_code == 200
+    records = [json.loads(l) for l in r.text.strip().split("\n") if l.strip()]
+    vs_recs = [x for x in records if x.get("event_type") == "vector_searched"]
+    assert vs_recs
+    assert "top_memory_ids" in vs_recs[0]["payload"]
+    assert vs_recs[0]["payload"]["top_memory_ids"] == ["m1", "m99"]
