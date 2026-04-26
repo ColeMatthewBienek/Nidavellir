@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAgentStore } from '@/store/agentStore';
+import { MemoryHealthWidget } from './MemoryHealthWidget';
 
 const CTX_FILES_INIT = [
   { name: 'backend/auth.py',     lines: 87,  lang: 'py' },
@@ -111,6 +112,8 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
           </div>
         </div>
       </div>
+
+      <MemoryHealthWidget />
     </div>
   );
 }

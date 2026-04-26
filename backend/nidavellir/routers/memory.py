@@ -74,6 +74,11 @@ def get_conversation_messages(conversation_id: str, request: Request):
     return _store(request).get_conversation_messages(conversation_id)
 
 
+@router.get("/quality/summary")
+def quality_summary(request: Request):
+    return _store(request).get_quality_summary()
+
+
 @router.get("/context")
 def get_context(request: Request, query: str = "", workflow: str = "chat"):
     from nidavellir.memory.injector import get_context_pack

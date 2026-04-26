@@ -7,6 +7,7 @@ import { ScheduleScreen } from './screens/ScheduleScreen';
 import { AgentsScreen }   from './screens/AgentsScreen';
 import { TasksScreen }    from './screens/TasksScreen';
 import { SkillsScreen }   from './screens/SkillsScreen';
+import { MemoryScreen }   from './screens/MemoryScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { SpawnModal }     from './components/SpawnModal';
 import { api } from './api/client';
@@ -22,6 +23,7 @@ const SCREENS: Record<ScreenId, React.ReactElement> = {
   agents:   <AgentsScreen />,
   tasks:    <TasksScreen />,
   skills:   <SkillsScreen />,
+  memory:   <MemoryScreen />,
   settings: <SettingsScreen />,
 };
 

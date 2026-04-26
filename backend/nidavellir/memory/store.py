@@ -468,6 +468,78 @@ class MemoryStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_quality_summary(self) -> dict:
+        from datetime import datetime, UTC
+
+        with self._conn() as conn:
+            total_active = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL"
+            ).fetchone()[0]
+
+            injected_24h = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_type='injected' AND created_at > datetime('now','-1 day')"
+            ).fetchone()[0]
+
+            extract_fails = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_type='extraction_failed' AND created_at > datetime('now','-1 day')"
+            ).fetchone()[0]
+
+            dedup_rejections = conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE event_type='dedup_rejected' AND created_at > datetime('now','-1 day')"
+            ).fetchone()[0]
+
+            low_confidence = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND confidence >= 0.50 AND confidence < 0.70"
+            ).fetchone()[0]
+
+            never_used = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL AND deleted_at IS NULL AND use_count = 0"
+            ).fetchone()[0]
+
+            superseded = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE superseded_by IS NOT NULL"
+            ).fetchone()[0]
+
+            recent_rows = conn.execute(
+                """SELECT event_type, created_at FROM memory_events
+                   WHERE event_type IN ('extraction_failed', 'dedup_rejected')
+                   ORDER BY created_at DESC LIMIT 5"""
+            ).fetchall()
+
+        if extract_fails > 3 or (total_active > 0 and low_confidence > total_active * 0.20):
+            status = "critical"
+        elif extract_fails > 0 or low_confidence > 10 or (total_active > 0 and never_used > total_active * 0.05):
+            status = "warning"
+        else:
+            status = "healthy"
+
+        recent_alerts = []
+        for row in recent_rows:
+            try:
+                dt = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+                time_str = dt.strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            recent_alerts.append({
+                "time":  time_str,
+                "type":  "Extraction Failure" if row["event_type"] == "extraction_failed" else "Dedup Rejection",
+                "count": 1,
+            })
+
+        return {
+            "status":             status,
+            "totalActive":        total_active,
+            "injected24h":        injected_24h,
+            "issueCount":         extract_fails,
+            "staleCount":         never_used,
+            "extractionFailures": extract_fails,
+            "lowConfidenceCount": low_confidence,
+            "superseded":         superseded,
+            "dedupRejections":    dedup_rejections,
+            "recentAlerts":       recent_alerts,
+            "trend24h":           None,
+        }
+
 
 # ── FTS query sanitizer ───────────────────────────────────────────────────────
 
