@@ -10,9 +10,9 @@ from .context_pack import (
 from .store import MemoryStore
 
 # Lazy import: retrieval module may not be available in all test environments
-def _get_search_vectors():
-    from .retrieval import search_vectors
-    return search_vectors
+def _get_search_vectors_with_diagnostics():
+    from .retrieval import search_vectors_with_diagnostics
+    return search_vectors_with_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +135,10 @@ def _observe_vectors(
     logger.info("vector_observe_start", extra={"query": query[:80]})
 
     try:
-        search_vectors = _get_search_vectors()
-        vector_results = search_vectors(store, query, limit=limit)
+        fn      = _get_search_vectors_with_diagnostics()
+        outcome = fn(store, query, limit=limit)
+        vector_results = outcome["results"]
+        diag           = outcome["diagnostics"]
 
         store.log_event(
             event_type="vector_searched",
@@ -146,6 +148,11 @@ def _observe_vectors(
                 "top_results":          vector_results[:5],
                 "fts_results_count":    fts_count,
                 "vector_results_count": len(vector_results),
+                "raw_results_count":    diag.get("raw_results_count", 0),
+                "raw_top_scores":       diag.get("raw_top_scores", []),
+                "min_vector_sim":       diag.get("min_vector_sim"),
+                "vector_store_count":   diag.get("vector_store_count"),
+                "query_vector_dim":     diag.get("query_vector_dim"),
             },
         )
 

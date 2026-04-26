@@ -61,6 +61,21 @@ class VectorStore:
         )
         return response.points
 
+    def count(self) -> int:
+        """Return the number of points currently stored in the collection."""
+        return self._client.count(collection_name=COLLECTION).count
+
+    def collection_info(self) -> dict:
+        """Return diagnostic metadata about the collection."""
+        info = self._client.get_collection(collection_name=COLLECTION)
+        return {
+            "collection_name": COLLECTION,
+            "points_count":    getattr(info, "points_count",  None),
+            "vectors_count":   getattr(info, "vectors_count", None),
+            "vector_size":     VECTOR_DIM,
+            "status":          str(getattr(info, "status", "")),
+        }
+
     def get_by_memory_id(self, memory_id: str) -> dict | None:
         """Retrieve a point by its original string memory_id."""
         results = self._client.retrieve(

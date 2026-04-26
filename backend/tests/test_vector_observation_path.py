@@ -44,7 +44,7 @@ def _mock_embed(monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_search_vectors_called_from_get_context_pack(tmp_path, monkeypatch):
-    """search_vectors must be called exactly once per get_context_pack call."""
+    """search_vectors_with_diagnostics must be called once per get_context_pack call."""
     _mock_embed(monkeypatch)
 
     store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
@@ -54,14 +54,21 @@ def test_search_vectors_called_from_get_context_pack(tmp_path, monkeypatch):
 
     def tracking_search(s, query, limit=20):
         call_log.append(query)
-        return FAKE_RESULT
+        return {
+            "results": FAKE_RESULT,
+            "diagnostics": {
+                "query": query, "raw_results_count": 1, "filtered_results_count": 1,
+                "raw_top_scores": [0.91], "min_vector_sim": 0.55,
+                "vector_store_count": 1, "query_vector_dim": 768,
+            },
+        }
 
     import nidavellir.memory.retrieval as ret_mod
-    monkeypatch.setattr(ret_mod, "search_vectors", tracking_search)
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics", tracking_search)
 
     get_context_pack(store, "FastAPI backend", "chat")
 
-    assert len(call_log) == 1, "search_vectors must be called exactly once"
+    assert len(call_log) == 1, "search_vectors_with_diagnostics must be called exactly once"
     assert call_log[0] == "FastAPI backend"
 
 
@@ -142,7 +149,7 @@ def test_vector_searched_payload_fields(tmp_path, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_vector_failure_logs_vector_search_failed(tmp_path, monkeypatch):
-    """When search_vectors raises, vector_search_failed must be logged (not silent)."""
+    """When search_vectors_with_diagnostics raises, vector_search_failed must be logged."""
     _mock_embed(monkeypatch)
 
     store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
@@ -152,7 +159,7 @@ def test_vector_failure_logs_vector_search_failed(tmp_path, monkeypatch):
         raise RuntimeError("Qdrant connection refused")
 
     import nidavellir.memory.retrieval as ret_mod
-    monkeypatch.setattr(ret_mod, "search_vectors", exploding_search)
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics", exploding_search)
 
     get_context_pack(store, "FastAPI backend", "chat")  # must not raise
 
@@ -171,7 +178,7 @@ def test_vector_failure_does_not_log_vector_searched(tmp_path, monkeypatch):
     store = MemoryStore(str(tmp_path / "mem.db"), vector_path=":memory:")
 
     import nidavellir.memory.retrieval as ret_mod
-    monkeypatch.setattr(ret_mod, "search_vectors", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(ret_mod, "search_vectors_with_diagnostics", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("down")))
 
     get_context_pack(store, "any query", "chat")
 

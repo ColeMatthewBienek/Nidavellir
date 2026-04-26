@@ -114,6 +114,92 @@ def quality_duplicates(request: Request, workflow: str = "chat", limit: int = 25
     return _store(request).quality_duplicates(workflow, limit, dry_run=True)
 
 
+@router.get("/vector/health")
+def vector_health(request: Request):
+    """Diagnostic endpoint: Qdrant collection status and embedding model info."""
+    from nidavellir.memory.embedding import DEFAULT_EMBED_MODEL
+    store = _store(request)
+    vs = store.vector_store
+
+    if vs is None:
+        return {
+            "enabled":         False,
+            "vector_path":     None,
+            "collection_name": None,
+            "points_count":    0,
+            "embedding_model": DEFAULT_EMBED_MODEL,
+            "ready":           False,
+        }
+
+    try:
+        points_count = vs.count()
+        info         = vs.collection_info()
+        ready        = vs.is_ready()
+    except Exception as exc:
+        return {
+            "enabled":         True,
+            "vector_path":     "configured",
+            "collection_name": info.get("collection_name") if "info" in dir() else None,
+            "points_count":    0,
+            "embedding_model": DEFAULT_EMBED_MODEL,
+            "ready":           False,
+            "error":           str(exc)[:200],
+        }
+
+    return {
+        "enabled":         True,
+        "vector_path":     "configured",
+        "collection_name": info["collection_name"],
+        "points_count":    points_count,
+        "vector_size":     info.get("vector_size"),
+        "embedding_model": DEFAULT_EMBED_MODEL,
+        "ready":           ready,
+    }
+
+
+@router.get("/vector/probe")
+def vector_probe(request: Request, q: str = "", workflow: str = "chat"):
+    """Debug endpoint: run vector search and join hits back to SQLite memory content.
+
+    Does NOT affect injection or usage counts.
+    """
+    from nidavellir.memory.retrieval import search_vectors_with_diagnostics
+
+    store = _store(request)
+
+    if not q.strip():
+        return {"query": q, "diagnostics": {}, "results": []}
+
+    outcome = search_vectors_with_diagnostics(store, q)
+    results = outcome["results"]
+
+    # Join back to SQLite for content
+    enriched = []
+    for r in results:
+        with store._conn() as conn:
+            row = conn.execute(
+                "SELECT content, category, memory_type, confidence, importance "
+                "FROM memories WHERE id = ?",
+                (r["memory_id"],),
+            ).fetchone()
+        enriched.append({
+            "memory_id":   r["memory_id"],
+            "score":       r["score"],
+            "source":      r["source"],
+            "content":     row["content"] if row else None,
+            "category":    row["category"] if row else None,
+            "memory_type": row["memory_type"] if row else None,
+            "confidence":  row["confidence"] if row else None,
+            "importance":  row["importance"] if row else None,
+        })
+
+    return {
+        "query":       q,
+        "diagnostics": outcome["diagnostics"],
+        "results":     enriched,
+    }
+
+
 @router.post("/consolidate")
 def consolidate(request: Request, workflow: str = "chat", dry_run: bool = True):
     from nidavellir.memory.consolidator import consolidate_memories
