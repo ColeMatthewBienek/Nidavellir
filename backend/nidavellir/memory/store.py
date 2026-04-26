@@ -704,7 +704,7 @@ class MemoryStore:
             "extraction_failed", "parse_failed", "dedup_rejected",
             "retrieval_fallback", "searched",
             "vector_searched", "vector_search_failed",
-            "hybrid_scored",
+            "hybrid_scored", "bad_hybrid_pick_candidate",
             "consolidation_applied", "consolidation_proposed",
         )
         placeholders = ",".join("?" * len(relevant))

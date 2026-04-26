@@ -191,15 +191,15 @@ def _log_hybrid_scored(
     selected: list[dict],
     session_id: str | None,
 ) -> None:
-    """Log hybrid_scored event with candidate diagnostics. Never raises."""
+    """Log hybrid_scored event and run bad-pick detector. Never raises."""
     try:
         has_strong_fts = any(m.get("_has_strong_fts") for m in selected)
         candidates_payload = [
             {
-                "memory_id":   m["id"],
-                "source":      m.get("_retrieval_source", "unknown"),
+                "memory_id":    m["id"],
+                "source":       m.get("_retrieval_source", "unknown"),
                 "hybrid_score": m.get("_hybrid_score"),
-                "allowed":     True,
+                "allowed":      True,
             }
             for m in selected
         ]
@@ -220,6 +220,27 @@ def _log_hybrid_scored(
                 "merged_count":   len(selected),
             },
         )
+    except Exception:
+        pass
+
+    # Run bad-pick detector and log one event per warning
+    try:
+        from .hybrid_quality import detect_bad_hybrid_picks
+        warnings = detect_bad_hybrid_picks(selected, query, store=store)
+        for w in warnings:
+            store.log_event(
+                event_type="bad_hybrid_pick_candidate",
+                event_subject="retrieval",
+                memory_id=w.get("memory_id"),
+                payload={
+                    "query":        query[:200],
+                    "reason":       w["reason"],
+                    "severity":     w["severity"],
+                    "source":       w.get("source"),
+                    "vector_score": w.get("vector_score"),
+                    "hybrid_score": w.get("hybrid_score"),
+                },
+            )
     except Exception:
         pass
 

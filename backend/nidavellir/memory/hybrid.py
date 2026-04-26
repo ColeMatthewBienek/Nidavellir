@@ -275,6 +275,7 @@ def hybrid_select_memories(
             # Annotate the memory dict with retrieval metadata
             memory["_retrieval_source"] = c["_retrieval_source"]
             memory["_hybrid_score"]     = c["_hybrid_score"]
+            memory["_vector_score"]     = c.get("vector_score")
             selected.append(memory)
         if len(selected) >= MAX_FINAL_SELECTED:
             break
