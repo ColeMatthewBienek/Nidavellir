@@ -8,6 +8,7 @@ import { AgentsScreen }   from './screens/AgentsScreen';
 import { TasksScreen }    from './screens/TasksScreen';
 import { SkillsScreen }   from './screens/SkillsScreen';
 import { MemoryScreen }   from './screens/MemoryScreen';
+import { TokenScreen }    from './screens/TokenScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { SpawnModal }     from './components/SpawnModal';
 import { api } from './api/client';
@@ -24,6 +25,7 @@ const SCREENS: Record<ScreenId, React.ReactElement> = {
   tasks:    <TasksScreen />,
   skills:   <SkillsScreen />,
   memory:   <MemoryScreen />,
+  tokens:   <TokenScreen />,
   settings: <SettingsScreen />,
 };
 

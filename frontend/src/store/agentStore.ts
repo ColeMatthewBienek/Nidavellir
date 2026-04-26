@@ -26,6 +26,15 @@ export interface MemoryRecord {
   importance:  number;
 }
 
+export interface ContextUsage {
+  model:         string;
+  currentTokens: number;
+  usableTokens:  number;
+  totalLimit:    number;
+  reserved:      number;
+  accurate:      boolean;
+}
+
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -70,6 +79,8 @@ interface AgentStore {
   clearMessages:            () => void;
   setConversationId:        (id: string | null) => void;
   setMemories:              (memories: MemoryRecord[]) => void;
+  contextUsage:             ContextUsage | null;
+  setContextUsage:          (usage: ContextUsage | null) => void;
 }
 
 // ── Store implementation ───────────────────────────────────────────────────────
@@ -184,4 +195,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   clearMessages:     () => set({ messages: [], isStreaming: false }),
   setConversationId: (id) => set({ conversationId: id }),
   setMemories:       (memories) => set({ memories }),
+  contextUsage:      null,
+  setContextUsage:   (usage) => set({ contextUsage: usage }),
 }));

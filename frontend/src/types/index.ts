@@ -1,6 +1,6 @@
 export type ScreenId =
   | 'chat' | 'plan' | 'schedule' | 'agents'
-  | 'tasks' | 'skills' | 'memory' | 'settings';
+  | 'tasks' | 'skills' | 'memory' | 'tokens' | 'settings';
 
 export type BackendStatus = 'unknown' | 'ok' | 'error';
 
