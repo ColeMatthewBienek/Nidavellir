@@ -324,18 +324,42 @@ class MemoryStore:
             self.log_event(event_type="deleted", memory_id=memory_id)
         return changed
 
-    def mark_used(self, memory_ids: list[str], session_id: str | None = None) -> None:
+    def mark_memories_used(self, memory_ids: list[str]) -> None:
+        """Increment use_count and set last_used for each memory ID.
+
+        This is the ONLY authorised write path for usage tracking.
+        Deduplicates IDs so passing the same ID twice only increments once.
+        """
         if not memory_ids:
             return
+        unique_ids = list(set(memory_ids))
         with self._conn() as conn:
-            for mid in memory_ids:
-                conn.execute(
-                    """UPDATE memories
-                       SET use_count = use_count + 1,
-                           last_used = datetime('now')
-                       WHERE id = ?""",
-                    (mid,),
-                )
+            conn.executemany(
+                """UPDATE memories
+                   SET use_count = use_count + 1,
+                       last_used = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [(mid,) for mid in unique_ids],
+            )
+
+    def save_memory(self, m: dict) -> str:
+        """Save a single memory dict and return its ID (convenience wrapper)."""
+        mid = m.get("id") or str(uuid.uuid4())
+        full = {
+            "id":          mid,
+            "content":     m.get("content", ""),
+            "category":    m.get("category", "thought"),
+            "memory_type": m.get("memory_type", "fact"),
+            "workflow":    m.get("workflow", "chat"),
+            "scope_type":  m.get("scope_type", "workflow"),
+            "scope_id":    m.get("scope_id", m.get("workflow", "chat")),
+            "tags":        m.get("tags", ""),
+            "confidence":  m.get("confidence", 0.9),
+            "importance":  m.get("importance", 5),
+            "source":      m.get("source", "manual"),
+        }
+        self.save_memories([full])
+        return mid
 
     # ── Memory reads ──────────────────────────────────────────────────────────
 
