@@ -213,6 +213,8 @@ export function MemoryScreen() {
   const [consolidateState,  setConsolidateState]  = useState<ConsolidateState>('idle');
   const [consolidateResult, setConsolidateResult] = useState<{ groups_found: number; memories_affected: number } | null>(null);
   const [loading,           setLoading]           = useState(false);
+  const [dlMenuOpen,        setDlMenuOpen]        = useState(false);
+  const [dlRange,           setDlRange]           = useState<'24h' | '7d' | '30d' | 'all'>('24h');
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -253,6 +255,39 @@ export function MemoryScreen() {
     }
   };
 
+  const rangeToHours = { '24h': 24, '7d': 168, '30d': 720, 'all': 0 };
+
+  const downloadFile = async (url: string, fallbackName: string) => {
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const cd = resp.headers.get('content-disposition') ?? '';
+    const nameMatch = cd.match(/filename="([^"]+)"/);
+    const filename = nameMatch ? nameMatch[1] : fallbackName;
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const downloadActivityLog = () => {
+    const hours = rangeToHours[dlRange];
+    downloadFile(
+      `${API}/export/activity?hours=${hours}&workflow=chat&include_snapshots=true`,
+      `memory_activity.jsonl`,
+    );
+    setDlMenuOpen(false);
+  };
+
+  const downloadStateSnapshot = () => {
+    downloadFile(
+      `${API}/export/state?workflow=chat&include_events=true&include_vectors=true`,
+      `memory_state.json`,
+    );
+    setDlMenuOpen(false);
+  };
+
   return (
     <div style={{ display: 'flex', flex: 1, flexDirection: 'column', overflow: 'hidden', background: BG0 }}>
 
@@ -287,6 +322,75 @@ export function MemoryScreen() {
             >Cancel</button>
           </div>
         )}
+
+        {/* Download menu */}
+        <div style={{ position: 'relative' }}>
+          <button
+            onClick={() => setDlMenuOpen(o => !o)}
+            style={{ padding: '6px 14px', background: BG2, border: `1px solid ${BD}`, borderRadius: 6, cursor: 'pointer', fontSize: 12, color: T0 }}
+          >⬇ Download</button>
+
+          {dlMenuOpen && (
+            <div style={{
+              position: 'fixed', zIndex: 50, background: BG1, border: `1px solid ${BD}`,
+              borderRadius: 6, boxShadow: '0 4px 16px #00000055', minWidth: 220, padding: 8,
+              top: 48, right: 20,
+            }}>
+              {/* Range selector */}
+              <div style={{ fontSize: 10, color: T1, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6, padding: '0 4px' }}>
+                Activity range
+              </div>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 8, padding: '0 4px' }}>
+                {(['24h', '7d', '30d', 'all'] as const).map(r => (
+                  <button
+                    key={r}
+                    onClick={() => setDlRange(r)}
+                    style={{
+                      flex: 1, padding: '4px 0', fontSize: 10, fontFamily: MONO,
+                      background: dlRange === r ? '#1f6feb33' : BG2,
+                      border: `1px solid ${dlRange === r ? '#1f6feb88' : BD}`,
+                      color: dlRange === r ? '#58a6ff' : T1,
+                      borderRadius: 4, cursor: 'pointer',
+                    }}
+                  >{r}</button>
+                ))}
+              </div>
+
+              {/* Download activity log */}
+              <button
+                onClick={downloadActivityLog}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', padding: '8px 10px',
+                  background: 'transparent', border: 'none', borderRadius: 4,
+                  fontSize: 12, color: T0, cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = BG2)}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                📄 Activity Log (.jsonl)
+                <span style={{ fontSize: 10, color: T1, marginLeft: 6 }}>{dlRange}</span>
+              </button>
+
+              {/* Divider */}
+              <div style={{ height: 1, background: BD, margin: '4px 0' }} />
+
+              {/* Download state snapshot */}
+              <button
+                onClick={downloadStateSnapshot}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', padding: '8px 10px',
+                  background: 'transparent', border: 'none', borderRadius: 4,
+                  fontSize: 12, color: T0, cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = BG2)}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                🗂 State Snapshot (.json)
+                <span style={{ fontSize: 10, color: T1, marginLeft: 6 }}>current</span>
+              </button>
+            </div>
+          )}
+        </div>
 
         <button
           onClick={fetchAll}

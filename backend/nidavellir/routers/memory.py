@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, UTC
+
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/memory", tags=["memory"])
@@ -216,3 +220,82 @@ def get_context(request: Request, query: str = "", workflow: str = "chat"):
         "truncated":    pack.truncated,
         "prefix":       pack.to_prefix(),
     }
+
+
+def _get_vector_health(store) -> dict:
+    """Build vector health dict; raises on failure so callers can handle."""
+    from nidavellir.memory.embedding import DEFAULT_EMBED_MODEL
+    vs = store.vector_store
+    if vs is None:
+        return {"enabled": False, "ready": False}
+    return {
+        "enabled":         True,
+        "collection_name": vs.collection_info()["collection_name"],
+        "points_count":    vs.count(),
+        "embedding_model": DEFAULT_EMBED_MODEL,
+        "ready":           vs.is_ready(),
+    }
+
+
+@router.get("/export/activity")
+def export_activity(
+    request: Request,
+    hours: int = 24,
+    workflow: str = "chat",
+    event_type: str | None = None,
+    event_subject: str | None = None,
+    memory_id: str | None = None,
+    session_id: str | None = None,
+    include_snapshots: bool = True,
+    format: str = "jsonl",
+):
+    """Export memory activity events as JSONL (one JSON object per line)."""
+    store = _store(request)
+    records = store.export_activity_events(
+        hours=hours,
+        workflow=workflow,
+        event_type=event_type,
+        event_subject=event_subject,
+        memory_id=memory_id,
+        session_id=session_id,
+        include_snapshots=include_snapshots,
+    )
+    body = "\n".join(json.dumps(r, ensure_ascii=False) for r in records)
+    if body:
+        body += "\n"
+    ts = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
+    filename = f"memory_activity_{ts}.jsonl"
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/export/state")
+def export_state(
+    request: Request,
+    workflow: str = "chat",
+    include_events: bool = True,
+    event_limit: int = 100,
+    include_superseded: bool = True,
+    include_deleted: bool = False,
+    include_vectors: bool = True,
+):
+    """Export point-in-time memory state snapshot as JSON."""
+    store = _store(request)
+    snapshot = store.export_state_snapshot(
+        workflow=workflow,
+        include_events=include_events,
+        event_limit=event_limit,
+        include_superseded=include_superseded,
+        include_deleted=include_deleted,
+        include_vectors=include_vectors,
+    )
+    ts = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
+    filename = f"memory_state_{ts}.json"
+    return Response(
+        content=json.dumps(snapshot, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

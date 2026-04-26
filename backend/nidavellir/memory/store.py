@@ -766,6 +766,259 @@ class MemoryStore:
         from .consolidator import consolidate_memories
         return consolidate_memories(self, workflow=workflow, dry_run=dry_run, limit=limit)
 
+    # ── Export methods ────────────────────────────────────────────────────────
+
+    def export_activity_events(
+        self,
+        hours: int = 24,
+        workflow: str = "chat",
+        event_type: str | None = None,
+        event_subject: str | None = None,
+        memory_id: str | None = None,
+        session_id: str | None = None,
+        include_snapshots: bool = True,
+    ) -> list[dict]:
+        """Return enriched memory events for JSONL activity export.
+
+        Ordered oldest → newest. hours=0 means no time limit.
+        """
+        from datetime import datetime, UTC
+
+        clauses = []
+        params: list = []
+
+        if hours and hours > 0:
+            clauses.append("me.created_at >= datetime('now', ?)")
+            params.append(f"-{hours} hours")
+        if event_type:
+            clauses.append("me.event_type = ?")
+            params.append(event_type)
+        if event_subject:
+            clauses.append("me.event_subject = ?")
+            params.append(event_subject)
+        if memory_id:
+            clauses.append("me.memory_id = ?")
+            params.append(memory_id)
+        if session_id:
+            clauses.append("me.session_id = ?")
+            params.append(session_id)
+
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT me.* FROM memory_events me
+                    {where}
+                    ORDER BY me.created_at ASC""",
+                params,
+            ).fetchall()
+
+            snapshot_cache: dict[str, dict | None] = {}
+            records = []
+            exported_at = datetime.now(UTC).isoformat()
+
+            for row in rows:
+                d = dict(row)
+                raw = d.pop("payload_json", None)
+                try:
+                    payload = json.loads(raw) if raw else None
+                except Exception:
+                    payload = None
+                    d["payload_json"] = raw
+
+                mid = d.get("memory_id")
+                snap = None
+                if include_snapshots and mid:
+                    if mid not in snapshot_cache:
+                        mrow = conn.execute(
+                            "SELECT * FROM memories WHERE id = ?", (mid,)
+                        ).fetchone()
+                        snapshot_cache[mid] = dict(mrow) if mrow else None
+                    snap = snapshot_cache[mid]
+
+                records.append({
+                    "schema_version":  "memory_activity.v1",
+                    "exported_at":     exported_at,
+                    "timestamp":       d.get("created_at"),
+                    "event_id":        d.get("id"),
+                    "event_type":      d.get("event_type"),
+                    "event_subject":   d.get("event_subject"),
+                    "memory_id":       mid,
+                    "session_id":      d.get("session_id"),
+                    "workflow":        workflow,
+                    "payload":         payload,
+                    "memory_snapshot": snap,
+                    "diagnostic_tags": diagnostic_tags(
+                        d.get("event_type", ""),
+                        d.get("event_subject", ""),
+                        payload,
+                    ),
+                })
+
+        return records
+
+    def export_state_snapshot(
+        self,
+        workflow: str = "chat",
+        include_events: bool = True,
+        event_limit: int = 100,
+        include_superseded: bool = True,
+        include_deleted: bool = False,
+        include_vectors: bool = False,
+    ) -> dict:
+        """Return a point-in-time JSON snapshot of the memory system state."""
+        from datetime import datetime, UTC
+        from .context_pack import CONFIDENCE_INJECT_THRESHOLD
+
+        exported_at = datetime.now(UTC).isoformat()
+        summary = self.quality_summary(workflow)
+
+        # Fetch memories
+        clauses = ["(workflow = ? OR scope_type IN ('global','user'))"]
+        params: list = [workflow]
+
+        if not include_superseded:
+            clauses.append("superseded_by IS NULL")
+        if not include_deleted:
+            clauses.append("deleted_at IS NULL")
+
+        where = "WHERE " + " AND ".join(clauses)
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM memories {where}
+                    ORDER BY
+                      CASE WHEN superseded_by IS NOT NULL THEN 2
+                           WHEN deleted_at IS NOT NULL THEN 3
+                           ELSE 1 END,
+                      importance DESC, use_count DESC, created_at DESC""",
+                params,
+            ).fetchall()
+
+        memories = []
+        for row in rows:
+            m = dict(row)
+            if m.get("superseded_by"):
+                status = "superseded"
+                injectable = False
+                reason = "superseded"
+            elif m.get("deleted_at"):
+                status = "deleted"
+                injectable = False
+                reason = "deleted"
+            elif float(m.get("confidence", 0)) < CONFIDENCE_INJECT_THRESHOLD:
+                status = "active"
+                injectable = False
+                reason = "low_confidence"
+            else:
+                status = "active"
+                injectable = True
+                reason = f"confidence>={CONFIDENCE_INJECT_THRESHOLD} and active"
+
+            m["status"] = status
+            m["agent_readiness"] = {"injectable": injectable, "reason": reason}
+            memories.append(m)
+
+        # Recent events
+        recent_events = []
+        if include_events:
+            with self._conn() as conn:
+                erows = conn.execute(
+                    "SELECT * FROM memory_events ORDER BY created_at DESC LIMIT ?",
+                    (event_limit,),
+                ).fetchall()
+            for row in erows:
+                d = dict(row)
+                raw = d.pop("payload_json", None)
+                try:
+                    d["payload"] = json.loads(raw) if raw else None
+                except Exception:
+                    d["payload"] = None
+                d["timestamp"] = d.pop("created_at", None)
+                d["diagnostic_tags"] = diagnostic_tags(
+                    d.get("event_type", ""),
+                    d.get("event_subject", ""),
+                    d.get("payload"),
+                )
+                recent_events.append(d)
+
+        # Vector health
+        vector_health = None
+        if include_vectors and self._vector_store is not None:
+            try:
+                from .embedding import DEFAULT_EMBED_MODEL
+                vector_health = {
+                    "enabled":         True,
+                    "collection_name": self._vector_store.collection_info()["collection_name"],
+                    "points_count":    self._vector_store.count(),
+                    "embedding_model": DEFAULT_EMBED_MODEL,
+                    "ready":           self._vector_store.is_ready(),
+                }
+            except Exception as exc:
+                vector_health = {"enabled": True, "ready": False, "error": str(exc)[:200]}
+        elif include_vectors:
+            vector_health = {"enabled": False, "ready": False}
+
+        # Diagnostics
+        notes = [
+            "This export is a point-in-time snapshot",
+            "Use activity export for chronological event review",
+        ]
+        warnings: list[str] = []
+        active = summary.get("active_memories", 0)
+        never_used = summary.get("never_used", 0)
+        low_conf = summary.get("low_confidence_stored", 0)
+        fail_24h = summary.get("extraction_failures_24h", 0)
+
+        if active > 0 and never_used / active > 0.5:
+            warnings.append(f"{never_used} active memories have never been used")
+        if low_conf > 0:
+            warnings.append(f"{low_conf} memories stored below injection confidence threshold")
+        if fail_24h > 0:
+            warnings.append(f"{fail_24h} extraction failures in the last 24 hours")
+        if vector_health and vector_health.get("enabled") and \
+                vector_health.get("points_count", 0) < active:
+            warnings.append("Vector store has fewer points than active memories")
+
+        return {
+            "schema_version": "memory_state.v1",
+            "exported_at":    exported_at,
+            "workflow":       workflow,
+            "summary":        summary,
+            "memories":       memories,
+            "recent_events":  recent_events,
+            "vector_health":  vector_health,
+            "diagnostics":    {"notes": notes, "warnings": warnings},
+        }
+
+
+# ── Export utilities ─────────────────────────────────────────────────────────
+
+def diagnostic_tags(
+    event_type: str,
+    event_subject: str,
+    payload: dict | None,
+) -> list[str]:
+    """Return deterministic diagnostic tags for a memory event."""
+    TAG_MAP: dict[str, list[str]] = {
+        "vector_searched":       ["retrieval", "vector", "observe_only"],
+        "vector_search_failed":  ["retrieval", "vector", "failure"],
+        "retrieval_fallback":    ["retrieval", "fallback"],
+        "searched":              ["retrieval", "fallback"],
+        "injected":              ["injection", "usage"],
+        "embedding_created":     ["ingestion", "vector"],
+        "embedding_failed":      ["ingestion", "vector", "failure"],
+        "extraction_failed":     ["extraction", "failure"],
+        "parse_failed":          ["extraction", "failure", "parse"],
+        "dedup_rejected":        ["dedup"],
+        "consolidation_applied": ["consolidation", "mutation"],
+        "consolidation_proposed":["consolidation"],
+        "created":               ["ingestion"],
+        "superseded":            ["mutation"],
+        "deleted":               ["mutation"],
+    }
+    return TAG_MAP.get(event_type, [event_subject] if event_subject else [])
+
 
 # ── FTS query sanitizer ───────────────────────────────────────────────────────
 
