@@ -126,8 +126,17 @@ def _verify_fts5(conn: sqlite3.Connection) -> None:
 
 
 class MemoryStore:
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, vector_path: str | None = None) -> None:
         self._db_path = db_path
+        self._vector_store = None
+        if vector_path:
+            try:
+                from .vector_store import VectorStore
+                self._vector_store = VectorStore(vector_path)
+            except Exception as exc:
+                # Non-fatal — store works without vector layer
+                import warnings
+                warnings.warn(f"VectorStore init failed, running without embeddings: {exc}")
         self._init_schema()
 
     # ── Schema ────────────────────────────────────────────────────────────────
@@ -245,8 +254,45 @@ class MemoryStore:
                 event_subject="memory",
                 session_id=m.get("session_id"),
             )
+            self._try_embed_and_upsert(m)
             saved += 1
         return saved
+
+    def _try_embed_and_upsert(self, m: dict) -> None:
+        """Embed memory content and upsert into Qdrant. Non-fatal — logs on failure."""
+        if self._vector_store is None:
+            return
+        import nidavellir.memory.embedding as _emb
+        memory_id = m.get("id", "")
+        try:
+            vector = _emb.embed(m.get("content", ""))
+            self._vector_store.upsert(
+                memory_id,
+                vector,
+                payload={
+                    "content":     m.get("content", "")[:500],
+                    "category":    m.get("category", ""),
+                    "memory_type": m.get("memory_type", ""),
+                    "workflow":    m.get("workflow", "chat"),
+                    "confidence":  float(m.get("confidence", 0.0)),
+                    "importance":  int(m.get("importance", 5)),
+                    "scope_type":  m.get("scope_type", ""),
+                    "scope_id":    m.get("scope_id") or "",
+                },
+            )
+            self.log_event(
+                event_type="embedding_created",
+                memory_id=memory_id,
+                event_subject="embedding",
+                payload={"model": _emb.DEFAULT_EMBED_MODEL, "dim": _emb.EMBED_DIM},
+            )
+        except Exception as exc:
+            self.log_event(
+                event_type="embedding_failed",
+                memory_id=memory_id,
+                event_subject="embedding",
+                payload={"error": str(exc)[:200]},
+            )
 
     def update_memory(self, memory_id: str, updates: dict) -> bool:
         if not updates:

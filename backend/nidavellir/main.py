@@ -9,13 +9,14 @@ from .routers import health, agents, ws
 from .routers import memory as memory_router
 from .memory.store import MemoryStore
 
-_DB_PATH = Path(os.environ.get("NIDAVELLIR_DB_PATH", "./data/nidavellir.db"))
+_DB_PATH     = Path(os.environ.get("NIDAVELLIR_DB_PATH",     "./data/nidavellir.db"))
+_VECTOR_PATH = os.environ.get("NIDAVELLIR_VECTOR_PATH", "./data/qdrant") or None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    app.state.memory_store = MemoryStore(str(_DB_PATH))
+    app.state.memory_store = MemoryStore(str(_DB_PATH), vector_path=_VECTOR_PATH)
     yield
     # No explicit close needed — connections are per-operation
 
