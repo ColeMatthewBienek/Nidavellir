@@ -702,7 +702,9 @@ class MemoryStore:
     def quality_events(self, workflow: str = "chat", limit: int = 50) -> list[dict]:
         relevant = (
             "extraction_failed", "parse_failed", "dedup_rejected",
-            "retrieval_fallback", "consolidation_applied", "consolidation_proposed",
+            "retrieval_fallback", "searched",
+            "vector_searched", "vector_search_failed",
+            "consolidation_applied", "consolidation_proposed",
         )
         placeholders = ",".join("?" * len(relevant))
         with self._conn() as conn:

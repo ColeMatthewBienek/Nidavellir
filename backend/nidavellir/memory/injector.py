@@ -118,26 +118,51 @@ def select_memories(
 
 # ── Vector observation (Phase 2B — log only, no injection) ───────────────────
 
-def _observe_vectors(store: MemoryStore, query: str, fts_count: int) -> None:
-    """Run vector search and log results. Never modifies selection or scoring."""
+def _observe_vectors(
+    store: MemoryStore,
+    query: str,
+    fts_count: int = 0,
+    limit: int = 20,
+) -> list[dict]:
+    """Run vector search and log results. Never modifies selection or scoring.
+
+    Logs vector_searched on success, vector_search_failed on exception.
+    Never raises — failures are always logged, never silently swallowed.
+    """
     if not query or not query.strip():
-        return
+        return []
+
+    logger.info("vector_observe_start", extra={"query": query[:80]})
+
     try:
         search_vectors = _get_search_vectors()
-        vector_results = search_vectors(store, query)
-    except Exception:
-        vector_results = []
+        vector_results = search_vectors(store, query, limit=limit)
 
-    store.log_event(
-        event_type="vector_searched",
-        event_subject="retrieval",
-        payload={
-            "query":                query[:200],
-            "top_results":          vector_results[:5],
-            "fts_results_count":    fts_count,
-            "vector_results_count": len(vector_results),
-        },
-    )
+        store.log_event(
+            event_type="vector_searched",
+            event_subject="retrieval",
+            payload={
+                "query":                query[:200],
+                "top_results":          vector_results[:5],
+                "fts_results_count":    fts_count,
+                "vector_results_count": len(vector_results),
+            },
+        )
+
+        logger.info("vector_observe_complete", extra={"count": len(vector_results)})
+        return vector_results
+
+    except Exception as exc:
+        store.log_event(
+            event_type="vector_search_failed",
+            event_subject="retrieval",
+            payload={
+                "query": query[:200],
+                "error": str(exc)[:300],
+            },
+        )
+        logger.warning("vector_observe_failed", extra={"error": str(exc)[:100]})
+        return []
 
 
 # ── Side-effecting API ────────────────────────────────────────────────────────
