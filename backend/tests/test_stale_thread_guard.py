@@ -2,16 +2,13 @@
 
 Spec: stale-thread-provider-switch-patch-spec.md
 
-Invariants:
-  1. Rust-style log lines from Codex must not appear in the stream.
-  2. Stale async callbacks (error log lines) must not crash or reach the user.
-  3. Provider/model switch preserves an existing conversation_id.
-  4. context_update is emitted immediately after new_session.
-  5. CodexAgent stderr is drained separately and does not pollute stdout.
+Codex writes its interactive output to stderr; we merge stderr into stdout
+(stderr=STDOUT) so the stream state machine sees everything. Rust tracing log
+lines that arrive in the merged stream are filtered in stream() before being
+yielded to the client.
 """
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,7 +19,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_stream_filters_rust_error_log_lines():
-    """Timestamped Rust ERROR lines from Codex must not appear in stream output."""
+    """Timestamped Rust ERROR lines must not appear in stream output."""
     from nidavellir.agents.codex_agent import CodexAgent
 
     agent = CodexAgent(slot_id=0, workdir=Path("/tmp"))
@@ -44,16 +41,14 @@ async def test_stream_filters_rust_error_log_lines():
     mock_stdout.readline = AsyncMock(side_effect=lines)
     mock_process = MagicMock()
     mock_process.stdout = mock_stdout
-    mock_process.stderr = AsyncMock()
-    mock_process.stderr.readline = AsyncMock(side_effect=[b""])
     agent._process = mock_process
 
     chunks = [chunk async for chunk in agent.stream()]
     full = "".join(chunks)
 
-    assert "ERROR codex_core" not in full, "Rust error must be filtered from stream"
-    assert "Hello there." in full, "Normal response must be yielded"
-    assert "More content." in full, "Normal response must be yielded"
+    assert "ERROR codex_core" not in full, "Rust error must be filtered"
+    assert "Hello there." in full
+    assert "More content." in full
 
 
 # ── Test 2: WARN-level Rust log lines are also filtered ───────────────────────
@@ -81,8 +76,6 @@ async def test_stream_filters_rust_warn_log_lines():
     mock_stdout.readline = AsyncMock(side_effect=lines)
     mock_process = MagicMock()
     mock_process.stdout = mock_stdout
-    mock_process.stderr = AsyncMock()
-    mock_process.stderr.readline = AsyncMock(side_effect=[b""])
     agent._process = mock_process
 
     chunks = [chunk async for chunk in agent.stream()]
@@ -129,42 +122,42 @@ async def test_context_update_emitted_on_new_session():
     assert msg["conversation_id"] == "conv-x"
 
 
-# ── Test 5: CodexAgent stderr drain does not propagate to stream ──────────────
+# ── Test 5: multiple Rust log lines interspersed in merged stream are filtered ─
 
 @pytest.mark.asyncio
-async def test_codex_stderr_drain_does_not_propagate():
-    """Error lines on Codex stderr must be swallowed server-side, not yielded."""
+async def test_multiple_rust_log_lines_all_filtered():
+    """All Rust log lines in the merged stdout+stderr stream must be stripped."""
     from nidavellir.agents.codex_agent import CodexAgent
 
     agent = CodexAgent(slot_id=0, workdir=Path("/tmp"))
 
-    stdout_lines = [
+    lines = [
         b"--------\n",
+        b"2026-04-26T23:00:00Z WARN codex_core::init: starting up\n",
         b"--------\n",
         b"codex\n",
         b"Clean response.\n",
+        b"2026-04-26T23:00:01Z ERROR codex_core::session: stale thread write\n",
+        b"Second paragraph.\n",
+        b"2026-04-26T23:00:02Z INFO codex_core::rollout: recorded\n",
         b"tokens used\n",
         b"10\n",
         b"5\n",
         b"",
     ]
-    stderr_lines = [
-        b"2026-04-26T23:00:00Z ERROR codex_core::session: stale thread write\n",
-        b"",
-    ]
 
     mock_stdout = AsyncMock()
-    mock_stdout.readline = AsyncMock(side_effect=stdout_lines)
-    mock_stderr = AsyncMock()
-    mock_stderr.readline = AsyncMock(side_effect=stderr_lines)
+    mock_stdout.readline = AsyncMock(side_effect=lines)
     mock_process = MagicMock()
     mock_process.stdout = mock_stdout
-    mock_process.stderr = mock_stderr
     agent._process = mock_process
 
     chunks = [chunk async for chunk in agent.stream()]
     full = "".join(chunks)
 
     assert "Clean response." in full
+    assert "Second paragraph." in full
     assert "ERROR" not in full
-    assert "stale thread" not in full
+    assert "WARN" not in full
+    assert "INFO" not in full
+    assert "codex_core" not in full

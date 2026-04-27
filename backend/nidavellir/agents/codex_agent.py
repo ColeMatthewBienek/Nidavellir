@@ -57,28 +57,17 @@ class CodexAgent(CLIAgent):
         return ["codex", "exec", "-m", model]
 
     async def start(self) -> None:
+        # Codex writes its interactive output (dividers, role labels, content) to
+        # stderr. Merging stderr into stdout lets the stream state machine see it.
+        # Rust log lines (stale-thread errors) are filtered in stream() below.
         self._process = await asyncio.create_subprocess_exec(
             *self.cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             cwd=self.workdir,
         )
         self.status = "running"
-        # Drain stderr in background so stale-thread errors don't pollute stdout
-        asyncio.create_task(self._drain_stderr())
-
-    async def _drain_stderr(self) -> None:
-        """Drain Codex stderr silently. Lines are discarded server-side."""
-        if not self._process or not self._process.stderr:
-            return
-        try:
-            while True:
-                raw = await self._process.stderr.readline()
-                if not raw:
-                    break
-        except Exception:
-            pass
 
     async def send(self, text: str) -> None:
         if self._process and self._process.stdin:
