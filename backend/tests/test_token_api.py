@@ -51,16 +51,19 @@ def _insert(store, session_id="s1", input_t=1000, output_t=300,
 @pytest.mark.asyncio
 async def test_context_usage_returns_200(tmp_path):
     _store(tmp_path)
+    # conversation_id is now required — create a valid conversation first
+    app.state.memory_store.create_conversation("s1", model_id="claude-sonnet-4-6", provider_id="anthropic")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        r = await c.get("/api/context/usage?session_id=s1&model=claude-sonnet-4-6&provider=anthropic")
+        r = await c.get("/api/context/usage?conversation_id=s1&model=claude-sonnet-4-6&provider=anthropic")
     assert r.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_context_usage_response_shape(tmp_path):
     _store(tmp_path)
+    app.state.memory_store.create_conversation("s1", model_id="claude-sonnet-4-6", provider_id="anthropic")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        r = await c.get("/api/context/usage?session_id=s1&model=claude-sonnet-4-6&provider=anthropic")
+        r = await c.get("/api/context/usage?conversation_id=s1&model=claude-sonnet-4-6&provider=anthropic")
     body = r.json()
     for field in ("model", "provider", "currentTokens", "usableTokens",
                   "percentUsed", "state", "accuracy", "contextLimit",
@@ -70,13 +73,14 @@ async def test_context_usage_response_shape(tmp_path):
 
 @pytest.mark.asyncio
 async def test_context_usage_state_correct(tmp_path):
-    """No conversation_id → no payload → zero tokens → ok state."""
+    """Valid conversation with no messages → zero tokens → ok state."""
     _store(tmp_path)
+    app.state.memory_store.create_conversation("empty-conv", model_id="claude-sonnet-4-6", provider_id="anthropic")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        r = await c.get("/api/context/usage?model=claude-sonnet-4-6&provider=anthropic")
+        r = await c.get("/api/context/usage?conversation_id=empty-conv&model=claude-sonnet-4-6&provider=anthropic")
+    assert r.status_code == 200
     body = r.json()
     assert body["state"] == "ok"
-    # Without a conversation_id, payload is empty — currentTokens must be 0
     assert body["currentTokens"] == 0
 
 
@@ -86,9 +90,11 @@ async def test_context_usage_not_from_historical_totals(tmp_path):
     store = _store(tmp_path)
     # Insert huge historical records — must be ignored by context/usage
     _insert(store, session_id="s1", input_t=99999, output_t=99999)
+    # Create a conversation with no messages — tokens must be 0
+    app.state.memory_store.create_conversation("fresh-conv", model_id="claude-sonnet-4-6", provider_id="anthropic")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        # No conversation_id → payload is empty regardless of historical records
-        r = await c.get("/api/context/usage?model=claude-sonnet-4-6&provider=anthropic")
+        r = await c.get("/api/context/usage?conversation_id=fresh-conv&model=claude-sonnet-4-6&provider=anthropic")
+    assert r.status_code == 200
     body = r.json()
     assert body["currentTokens"] == 0, (
         "Historical token records must not influence context pressure"

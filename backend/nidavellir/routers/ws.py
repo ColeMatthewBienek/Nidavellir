@@ -37,7 +37,15 @@ def _build_context_update(
     conversation_id: str | None,
     model: str,
     provider: str,
-) -> dict:
+) -> dict | None:
+    """Return a context_update payload, or None if conversation_id is missing."""
+    import logging
+    if not conversation_id:
+        logging.getLogger(__name__).warning(
+            "context_update_suppressed",
+            extra={"reason": "missing_conversation_id"},
+        )
+        return None
     return {
         "type":            "context_update",
         "conversation_id": conversation_id,
@@ -259,11 +267,13 @@ async def chat_websocket(ws: WebSocket) -> None:
                     conversation_id=conversation_id,
                 ))
                 # Emit context_update so frontend refreshes pressure for new provider/model
-                await ws.send_json(_build_context_update(
+                _cu = _build_context_update(
                     conversation_id=conversation_id,
                     model=model_id,
                     provider=provider_id,
-                ))
+                )
+                if _cu:
+                    await ws.send_json(_cu)
 
             elif msg_type == "session_switch":
                 mode     = data.get("mode", "clean")
@@ -295,11 +305,13 @@ async def chat_websocket(ws: WebSocket) -> None:
                     "mode":            mode,
                     "seed":            seed,
                 })
-                await ws.send_json(_build_context_update(
+                _cu2 = _build_context_update(
                     conversation_id=conversation_id,
                     model=model_id,
                     provider=provider_id,
-                ))
+                )
+                if _cu2:
+                    await ws.send_json(_cu2)
 
             elif msg_type == "message":
                 content = data.get("content", "").strip()
@@ -353,12 +365,13 @@ async def chat_websocket(ws: WebSocket) -> None:
                 # Do NOT compute current_tokens here — the API endpoint calculates
                 # it correctly from conversation_messages (the next request payload).
                 try:
-                    await ws.send_json({
-                        "type":            "context_update",
-                        "conversation_id": conversation_id,
-                        "model":           model_id or DEFAULT_MODEL,
-                        "provider":        provider_id,
-                    })
+                    _cu3 = _build_context_update(
+                        conversation_id=conversation_id,
+                        model=model_id or DEFAULT_MODEL,
+                        provider=provider_id,
+                    )
+                    if _cu3:
+                        await ws.send_json(_cu3)
                 except Exception:
                     pass
 

@@ -4,7 +4,7 @@ import json
 from datetime import datetime, UTC, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from nidavellir.tokens.context_meter import compute_context_pressure
 from nidavellir.tokens.anomaly import detect_anomalies
@@ -34,17 +34,37 @@ def context_usage(
     Uses conversation messages (the actual content that will be sent to the provider),
     NOT accumulated session token totals from historical records.
     """
+    import logging
     from nidavellir.tokens.context_meter import estimate_payload_tokens
 
-    # Resolve conversation messages from memory store
+    _log = logging.getLogger(__name__)
+
+    # conversation_id is required — reject empty or missing
+    conv_id = (conversation_id or "").strip() or (session_id or "").strip()
+    if not conv_id:
+        _log.warning("context_usage_request_rejected", extra={"reason": "missing_conversation_id"})
+        return JSONResponse(
+            status_code=400,
+            content={"error": "conversation_id_required",
+                     "message": "conversation_id is required for context usage calculation"},
+        )
+
+    # Validate the conversation exists — reject phantom ids
     messages: list[dict] = []
-    conv_id = conversation_id or session_id
-    if conv_id:
-        try:
-            memory_store = request.app.state.memory_store
-            messages = memory_store.get_conversation_messages(conv_id)
-        except Exception:
-            pass
+    try:
+        memory_store = request.app.state.memory_store
+        conv = memory_store.get_conversation(conv_id)
+        if not conv:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "conversation_not_found", "conversation_id": conv_id},
+            )
+        messages = memory_store.get_conversation_messages(conv_id)
+    except Exception:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "conversation_not_found", "conversation_id": conv_id},
+        )
 
     # Count tokens from the actual payload — this is what the context window evaluates
     current = estimate_payload_tokens(messages)

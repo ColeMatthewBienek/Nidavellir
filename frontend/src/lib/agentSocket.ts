@@ -8,10 +8,19 @@ let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _agentMessageOpen = false;
 
 async function _fetchContextUsage(conversationId: string, model: string, provider: string): Promise<void> {
+  // Guard: a valid conversation_id is required — never fetch with an empty id
+  if (!conversationId || conversationId.trim() === "") {
+    console.warn(JSON.stringify({ event: "context_usage_refresh_skipped", reason: "missing_conversation_id" }));
+    return;
+  }
   try {
     const params = new URLSearchParams({ conversation_id: conversationId, model, provider });
     const resp = await fetch(`${API_BASE}/api/context/usage?${params}`);
-    if (!resp.ok) return;
+    // On any non-2xx response, keep the existing contextUsage — do not overwrite with zero
+    if (!resp.ok) {
+      console.warn(JSON.stringify({ event: "context_usage_refresh_skipped", reason: `http_${resp.status}` }));
+      return;
+    }
     const data = await resp.json();
     useAgentStore.getState().setContextUsage({
       model:         data.model,
@@ -25,7 +34,7 @@ async function _fetchContextUsage(conversationId: string, model: string, provide
       lastUpdatedAt: data.lastUpdatedAt ?? new Date().toISOString(),
     });
   } catch {
-    // non-fatal
+    // non-fatal — keep existing contextUsage
   }
 }
 
@@ -74,8 +83,12 @@ function connect(): void {
         break;
 
       case "context_update":
+        if (!data.conversation_id) {
+          console.warn("Ignoring context_update without conversation_id");
+          break;
+        }
         _fetchContextUsage(
-          data.conversation_id ?? "",
+          data.conversation_id as string,
           data.model ?? "claude-sonnet-4-6",
           data.provider ?? "claude",
         ).catch(() => {});
