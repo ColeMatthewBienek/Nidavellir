@@ -5,6 +5,7 @@ interface HandoffModalProps {
   onContinue:  () => void;
   onClean:     () => void;
   onReview:    () => void;
+  onCancel:    () => void;
 }
 
 export function HandoffModal({
@@ -14,30 +15,56 @@ export function HandoffModal({
   onContinue,
   onClean,
   onReview,
+  onCancel,
 }: HandoffModalProps) {
   if (!visible) return null;
 
   return (
-    <div style={{
-      position: 'fixed',
-      inset: 0,
-      background: '#00000077',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 200,
-    }}>
-      <div style={{
-        background: 'var(--bg1)',
-        border: '1px solid var(--bd)',
-        borderRadius: 10,
-        padding: 28,
-        maxWidth: 440,
-        width: '90%',
-        boxShadow: '0 24px 64px #00000088',
-      }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)', marginBottom: 6 }}>
-          Switch to {newProvider}
+    // Backdrop — clicking outside the card cancels
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: '#00000077',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 200,
+      }}
+    >
+      {/* Modal card — stop click propagation so backdrop click doesn't fire inside card */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: 'var(--bg1)',
+          border: '1px solid var(--bd)',
+          borderRadius: 10,
+          padding: 28,
+          maxWidth: 440,
+          width: '90%',
+          boxShadow: '0 24px 64px #00000088',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)' }}>
+            Switch to {newProvider}
+          </div>
+          <button
+            onClick={onCancel}
+            aria-label="Cancel"
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--t1)',
+              fontSize: 18,
+              lineHeight: 1,
+              padding: '0 2px',
+            }}
+          >
+            ×
+          </button>
         </div>
         <div style={{ fontSize: 12, color: 'var(--t1)', marginBottom: 18, lineHeight: 1.6 }}>
           You have context in the current session. Choose how to proceed:
