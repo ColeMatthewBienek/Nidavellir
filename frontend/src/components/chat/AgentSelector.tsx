@@ -114,6 +114,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const connectionStatus = useAgentStore((s) => s.connectionStatus);
   const conversationId   = useAgentStore((s) => s.conversationId);
   const messages         = useAgentStore((s) => s.messages);
+  const contextTokens    = useAgentStore((s) => s.contextUsage?.currentTokens ?? 0);
   const handoffPending   = useAgentStore((s) => s.handoffPending);
   const handoffProvider  = useAgentStore((s) => s.handoffProvider);
   const handoffSummary   = useAgentStore((s) => s.handoffSummary);
@@ -168,7 +169,8 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const handleSelect = (model: AgentModelDef) => {
     if (!model.available) return;
     setOpen(false);
-    const hasMeaningfulContext = messages.length > 0 && conversationId != null;
+    const hasMeaningfulContext =
+      messages.length > 0 || conversationId != null || contextTokens > 0;
     if (hasMeaningfulContext) {
       // Show handoff modal before committing to the switch
       setPendingModel(model);
