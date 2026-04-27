@@ -69,7 +69,7 @@ class CodexAgent(CLIAgent):
         asyncio.create_task(self._drain_stderr())
 
     async def _drain_stderr(self) -> None:
-        """Read Codex stderr to /dev/null; log stale-thread writes as warnings only."""
+        """Drain Codex stderr silently. Lines are discarded server-side."""
         if not self._process or not self._process.stderr:
             return
         try:
@@ -77,12 +77,6 @@ class CodexAgent(CLIAgent):
                 raw = await self._process.stderr.readline()
                 if not raw:
                     break
-                line = raw.decode(errors="replace").rstrip("\n")
-                if line:
-                    log.warning(
-                        "codex_stderr",
-                        extra={"event": "stale_thread_write_ignored", "line": line},
-                    )
         except Exception:
             pass
 
