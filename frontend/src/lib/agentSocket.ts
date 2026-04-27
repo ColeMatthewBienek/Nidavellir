@@ -15,11 +15,14 @@ async function _fetchContextUsage(conversationId: string, model: string, provide
     const data = await resp.json();
     useAgentStore.getState().setContextUsage({
       model:         data.model,
+      provider:      data.provider ?? provider,
       currentTokens: data.currentTokens,
       usableTokens:  data.usableTokens,
       totalLimit:    data.contextLimit,
-      reserved:      data.reservedOutputTokens,
+      percentUsed:   data.percentUsed ?? 0,
+      state:         data.state ?? "ok",
       accurate:      data.accuracy === "accurate",
+      lastUpdatedAt: data.lastUpdatedAt ?? new Date().toISOString(),
     });
   } catch {
     // non-fatal
@@ -78,6 +81,17 @@ function connect(): void {
         ).catch(() => {});
         break;
 
+      case "session_switch_ready": {
+        const sid = data.conversation_id as string | undefined;
+        if (sid) s.setConversationId(sid);
+        s.clearMessages();
+        s.setHandoffPending(false);
+        const provider = (data.provider as string | undefined) ?? useAgentStore.getState().selectedProvider;
+        s.setToastMessage(`Model changed to ${provider}`);
+        _fetchMemories().catch(() => {});
+        break;
+      }
+
       case "chunk":
         if (!_agentMessageOpen) {
           // First chunk of a new response — create the agent bubble
@@ -130,6 +144,22 @@ export function initSocket(): void {
     return;
   }
   connect();
+}
+
+export function sendSessionSwitch(
+  providerId: string,
+  modelId: string,
+  mode: "continue" | "clean" | "review",
+  oldConversationId?: string | null,
+): void {
+  if (_ws?.readyState !== WebSocket.OPEN) return;
+  _ws.send(JSON.stringify({
+    type:                "session_switch",
+    provider_id:         providerId,
+    model_id:            modelId,
+    mode,
+    old_conversation_id: oldConversationId ?? undefined,
+  }));
 }
 
 export function sendNewSession(providerId: string, modelId: string, conversationId?: string | null): void {

@@ -28,11 +28,14 @@ export interface MemoryRecord {
 
 export interface ContextUsage {
   model:         string;
+  provider:      string;
   currentTokens: number;
   usableTokens:  number;
   totalLimit:    number;
-  reserved:      number;
+  percentUsed:   number;
+  state:         "ok" | "warn" | "prepare" | "force" | "blocked";
   accurate:      boolean;
+  lastUpdatedAt: string;
 }
 
 function generateId(): string {
@@ -81,6 +84,15 @@ interface AgentStore {
   setMemories:              (memories: MemoryRecord[]) => void;
   contextUsage:             ContextUsage | null;
   setContextUsage:          (usage: ContextUsage | null) => void;
+
+  // Session continuity
+  handoffPending:   boolean;
+  handoffProvider:  string;
+  handoffSummary:   string | null;
+  toastMessage:     string;
+  setHandoffPending:  (pending: boolean, provider?: string) => void;
+  setHandoffSummary:  (summary: string | null) => void;
+  setToastMessage:    (msg: string) => void;
 }
 
 // ── Store implementation ───────────────────────────────────────────────────────
@@ -197,4 +209,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   setMemories:       (memories) => set({ memories }),
   contextUsage:      null,
   setContextUsage:   (usage) => set({ contextUsage: usage }),
+
+  // ── Session continuity ────────────────────────────────────────────────────
+  handoffPending:  false,
+  handoffProvider: "",
+  handoffSummary:  null,
+  toastMessage:    "",
+
+  setHandoffPending: (pending, provider = "") =>
+    set({ handoffPending: pending, handoffProvider: provider }),
+  setHandoffSummary: (summary) => set({ handoffSummary: summary }),
+  setToastMessage:   (msg) => set({ toastMessage: msg }),
 }));

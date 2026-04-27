@@ -114,6 +114,19 @@ CREATE INDEX IF NOT EXISTS idx_memory_events_type    ON memory_events(event_type
 """
 
 
+def _migrate_conversations_continuity(conn: sqlite3.Connection) -> None:
+    """Safe migration: add continuity columns to conversations if missing."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+    for col, defn in [
+        ("parent_id",       "TEXT"),
+        ("status",          "TEXT NOT NULL DEFAULT 'active'"),
+        ("continuity_mode", "TEXT"),
+        ("seed_text",       "TEXT"),
+    ]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {defn}")
+
+
 def _verify_fts5(conn: sqlite3.Connection) -> None:
     """Module-level so tests can monkeypatch nidavellir.memory.store._verify_fts5."""
     try:
@@ -153,6 +166,7 @@ class MemoryStore:
             conn.execute("PRAGMA synchronous=NORMAL;")
             _verify_fts5(conn)
             conn.executescript(_DDL)
+            _migrate_conversations_continuity(conn)
             conn.commit()
         finally:
             conn.close()
@@ -500,6 +514,50 @@ class MemoryStore:
                 (conversation_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_conversation(self, conversation_id: str) -> dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def freeze_conversation(self, conversation_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE conversations SET status = 'frozen', updated_at = datetime('now') WHERE id = ?",
+                (conversation_id,),
+            )
+
+    def create_child_conversation(
+        self,
+        parent_id: str,
+        *,
+        new_id: str,
+        workflow: str = "chat",
+        model_id: str | None = None,
+        provider_id: str | None = None,
+        continuity_mode: str | None = None,
+        seed_text: str | None = None,
+    ) -> dict:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO conversations
+                   (id, workflow, model_id, provider_id, parent_id, status, continuity_mode, seed_text)
+                   VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
+                (new_id, workflow, model_id, provider_id, parent_id, continuity_mode, seed_text),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (new_id,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def get_conversation_seed(self, conversation_id: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT seed_text FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        return row[0] if row else None
 
     def get_recent_conversations(self, workflow: str = "chat", limit: int = 20) -> list[dict]:
         with self._conn() as conn:

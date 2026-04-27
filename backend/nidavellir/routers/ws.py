@@ -265,6 +265,42 @@ async def chat_websocket(ws: WebSocket) -> None:
                     provider=provider_id,
                 ))
 
+            elif msg_type == "session_switch":
+                mode     = data.get("mode", "clean")
+                old_id   = conversation_id or data.get("old_conversation_id")
+                new_prov = data.get("provider_id", provider_id)
+                new_mod  = data.get("model_id",    model_id)
+
+                if store is not None and old_id:
+                    try:
+                        from nidavellir.sessions.continuity import switch_session
+                        conversation_id = switch_session(
+                            store, old_id,
+                            new_provider=new_prov,
+                            new_model=new_mod,
+                            mode=mode,
+                        )
+                    except Exception:
+                        conversation_id = str(uuid.uuid4())
+                else:
+                    conversation_id = str(uuid.uuid4())
+
+                provider_id = new_prov
+                model_id    = new_mod
+
+                seed = store.get_conversation_seed(conversation_id) if store else None
+                await ws.send_json({
+                    "type":            "session_switch_ready",
+                    "conversation_id": conversation_id,
+                    "mode":            mode,
+                    "seed":            seed,
+                })
+                await ws.send_json(_build_context_update(
+                    conversation_id=conversation_id,
+                    model=model_id,
+                    provider=provider_id,
+                ))
+
             elif msg_type == "message":
                 content = data.get("content", "").strip()
                 if not content:
@@ -273,12 +309,20 @@ async def chat_websocket(ws: WebSocket) -> None:
                 memory_context = ""
                 if store is not None and conversation_id is not None:
                     # Detect first turn BEFORE appending the user message
+                    turn_number   = store.count_conversation_messages(conversation_id) // 2
                     is_first_turn = store.count_conversation_messages(conversation_id) == 0
                     store.append_message(
                         conversation_id, str(uuid.uuid4()), "user", content
                     )
+
+                    # Inject continuity seed if applicable (expires after 8 turns)
+                    from nidavellir.sessions.handoff import should_inject_seed
+                    seed = store.get_conversation_seed(conversation_id)
+                    if seed and should_inject_seed(turn_number):
+                        memory_context = seed + "\n\n"
+
                     if is_first_turn:
-                        memory_context = get_context_prefix(
+                        memory_context += get_context_prefix(
                             store, content, workflow,
                             session_id=conversation_id,
                         )

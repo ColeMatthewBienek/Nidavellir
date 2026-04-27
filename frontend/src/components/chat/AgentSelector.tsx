@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAgentStore } from "@/store/agentStore";
-import { sendNewSession } from "@/lib/agentSocket";
+import { sendNewSession, sendSessionSwitch } from "@/lib/agentSocket";
 import { useAgentModels } from "@/hooks/useAgentModels";
 import { getProviderTheme, TIER_THEME } from "@/lib/providerTheme";
 import type { AgentModelDef } from "@/lib/types";
+import { HandoffModal } from "./HandoffModal";
+import { ToastBar } from "./ToastBar";
 
 // ── Design tokens (match /Design/nidavellir-screens.jsx) ─────────────────────
 const BG1  = '#161b22';
@@ -111,10 +113,19 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const setSelectedModel = useAgentStore((s) => s.setSelectedModel);
   const connectionStatus = useAgentStore((s) => s.connectionStatus);
   const conversationId   = useAgentStore((s) => s.conversationId);
+  const messages         = useAgentStore((s) => s.messages);
+  const handoffPending   = useAgentStore((s) => s.handoffPending);
+  const handoffProvider  = useAgentStore((s) => s.handoffProvider);
+  const handoffSummary   = useAgentStore((s) => s.handoffSummary);
+  const toastMessage     = useAgentStore((s) => s.toastMessage);
+  const setHandoffPending  = useAgentStore((s) => s.setHandoffPending);
+  const setHandoffSummary  = useAgentStore((s) => s.setHandoffSummary);
+  const setToastMessage    = useAgentStore((s) => s.setToastMessage);
   const { byProvider, loading } = useAgentModels();
 
-  const [open, setOpen]       = useState(false);
-  const [dropPos, setDropPos] = useState<DropPos | null>(null);
+  const [open, setOpen]             = useState(false);
+  const [dropPos, setDropPos]       = useState<DropPos | null>(null);
+  const [pendingModel, setPendingModel] = useState<AgentModelDef | null>(null);
 
   const wrapRef   = useRef<HTMLDivElement>(null);
   const btnRef    = useRef<HTMLButtonElement>(null);
@@ -156,9 +167,47 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
 
   const handleSelect = (model: AgentModelDef) => {
     if (!model.available) return;
-    setSelectedModel(model.id);
     setOpen(false);
-    sendNewSession(model.provider_id, model.model_id, conversationId);
+    const hasMeaningfulContext = messages.length > 0 && conversationId != null;
+    if (hasMeaningfulContext) {
+      // Show handoff modal before committing to the switch
+      setPendingModel(model);
+      setHandoffPending(true, model.provider_id);
+    } else {
+      // No context — switch immediately
+      setSelectedModel(model.id);
+      sendNewSession(model.provider_id, model.model_id, conversationId);
+    }
+  };
+
+  const handleHandoffContinue = () => {
+    if (!pendingModel) return;
+    setSelectedModel(pendingModel.id);
+    sendSessionSwitch(pendingModel.provider_id, pendingModel.model_id, "continue", conversationId);
+    setHandoffPending(false);
+    setPendingModel(null);
+  };
+
+  const handleHandoffClean = () => {
+    if (!pendingModel) return;
+    setSelectedModel(pendingModel.id);
+    sendSessionSwitch(pendingModel.provider_id, pendingModel.model_id, "clean", conversationId);
+    setHandoffPending(false);
+    setPendingModel(null);
+  };
+
+  const handleHandoffReview = async () => {
+    if (!pendingModel || !conversationId) return;
+    try {
+      const resp = await fetch(`http://localhost:7430/api/sessions/${conversationId}/snapshot`);
+      if (resp.ok) {
+        const snap = await resp.json();
+        setHandoffSummary(snap.summary ?? null);
+      }
+    } catch {
+      // show modal without summary
+    }
+    // Summary is now loaded (or not) — modal stays open, user sees it and picks Continue/Clean
   };
 
   const dotColor =
@@ -321,6 +370,18 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
         </span>
       </div>
       {dropdownPanel}
+      <HandoffModal
+        visible={handoffPending}
+        newProvider={handoffProvider}
+        summary={handoffSummary ?? undefined}
+        onContinue={handleHandoffContinue}
+        onClean={handleHandoffClean}
+        onReview={handleHandoffReview}
+      />
+      <ToastBar
+        message={toastMessage}
+        onDismiss={() => setToastMessage("")}
+      />
     </>
   );
 }

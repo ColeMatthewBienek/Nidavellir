@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routers import health, agents, ws
 from .routers import memory as memory_router
 from .routers import tokens as tokens_router
+from .routers import sessions as sessions_router
 from .memory.store import MemoryStore
 from .tokens.store import TokenUsageStore
 
@@ -43,3 +44,4 @@ app.include_router(agents.router)
 app.include_router(ws.router)
 app.include_router(memory_router.router)
 app.include_router(tokens_router.router)
+app.include_router(sessions_router.router)
