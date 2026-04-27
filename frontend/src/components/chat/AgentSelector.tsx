@@ -318,6 +318,25 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
     </button>
   );
 
+  // ── Shared overlays (position:fixed — must be in every return path) ─────────
+  const overlays = (
+    <>
+      <HandoffModal
+        visible={handoffPending}
+        newProvider={handoffProvider}
+        summary={handoffSummary ?? undefined}
+        onContinue={handleHandoffContinue}
+        onClean={handleHandoffClean}
+        onReview={handleHandoffReview}
+        onCancel={() => { setHandoffPending(false); setPendingModel(null); setHandoffSummary(null); }}
+      />
+      <ToastBar
+        message={toastMessage}
+        onDismiss={() => setToastMessage("")}
+      />
+    </>
+  );
+
   // ── Compact mode — button only (dropdown renders fixed into viewport) ───────
   if (compact) {
     return (
@@ -326,6 +345,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
           {pickerButton}
         </div>
         {dropdownPanel}
+        {overlays}
       </>
     );
   }
@@ -372,19 +392,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
         </span>
       </div>
       {dropdownPanel}
-      <HandoffModal
-        visible={handoffPending}
-        newProvider={handoffProvider}
-        summary={handoffSummary ?? undefined}
-        onContinue={handleHandoffContinue}
-        onClean={handleHandoffClean}
-        onReview={handleHandoffReview}
-        onCancel={() => { setHandoffPending(false); setPendingModel(null); setHandoffSummary(null); }}
-      />
-      <ToastBar
-        message={toastMessage}
-        onDismiss={() => setToastMessage("")}
-      />
+      {overlays}
     </>
   );
 }
