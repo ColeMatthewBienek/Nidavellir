@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -10,6 +11,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 import nidavellir.agents.registry as _agent_registry
 from nidavellir.memory.injector import get_context_prefix
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ws"])
 
@@ -221,6 +224,160 @@ async def _ingest_turn_usage(
         return None
 
 
+def _build_conversation_history(messages: list[dict]) -> str:
+    """Format prior conversation turns into a text block for the provider payload."""
+    if not messages:
+        return ""
+    lines = []
+    for msg in messages:
+        role    = msg.get("role", "unknown").capitalize()
+        content = (msg.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+async def handle_message_with_identity(
+    *,
+    ws,
+    content: str,
+    conversation_id: str | None,
+    provider_id: str,
+    model_id: str,
+    workflow: str = "chat",
+    store,
+    token_store,
+) -> str | None:
+    """Handle one user message turn with full conversation identity enforcement.
+
+    Returns the resolved conversation_id (may differ from input if auto-created).
+    Sends WS error and returns None if the conversation cannot be resolved.
+    """
+    from nidavellir.sessions.handoff import should_inject_seed
+
+    # ── Resolve conversation identity ─────────────────────────────────────────
+    if conversation_id:
+        # Validate provided id exists — reject phantoms
+        conv = store.get_conversation(conversation_id)
+        if not conv:
+            _log.warning("chat_send_rejected", extra={
+                "event": "chat_send_rejected",
+                "reason": "conversation_not_found",
+                "conversation_id": conversation_id,
+            })
+            await ws.send_json({
+                "type":            "error",
+                "error":           "conversation_not_found",
+                "conversation_id": conversation_id,
+            })
+            return None
+    else:
+        # Auto-create on first send
+        conversation_id = str(uuid.uuid4())
+        store.create_conversation(
+            conversation_id,
+            workflow=workflow,
+            model_id=model_id,
+            provider_id=provider_id,
+        )
+        _log.info("conversation_created_for_send", extra={
+            "event":           "conversation_created_for_send",
+            "conversation_id": conversation_id,
+            "reason":          "missing_conversation_id_on_first_send",
+        })
+        try:
+            await ws.send_json({
+                "type":            "conversation_created",
+                "conversation_id": conversation_id,
+            })
+        except Exception:
+            pass
+
+    # ── Build provider payload with conversation history ──────────────────────
+    prior_messages = store.get_conversation_messages(conversation_id)
+    turn_number    = len(prior_messages) // 2
+    is_first_turn  = len(prior_messages) == 0
+
+    # Persist user message BEFORE building payload
+    store.append_message(conversation_id, str(uuid.uuid4()), "user", content)
+    _log.debug("conversation_message_persisted", extra={
+        "event": "conversation_message_persisted",
+        "conversation_id": conversation_id,
+        "role": "user",
+    })
+
+    # Build context: history + seeds + memory
+    memory_context = ""
+
+    seed = store.get_conversation_seed(conversation_id)
+    if seed and should_inject_seed(turn_number):
+        memory_context = seed + "\n\n"
+
+    if is_first_turn:
+        memory_context += get_context_prefix(
+            store, content, workflow, session_id=conversation_id,
+        )
+
+    # Prepend prior conversation history for multi-turn continuity
+    history_text = _build_conversation_history(prior_messages)
+    if history_text:
+        memory_context = (history_text + "\n\n" + memory_context).strip()
+
+    _log.debug("provider_payload_built", extra={
+        "event":           "provider_payload_built",
+        "conversation_id": conversation_id,
+        "message_count":   len(prior_messages) + 1,
+        "provider":        provider_id,
+        "model":           model_id,
+    })
+
+    # ── Run agent ─────────────────────────────────────────────────────────────
+    response, agent = await _handle_message(
+        ws, content, provider_id, model_id or None,
+        memory_context=memory_context,
+    )
+
+    # Read token usage before killing
+    await _ingest_turn_usage(
+        agent=agent,
+        provider_id=provider_id,
+        model_id=model_id or DEFAULT_MODEL,
+        session_id=conversation_id,
+        token_store=token_store,
+    )
+    if agent is not None:
+        try:
+            await agent.kill()
+        except Exception:
+            pass
+
+    # ── Persist assistant response ─────────────────────────────────────────────
+    if response:
+        store.append_message(conversation_id, str(uuid.uuid4()), "agent", response)
+        _log.debug("conversation_message_persisted", extra={
+            "event": "conversation_message_persisted",
+            "conversation_id": conversation_id,
+            "role": "agent",
+        })
+        asyncio.create_task(
+            _extract_and_store(store=store, conversation_id=conversation_id, workflow=workflow)
+        )
+
+    # ── Emit context_update ───────────────────────────────────────────────────
+    try:
+        _cu = _build_context_update(
+            conversation_id=conversation_id,
+            model=model_id or DEFAULT_MODEL,
+            provider=provider_id,
+        )
+        if _cu:
+            await ws.send_json(_cu)
+    except Exception:
+        pass
+
+    return conversation_id
+
+
 @router.websocket("/api/ws")
 async def chat_websocket(ws: WebSocket) -> None:
     await ws.accept()
@@ -318,74 +475,43 @@ async def chat_websocket(ws: WebSocket) -> None:
                 if not content:
                     continue
 
-                memory_context = ""
-                if store is not None and conversation_id is not None:
-                    # Detect first turn BEFORE appending the user message
-                    turn_number   = store.count_conversation_messages(conversation_id) // 2
-                    is_first_turn = store.count_conversation_messages(conversation_id) == 0
-                    store.append_message(
-                        conversation_id, str(uuid.uuid4()), "user", content
+                # Use conversation_id from message payload if provided
+                # (handles reconnect case where WS scope lost its identity)
+                msg_conv_id = data.get("conversation_id") or conversation_id
+
+                if store is not None:
+                    token_store = getattr(ws.app.state, "token_store", None)
+                    result_conv_id = await handle_message_with_identity(
+                        ws=ws,
+                        content=content,
+                        conversation_id=msg_conv_id,
+                        provider_id=provider_id,
+                        model_id=model_id or DEFAULT_MODEL,
+                        workflow=workflow,
+                        store=store,
+                        token_store=token_store,
                     )
-
-                    # Inject continuity seed if applicable (expires after 8 turns)
-                    from nidavellir.sessions.handoff import should_inject_seed
-                    seed = store.get_conversation_seed(conversation_id)
-                    if seed and should_inject_seed(turn_number):
-                        memory_context = seed + "\n\n"
-
-                    if is_first_turn:
-                        memory_context += get_context_prefix(
-                            store, content, workflow,
-                            session_id=conversation_id,
-                        )
-
-                response, agent = await _handle_message(
-                    ws, content, provider_id, model_id or None,
-                    memory_context=memory_context,
-                )
-
-                # Read token usage from agent before killing it
-                token_store = getattr(ws.app.state, "token_store", None)
-                session_totals = await _ingest_turn_usage(
-                    agent=agent,
-                    provider_id=provider_id,
-                    model_id=model_id or DEFAULT_MODEL,
-                    session_id=conversation_id or "default",
-                    token_store=token_store,
-                )
-
-                # Kill agent after usage is read
-                if agent is not None:
-                    try:
-                        await agent.kill()
-                    except Exception:
-                        pass
-
-                # Signal the frontend to refresh context pressure from payload
-                # Do NOT compute current_tokens here — the API endpoint calculates
-                # it correctly from conversation_messages (the next request payload).
-                try:
-                    _cu3 = _build_context_update(
-                        conversation_id=conversation_id,
-                        model=model_id or DEFAULT_MODEL,
-                        provider=provider_id,
+                    if result_conv_id:
+                        conversation_id = result_conv_id
+                else:
+                    # No store — fall back to stateless single-turn mode
+                    response, agent = await _handle_message(
+                        ws, content, provider_id, model_id or None,
+                        memory_context="",
                     )
-                    if _cu3:
-                        await ws.send_json(_cu3)
-                except Exception:
-                    pass
-
-                if store is not None and conversation_id is not None and response:
-                    store.append_message(
-                        conversation_id, str(uuid.uuid4()), "agent", response
+                    token_store = getattr(ws.app.state, "token_store", None)
+                    await _ingest_turn_usage(
+                        agent=agent,
+                        provider_id=provider_id,
+                        model_id=model_id or DEFAULT_MODEL,
+                        session_id=conversation_id or "default",
+                        token_store=token_store,
                     )
-                    asyncio.create_task(
-                        _extract_and_store(
-                            store=store,
-                            conversation_id=conversation_id,
-                            workflow=workflow,
-                        )
-                    )
+                    if agent is not None:
+                        try:
+                            await agent.kill()
+                        except Exception:
+                            pass
 
     except WebSocketDisconnect:
         pass

@@ -82,6 +82,12 @@ function connect(): void {
         }
         break;
 
+      case "conversation_created":
+        if (data.conversation_id) {
+          s.setConversationId(data.conversation_id as string);
+        }
+        break;
+
       case "context_update":
         if (!data.conversation_id) {
           console.warn("Ignoring context_update without conversation_id");
@@ -184,7 +190,8 @@ export function sendNewSession(providerId: string, modelId: string, conversation
 
 export function sendMessage(content: string): void {
   if (_ws?.readyState !== WebSocket.OPEN) return;
-  _ws.send(JSON.stringify({ type: "message", content }));
+  const conversationId = useAgentStore.getState().conversationId;
+  _ws.send(JSON.stringify({ type: "message", content, conversation_id: conversationId }));
 }
 
 /** Test-only: resets internal socket state without triggering reconnect. */
