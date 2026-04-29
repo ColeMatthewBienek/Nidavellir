@@ -29,6 +29,16 @@ Starts all three processes concurrently:
 - **FE** — Vite on `http://localhost:5173`
 - **EL** — Electron (waits for Vite to be ready before opening)
 
+For stability testing without hot reload:
+
+```bash
+npm run start:no-reload
+```
+
+This builds the frontend once, serves it through Vite preview, and starts FastAPI without `--reload`.
+
+Important caveat: do not open more than one Electron instance. Multiple renderer instances can create competing websocket sessions and are a known source of false disconnects or stale agent state. Use the root npm scripts to launch Electron; they kill any existing `electron.exe` first, and the app also has a single-instance lock as a backstop.
+
 ## Tests
 
 ```bash

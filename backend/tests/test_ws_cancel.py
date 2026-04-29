@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,66 @@ class FakeWS:
 
     async def send_json(self, payload: dict) -> None:
         self.sent.append(payload)
+
+
+def test_turn_broadcaster_buffers_frames_and_marks_completion():
+    record = ws_router.TurnRecord("turn-1", "conv-1")
+    app = SimpleNamespace(state=SimpleNamespace())
+    broadcaster = ws_router.TurnBroadcaster(app, record)
+    subscriber = FakeWS()
+    record.subscribers.add(subscriber)
+
+    asyncio.run(broadcaster.send_json({"type": "chunk", "content": "hello"}))
+    asyncio.run(broadcaster.send_json({"type": "done"}))
+
+    assert record.status == "completed"
+    assert record.frames == [
+        {"type": "chunk", "content": "hello", "turn_id": "turn-1"},
+        {"type": "done", "turn_id": "turn-1"},
+    ]
+    assert subscriber.sent == record.frames
+
+
+def test_turn_record_buffers_steering_activity_frames():
+    record = ws_router.TurnRecord("turn-steer", "conv-1")
+    app = SimpleNamespace(state=SimpleNamespace())
+    broadcaster = ws_router.TurnBroadcaster(app, record)
+    subscriber = FakeWS()
+    record.subscribers.add(subscriber)
+    record.steering_comments.append("Keep the Git tab as a tree.")
+
+    asyncio.run(broadcaster.send_json({
+        "type": "activity",
+        "event": {"type": "steering_signal", "content": "Keep the Git tab as a tree."},
+    }))
+
+    assert record.steering_comments == ["Keep the Git tab as a tree."]
+    assert record.frames == [{
+        "type": "activity",
+        "event": {"type": "steering_signal", "content": "Keep the Git tab as a tree."},
+        "turn_id": "turn-steer",
+    }]
+    assert subscriber.sent == record.frames
+
+
+@pytest.mark.asyncio
+async def test_attach_turn_subscriber_replays_buffered_frames():
+    record = ws_router.TurnRecord("turn-2", "conv-2")
+    app = SimpleNamespace(state=SimpleNamespace())
+    broadcaster = ws_router.TurnBroadcaster(app, record)
+    await broadcaster.send_json({"type": "activity", "event": {"type": "progress", "content": "working"}})
+    subscriber = FakeWS()
+
+    await ws_router._attach_turn_subscriber(record, subscriber)
+
+    assert record.subscribers == {subscriber}
+    assert subscriber.sent == [
+        {
+            "type": "activity",
+            "event": {"type": "progress", "content": "working"},
+            "turn_id": "turn-2",
+        }
+    ]
 
 
 class HangingAgent(CLIAgent):

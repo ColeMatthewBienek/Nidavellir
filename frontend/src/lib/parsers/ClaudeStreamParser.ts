@@ -13,6 +13,7 @@ const ANSI_RE = /\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x20-\
 
 // Starts with ◆ ◇ or ✦ followed by a word and opening paren
 const TOOL_USE_RE = /^[◆◇✦]\s+(\w+)\((.*)$/;
+const SPLITTER_WARNING_RE = /^⚠?\s*Separator is (?:found|not found), but chunk (?:is longer than|exceed(?:s|ed)?)(?: the)? limit/i;
 
 function stripAnsi(raw: string): string {
   return raw.replace(ANSI_RE, "");
@@ -32,7 +33,14 @@ export class ClaudeStreamParser implements ProviderStreamParser {
 
     for (const line of lines) {
       const toolMatch = line.trim().match(TOOL_USE_RE);
-      if (toolMatch) {
+      const trimmed = line.trim();
+      if (SPLITTER_WARNING_RE.test(trimmed)) {
+        events.push({
+          type: "progress",
+          provider: "claude",
+          content: `Provider text-splitting warning: ${trimmed}`,
+        });
+      } else if (toolMatch) {
         this._toolSeq += 1;
         events.push({
           type: "tool_start",
@@ -41,7 +49,7 @@ export class ClaudeStreamParser implements ProviderStreamParser {
           args: toolMatch[2].replace(/\)$/, ""),
           raw:  line,
         });
-      } else if (line.trim().length > 0) {
+      } else if (trimmed.length > 0) {
         events.push({ type: "answer_delta", content: line + "\n" });
       }
     }
@@ -54,7 +62,14 @@ export class ClaudeStreamParser implements ProviderStreamParser {
     if (this._buffer.trim().length > 0) {
       const clean = stripAnsi(this._buffer);
       const toolMatch = clean.trim().match(TOOL_USE_RE);
-      if (toolMatch) {
+      const trimmed = clean.trim();
+      if (SPLITTER_WARNING_RE.test(trimmed)) {
+        events.push({
+          type: "progress",
+          provider: "claude",
+          content: `Provider text-splitting warning: ${trimmed}`,
+        });
+      } else if (toolMatch) {
         this._toolSeq += 1;
         events.push({
           type: "tool_start",

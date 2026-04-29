@@ -7,6 +7,7 @@ export type StreamEvent =
   | ({ type: "tool_delta"; id: string; content: string } & ProviderTagged)
   | ({ type: "tool_end"; id: string; status: "success" | "error" | string; summary?: string } & ProviderTagged)
   | ({ type: "skill_use"; name: string; detail?: string; raw?: unknown } & ProviderTagged)
+  | ({ type: "steering_signal"; content: string } & ProviderTagged)
   | ({ type: "patch"; content: string } & ProviderTagged)
   | ({ type: "reasoning_signal"; content: string } & ProviderTagged)
   | ({ type: "text";     content: string } & ProviderTagged)

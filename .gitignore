@@ -18,6 +18,7 @@ backend/workspace/
 # Frontend test artifacts
 frontend/test-results/
 frontend/playwright-report/
+*.tsbuildinfo
 
 # Local agent metadata
 .codex

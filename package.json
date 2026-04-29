@@ -7,6 +7,10 @@
     "dev:be": "cd backend && uv run uvicorn nidavellir.main:app --reload --port 7430",
     "dev:fe": "cd frontend && npm run dev",
     "dev:el": "wait-on http://localhost:5173 && cd electron && node node_modules/typescript/bin/tsc && cmd.exe /c \"taskkill /F /IM electron.exe 2>nul & C:\\Users\\colebienek\\projects\\nidavellir\\electron\\node_modules\\electron\\dist\\electron.exe C:\\Users\\colebienek\\projects\\nidavellir\\electron\\dist\\main.js\"",
+    "start:no-reload": "concurrently --names \"BE,FE,EL\" --prefix-colors \"cyan,green,yellow\" \"npm run start:be\" \"npm run start:fe\" \"npm run start:el\"",
+    "start:be": "cd backend && uv run uvicorn nidavellir.main:app --port 7430",
+    "start:fe": "cd frontend && npm run build && npm run preview -- --host 127.0.0.1 --port 5173",
+    "start:el": "wait-on http://localhost:5173 && cd electron && node node_modules/typescript/bin/tsc && cmd.exe /c \"taskkill /F /IM electron.exe 2>nul & C:\\Users\\colebienek\\projects\\nidavellir\\electron\\node_modules\\electron\\dist\\electron.exe C:\\Users\\colebienek\\projects\\nidavellir\\electron\\dist\\main.js\"",
     "install:all": "cd frontend && npm install && cd ../electron && npm install",
     "test": "cd backend && uv run pytest && cd ../frontend && npm test",
     "test:feature": "bash scripts/test-feature.sh"

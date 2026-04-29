@@ -54,6 +54,42 @@ describe('MessageList activity feed', () => {
     expect(screen.queryByText('private reasoning should not be rendered verbatim')).toBeNull();
   });
 
+  it('shows salient activity inline without requiring expansion', () => {
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.getState().appendStreamEvents([
+      { type: 'progress', content: 'I’m checking the frontend activity rendering path.' },
+      { type: 'tool_start', id: 'tool-1', name: 'Bash', args: "sed -n '1,260p' frontend/src/components/chat/MessageList.tsx" },
+      { type: 'tool_end', id: 'tool-1', status: 'success', summary: 'read ok' },
+      { type: 'tool_start', id: 'tool-2', name: 'exec', args: 'cd frontend && npm run typecheck' },
+      { type: 'tool_end', id: 'tool-2', status: 'success', summary: 'passed' },
+    ]);
+
+    render(<MessageList />);
+
+    expect(screen.getByText('I’m checking the frontend activity rendering path.')).toBeTruthy();
+    expect(screen.getByText('Explored 1 file')).toBeTruthy();
+    expect(screen.getByText('Read MessageList.tsx')).toBeTruthy();
+    expect(screen.getByText('Verified 1 check')).toBeTruthy();
+    expect(screen.getByText('Ran tests')).toBeTruthy();
+  });
+
+  it('renders steering comments as lightweight transcript markers', () => {
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.getState().appendStreamEvents([
+      { type: 'progress', content: 'I’m checking the Git sidebar wiring.' },
+      { type: 'steering_signal', content: 'Also make the Git tab a tree view.' },
+      { type: 'tool_start', id: 'tool-1', name: 'Bash', args: 'sed -n "1,260p" frontend/src/components/chat/RightSidebar.tsx' },
+      { type: 'tool_end', id: 'tool-1', status: 'success', summary: 'read ok' },
+    ]);
+
+    render(<MessageList />);
+
+    expect(screen.getByText('I’m checking the Git sidebar wiring.')).toBeTruthy();
+    expect(screen.getByText('↳ Steered conversation')).toBeTruthy();
+    expect(screen.getByText('Also make the Git tab a tree view.')).toBeTruthy();
+    expect(screen.getByText('Explored 1 file')).toBeTruthy();
+  });
+
   it('keeps tool telemetry out of the main response bubble and reveals it in activity', () => {
     useAgentStore.getState().addMessage('agent', '');
     useAgentStore.getState().appendStreamEvents([
@@ -65,8 +101,9 @@ describe('MessageList activity feed', () => {
     render(<MessageList />);
 
     expect(screen.getByText('I found the chat screen.')).toBeTruthy();
-    expect(screen.queryByText(/rg --files/)).toBeNull();
-    expect(screen.queryByText(/succeeded in 351ms/)).toBeNull();
+    expect(screen.queryByText(/exec \/bin\/bash/)).toBeNull();
+    expect(screen.getByText('Explored 1 search')).toBeTruthy();
+    expect(screen.getByText('succeeded in 351ms: ./frontend/src/screens/ChatScreen.tsx')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
 

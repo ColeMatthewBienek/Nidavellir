@@ -1,0 +1,14 @@
+[
+  {
+    "type": "answer_delta",
+    "content": "That string isn't in the Nidavellir codebase — it's coming from an external library.That string isn't in the Nidavellir codebase — it's coming from an external library."
+  },
+  {
+    "type": "answer_delta",
+    "content": "This warning comes from LangChain's RecursiveCharacterTextSplitter."
+  },
+  {
+    "type": "answer_delta",
+    "content": "This warning comes from LangChain's RecursiveCharacterTextSplitter."
+  }
+]

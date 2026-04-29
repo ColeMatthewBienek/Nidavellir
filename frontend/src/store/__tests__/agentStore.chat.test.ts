@@ -98,6 +98,51 @@ describe("appendStreamEvents", () => {
     const msg = useAgentStore.getState().messages[0];
     expect(msg.events).toHaveLength(0);
   });
+
+  it("dedupes repeated assistant answer deltas from provider snapshots", () => {
+    useAgentStore.getState().addMessage("agent", "");
+
+    useAgentStore.getState().appendStreamEvents([
+      { type: "answer_delta", content: "Running the full test harness." },
+      { type: "answer_delta", content: "Running the full test harness." },
+    ]);
+
+    const msg = useAgentStore.getState().messages[0];
+    expect(msg.events).toEqual([
+      { type: "answer_delta", content: "Running the full test harness." },
+    ]);
+  });
+
+  it("converts cumulative assistant snapshots into only the new suffix", () => {
+    useAgentStore.getState().addMessage("agent", "");
+
+    useAgentStore.getState().appendStreamEvents([
+      { type: "answer_delta", content: "Running the full test harness." },
+      { type: "answer_delta", content: "Running the full test harness. 476 passed, 1 failed." },
+    ]);
+
+    const msg = useAgentStore.getState().messages[0];
+    expect(msg.events).toEqual([
+      { type: "answer_delta", content: "Running the full test harness." },
+      { type: "answer_delta", content: " 476 passed, 1 failed." },
+    ]);
+  });
+
+  it("collapses duplicated text inside a single provider answer delta", () => {
+    useAgentStore.getState().addMessage("agent", "");
+
+    useAgentStore.getState().appendStreamEvents([
+      {
+        type: "answer_delta",
+        content: "That string is coming from an external library.That string is coming from an external library.",
+      },
+    ]);
+
+    const msg = useAgentStore.getState().messages[0];
+    expect(msg.events).toEqual([
+      { type: "answer_delta", content: "That string is coming from an external library." },
+    ]);
+  });
 });
 
 describe("finalizeLastAgentMessage", () => {

@@ -104,6 +104,72 @@ function parseBackendTimestamp(value?: string): Date {
   return new Date(hasZone ? normalized : `${normalized}Z`);
 }
 
+function answerText(events: StreamEvent[]): string {
+  return events
+    .filter((event): event is Extract<StreamEvent, { type: "answer_delta" }> => event.type === "answer_delta")
+    .map((event) => event.content)
+    .join("");
+}
+
+function collapseAdjacentDuplicateText(content: string): string {
+  let next = content;
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    const trimmed = next.trim();
+    if (trimmed.length > 0 && trimmed.length % 2 === 0) {
+      const mid = trimmed.length / 2;
+      const left = trimmed.slice(0, mid);
+      const right = trimmed.slice(mid);
+      if (left === right) {
+        next = left;
+        changed = true;
+        continue;
+      }
+    }
+
+    next = next.replace(/(.{24,}?[\.\?!])\1/g, (_match, repeated: string) => {
+      changed = true;
+      return repeated;
+    });
+  }
+
+  return next;
+}
+
+function normalizeIncomingEvents(existing: StreamEvent[], incoming: StreamEvent[]): StreamEvent[] {
+  const normalized: StreamEvent[] = [];
+  let currentAnswer = answerText(existing);
+
+  for (const event of incoming) {
+    if (event.type === "steering_signal") {
+      const previous = existing.at(-1);
+      if (previous?.type === "steering_signal" && previous.content === event.content) continue;
+      normalized.push(event);
+      continue;
+    }
+
+    if (event.type !== "answer_delta") {
+      normalized.push(event);
+      continue;
+    }
+
+    let content = collapseAdjacentDuplicateText(event.content);
+    if (!content) continue;
+    if (currentAnswer.endsWith(content)) continue;
+    if (content.startsWith(currentAnswer)) {
+      content = content.slice(currentAnswer.length);
+    }
+    if (!content) continue;
+
+    normalized.push({ ...event, content });
+    currentAnswer += content;
+  }
+
+  return normalized;
+}
+
 const ACTIVE_STATE_KEY = "nidavellir.activeConversationState";
 const DEFAULT_PROVIDER = "claude";
 const DEFAULT_MODEL_KEY = "claude:claude-sonnet-4-6";
@@ -308,9 +374,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const msgs = [...state.messages];
       const last = msgs[msgs.length - 1];
       if (!last || last.role !== "agent") return {};
+      const nextEvents = normalizeIncomingEvents(last.events, events);
+      if (nextEvents.length === 0) return {};
       msgs[msgs.length - 1] = {
         ...last,
-        events: [...last.events, ...events],
+        events: [...last.events, ...nextEvents],
       };
       return { messages: msgs };
     }),

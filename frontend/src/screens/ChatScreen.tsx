@@ -6,7 +6,7 @@ import { ContextPanel } from '../components/chat/ContextPanel';
 import { MessageList } from '../components/chat/MessageList';
 import { AgentSelector } from '../components/chat/AgentSelector';
 import { useAgentStore } from '../store/agentStore';
-import { sendCancel, sendMessage } from '../lib/agentSocket';
+import { sendCancel, sendMessage, sendSteer } from '../lib/agentSocket';
 
 type PendingAttachmentKind = 'text' | 'image' | 'unsupported';
 type PendingAttachment = {
@@ -315,7 +315,13 @@ export function ChatScreen() {
 
   const send = async () => {
     const hasValidAttachments = pendingAttachments.some((file) => file.kind !== 'unsupported');
-    if ((!input.trim() && !hasValidAttachments) || isStreaming) return;
+    if (isStreaming) {
+      const steering = input.trim();
+      if (!steering) return;
+      if (sendSteer(steering)) setInput('');
+      return;
+    }
+    if (!input.trim() && !hasValidAttachments) return;
     if (cwdCommand.isCwd) {
       if (!cwdCommand.path) {
         const picked = await window.nidavellir?.pickDirectory?.();
@@ -725,16 +731,22 @@ export function ChatScreen() {
                 onPaste={handlePaste}
                 placeholder="Message Nidavellir…   / for commands"
                 rows={1}
-                disabled={isStreaming}
+                disabled={false}
                 style={{
                   flex: 1, background: 'transparent', border: 'none', outline: 'none',
                   resize: 'none', fontSize: 13, color: 'var(--t0)', lineHeight: '24px',
                   minHeight: 48, maxHeight: 180, overflowY: 'auto',
-                  opacity: isStreaming ? 0.5 : 1,
+                  opacity: 1,
                 }}
               />
-              <Btn primary onClick={() => { send().catch(() => {}); }} disabled={(!input.trim() && !pendingAttachments.some((file) => file.kind !== 'unsupported')) || isStreaming || (showSlash && !cwdCommand.isCwd)}>
-                Send
+              <Btn
+                primary
+                onClick={() => { send().catch(() => {}); }}
+                disabled={isStreaming
+                  ? !input.trim()
+                  : ((!input.trim() && !pendingAttachments.some((file) => file.kind !== 'unsupported')) || (showSlash && !cwdCommand.isCwd))}
+              >
+                {isStreaming ? 'Steer' : 'Send'}
               </Btn>
             </div>
             {pendingAttachments.length > 0 && (

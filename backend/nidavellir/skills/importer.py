@@ -57,6 +57,10 @@ def _resolve_import_path(path_value: str | Path) -> Path:
         wsl_path = Path(f"/mnt/{drive}/{rest}")
         if wsl_path.exists():
             return wsl_path
+    if "\\" in raw:
+        posix_path = Path(raw.replace("\\", "/"))
+        if posix_path.exists():
+            return posix_path
     return Path(raw).expanduser()
 
 

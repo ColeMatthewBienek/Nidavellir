@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timedelta, UTC
 
@@ -21,7 +22,7 @@ def iso_days_ago(days: int) -> str:
 
 def test_schema_tables_exist(tmp_path):
     db_path = tmp_path / "memory.db"
-    store = MemoryStore(str(db_path))
+    MemoryStore(str(db_path))
 
     conn = sqlite3.connect(db_path)
     cur = conn.execute(
@@ -323,3 +324,66 @@ async def test_async_extraction_failure(tmp_path, monkeypatch):
 
     events = store.get_events(event_type="extraction_failed")
     assert isinstance(events, list)
+
+
+@pytest.mark.asyncio
+async def test_async_extraction_failure_logs_diagnostics(tmp_path, monkeypatch):
+    from nidavellir.routers import ws as ws_router
+
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(str(db_path))
+
+    cid = "conv"
+    store.create_conversation(cid)
+    store.append_message(cid, "u", "user", "remember the parser failure")
+    store.append_message(cid, "a", "agent", "ok")
+
+    async def explode(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ws_router, "extract_memories", explode)
+
+    await ws_router._extract_and_store(
+        store=store,
+        conversation_id=cid,
+        workflow="chat",
+        model_id="claude-haiku-4-5",
+    )
+
+    event = store.get_events(event_type="extraction_failed")[0]
+    payload = json.loads(event["payload_json"])
+
+    assert payload["error"] == "boom"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["conversation_id"] == cid
+    assert payload["workflow"] == "chat"
+    assert payload["model"] == "claude-haiku-4-5"
+    assert payload["message_count"] == 2
+    assert payload["transcript_chars"] > 0
+    assert payload["stage"] == "store_extraction"
+    assert "traceback" in payload
+
+
+@pytest.mark.asyncio
+async def test_extract_memories_reports_subprocess_failure(monkeypatch):
+    from nidavellir.routers import ws as ws_router
+
+    class FakeProc:
+        returncode = 2
+
+        async def communicate(self, data):
+            return b"not json", b"missing api key"
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(ws_router.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(ws_router.MemoryExtractionError) as err:
+        await ws_router.extract_memories("user: hi", "chat", "claude-haiku-4-5")
+
+    assert err.value.payload["stage"] == "claude_subprocess"
+    assert err.value.payload["returncode"] == 2
+    assert err.value.payload["stderr_sample"] == "missing api key"
+    assert err.value.payload["stdout_sample"] == "not json"
+    assert err.value.payload["model"] == "claude-haiku-4-5"

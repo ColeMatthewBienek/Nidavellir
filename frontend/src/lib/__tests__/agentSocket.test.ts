@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { useAgentStore } from "@/store/agentStore";
-import { initSocket, sendCancel, sendMessage, _testResetSocket } from "@/lib/agentSocket";
+import { initSocket, sendCancel, sendMessage, sendSteer, _testResetSocket } from "@/lib/agentSocket";
 
 // ── MockWebSocket ────────────────────────────────────────────────────────────
 
@@ -117,7 +117,13 @@ describe("chunk handling — raw storage", () => {
     expect(msg.content).toBe("");
     expect(msg.streaming).toBe(true);
     expect(useAgentStore.getState().isStreaming).toBe(true);
-    expect(JSON.parse(ws.sent.at(-1)!)).toMatchObject({ type: "message", content: "hello", conversation_id: "conv-now" });
+    expect(JSON.parse(ws.sent.at(-1)!)).toMatchObject({
+      type: "message",
+      content: "hello",
+      conversation_id: "conv-now",
+      turn_id: expect.any(String),
+      client_connection_id: expect.any(String),
+    });
   });
 
   it("sends cancel and finalizes the active agent message locally", () => {
@@ -131,6 +137,29 @@ describe("chunk handling — raw storage", () => {
     const msg = useAgentStore.getState().messages.at(-1)!;
     expect(msg.streaming).toBe(false);
     expect(useAgentStore.getState().isStreaming).toBe(false);
+  });
+
+  it("sends steering comments against the active turn without finalizing the stream", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-now" });
+    expect(sendMessage("start long task")).toBe(true);
+    const messageFrame = JSON.parse(ws.sent.at(-1)!);
+
+    expect(sendSteer("Check the Git tab tree while you are there.")).toBe(true);
+
+    expect(JSON.parse(ws.sent.at(-1)!)).toMatchObject({
+      type: "steer",
+      content: "Check the Git tab tree while you are there.",
+      conversation_id: "conv-now",
+      turn_id: messageFrame.turn_id,
+      client_connection_id: expect.any(String),
+    });
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.streaming).toBe(true);
+    expect(msg.events).toContainEqual({
+      type: "steering_signal",
+      content: "Check the Git tab tree while you are there.",
+    });
   });
 
   it("finalizes streaming state when backend confirms cancellation", () => {
@@ -281,7 +310,7 @@ describe("chunk handling — raw storage", () => {
 // ── Disconnect recovery ───────────────────────────────────────────────────────
 
 describe("disconnect recovery", () => {
-  it("calls finalizeWithError when socket closes during streaming", () => {
+  it("calls finalizeWithError when socket closes during streaming without an owned turn", () => {
     const ws = setupOpenSocket();
     useAgentStore.setState({ isStreaming: true });
     useAgentStore.getState().addMessage("agent", "partial");
@@ -290,6 +319,68 @@ describe("disconnect recovery", () => {
     const last = msgs[msgs.length - 1];
     expect(last.streaming).toBe(false);
     expect(useAgentStore.getState().isStreaming).toBe(false);
+  });
+
+  it("does not finalize an owned running turn on close and resumes it on reconnect", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-now" });
+
+    expect(sendMessage("hello")).toBe(true);
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    ws.simulateClose();
+
+    expect(useAgentStore.getState().isStreaming).toBe(true);
+    vi.advanceTimersByTime(3000);
+    const next = wsInstances[1];
+    next.simulateOpen();
+
+    expect(JSON.parse(next.sent.at(-1)!)).toMatchObject({
+      type: "resume_connection",
+      conversation_id: "conv-now",
+      turn_id: sent.turn_id,
+      client_connection_id: expect.any(String),
+    });
+  });
+
+  it("shows a subtle reconnect state when backend reports the turn is still running", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-now" });
+    sendMessage("hello");
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    ws.simulateClose();
+    vi.advanceTimersByTime(3000);
+    const next = wsInstances[1];
+    next.simulateOpen();
+
+    next.simulateMessage({
+      type: "resume_connection_ready",
+      turn_id: sent.turn_id,
+      status: "running",
+    });
+
+    expect(useAgentStore.getState().toastMessage).toBe("Reconnected to running agent");
+    expect(useAgentStore.getState().isStreaming).toBe(true);
+    expect(useAgentStore.getState().messages.at(-1)?.content).not.toContain("connection lost");
+  });
+
+  it("marks the response incomplete when backend cannot resume the owned turn", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-now" });
+    sendMessage("hello");
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    ws.simulateClose();
+    vi.advanceTimersByTime(3000);
+    const next = wsInstances[1];
+    next.simulateOpen();
+
+    next.simulateMessage({
+      type: "resume_connection_ready",
+      turn_id: sent.turn_id,
+      status: "gone",
+    });
+
+    expect(useAgentStore.getState().isStreaming).toBe(false);
+    expect(useAgentStore.getState().messages.at(-1)?.content).toContain("connection lost");
   });
 
   it("does not call finalizeWithError when socket closes with no streaming", () => {

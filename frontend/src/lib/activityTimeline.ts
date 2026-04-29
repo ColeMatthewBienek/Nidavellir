@@ -13,6 +13,7 @@ export interface ActivityTimelineItem {
 export type ActivityTimelineBlock =
   | { type: "narration"; text: string }
   | { type: "summary"; label: string; items: ActivityTimelineItem[] }
+  | { type: "steering"; text: string }
   | { type: "problem"; text: string; detail?: string };
 
 interface ToolRecord {
@@ -172,17 +173,20 @@ function groupLabel(items: ActivityTimelineItem[]): string {
   return `Ran ${plural(items.length, "command")}`;
 }
 
-function pushToolGroup(blocks: ActivityTimelineBlock[], tools: ToolRecord[]): void {
-  if (tools.length === 0) return;
-  const items = tools.map(itemFromTool);
-  blocks.push({ type: "summary", label: groupLabel(items), items });
-}
-
 function flushTools(blocks: ActivityTimelineBlock[], tools: ToolRecord[]): void {
   const okTools = tools.filter((tool) => tool.status !== "error");
   const failedTools = tools.filter((tool) => tool.status === "error");
 
-  pushToolGroup(blocks, okTools);
+  const okItems = okTools.map(itemFromTool);
+  const exploration = okItems.filter((item) => item.tone === "read" || item.tone === "search");
+  const tests = okItems.filter((item) => item.tone === "test");
+  const writes = okItems.filter((item) => item.tone === "write");
+  const runs = okItems.filter((item) => item.tone === "run");
+
+  if (exploration.length > 0) blocks.push({ type: "summary", label: groupLabel(exploration), items: exploration });
+  if (writes.length > 0) blocks.push({ type: "summary", label: groupLabel(writes), items: writes });
+  if (tests.length > 0) blocks.push({ type: "summary", label: groupLabel(tests), items: tests });
+  if (runs.length > 0) blocks.push({ type: "summary", label: groupLabel(runs), items: runs });
 
   for (const tool of failedTools) {
     const command = parseToolCommand(tool.name, tool.args);
@@ -253,6 +257,11 @@ export function buildActivityTimeline(events: StreamEvent[]): ActivityTimelineBl
           type: "narration",
           text: event.detail ? `Used ${event.name}: ${compactText(event.detail)}` : `Used ${event.name}.`,
         });
+        break;
+      }
+      case "steering_signal": {
+        flushFinished();
+        blocks.push({ type: "steering", text: compactText(event.content, 260) });
         break;
       }
       case "error": {

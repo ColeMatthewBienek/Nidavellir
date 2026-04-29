@@ -144,4 +144,36 @@ describe('ChatScreen clipboard attachments', () => {
       conversation_id: 'conv-clipboard',
     });
   });
+
+  it('sends composer text as steering while an agent turn is running', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.setState({ isStreaming: true });
+
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: 'Also make the Git tab a tree view.' } });
+    const steerButton = screen.getByRole('button', { name: 'Steer' });
+    expect(steerButton).not.toBeDisabled();
+    fireEvent.click(steerButton);
+
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    expect(JSON.parse(sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'steer',
+      content: 'Also make the Git tab a tree view.',
+      conversation_id: 'conv-clipboard',
+    });
+    expect(input.value).toBe('');
+    expect(useAgentStore.getState().messages.at(-1)?.events).toContainEqual({
+      type: 'steering_signal',
+      content: 'Also make the Git tab a tree view.',
+    });
+  });
 });

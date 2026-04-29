@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import traceback
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -27,6 +29,64 @@ router = APIRouter(tags=["ws"])
 DEFAULT_PROVIDER = "claude"
 DEFAULT_MODEL    = "claude-sonnet-4-6"
 WORKDIR          = Path(effective_default_working_directory())
+
+
+class TurnRecord:
+    def __init__(self, turn_id: str, conversation_id: str | None) -> None:
+        self.turn_id = turn_id
+        self.conversation_id = conversation_id
+        self.status = "running"
+        self.frames: list[dict[str, Any]] = []
+        self.steering_comments: list[str] = []
+        self.subscribers: set[WebSocket] = set()
+        self.task: asyncio.Task | None = None
+
+
+class TurnBroadcaster:
+    """WebSocket-like sender that buffers turn frames and fans out to attached clients."""
+
+    def __init__(self, app: Any, record: TurnRecord) -> None:
+        self.app = app
+        self.record = record
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        frame = dict(payload)
+        frame.setdefault("turn_id", self.record.turn_id)
+        frame_type = frame.get("type")
+        if frame_type == "done":
+            self.record.status = "completed"
+        elif frame_type == "cancelled":
+            self.record.status = "cancelled"
+        elif frame_type == "error":
+            self.record.status = "interrupted"
+        self.record.frames.append(frame)
+        stale: list[WebSocket] = []
+        for subscriber in list(self.record.subscribers):
+            try:
+                await subscriber.send_json(frame)
+            except Exception:
+                stale.append(subscriber)
+        for subscriber in stale:
+            self.record.subscribers.discard(subscriber)
+
+
+def _turn_registry(app: Any) -> dict[str, TurnRecord]:
+    registry = getattr(app.state, "active_turns", None)
+    if registry is None:
+        registry = {}
+        app.state.active_turns = registry
+    return registry
+
+
+async def _attach_turn_subscriber(record: TurnRecord, ws: WebSocket) -> None:
+    record.subscribers.add(ws)
+    for frame in record.frames:
+        await ws.send_json(frame)
+
+
+async def _retire_turn_later(app: Any, turn_id: str, delay_seconds: int = 300) -> None:
+    await asyncio.sleep(delay_seconds)
+    _turn_registry(app).pop(turn_id, None)
 
 
 def _build_session_ready(
@@ -91,6 +151,20 @@ Conversation:
 """
 
 
+class MemoryExtractionError(RuntimeError):
+    """Extraction failure with diagnostic payload safe for memory_events."""
+
+    def __init__(self, message: str, payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.payload = payload or {}
+
+
+def _sample_text(text: str, limit: int = 500) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
 async def extract_memories(
     transcript: str,
     workflow: str,
@@ -105,8 +179,23 @@ async def extract_memories(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate(prompt.encode())
+    stdout, stderr = await proc.communicate(prompt.encode())
     raw = stdout.decode().strip()
+    stderr_text = stderr.decode(errors="replace").strip()
+
+    if proc.returncode != 0:
+        raise MemoryExtractionError(
+            "memory extraction subprocess failed",
+            {
+                "stage": "claude_subprocess",
+                "returncode": proc.returncode,
+                "model": model_id,
+                "workflow": workflow,
+                "stderr_sample": _sample_text(stderr_text),
+                "stdout_sample": _sample_text(raw),
+                "transcript_chars": len(transcript),
+            },
+        )
 
     if raw.startswith("```"):
         raw = raw.split("```", 2)[1]
@@ -114,8 +203,63 @@ async def extract_memories(
             raw = raw[4:]
         raw = raw.strip()
 
-    memories: list[dict] = json.loads(raw)
+    if not raw:
+        raise MemoryExtractionError(
+            "memory extraction returned empty output",
+            {
+                "stage": "parse_extraction_output",
+                "model": model_id,
+                "workflow": workflow,
+                "stderr_sample": _sample_text(stderr_text),
+                "stdout_sample": "",
+                "transcript_chars": len(transcript),
+            },
+        )
+
+    try:
+        memories: list[dict] = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise MemoryExtractionError(
+            "memory extraction returned invalid JSON",
+            {
+                "stage": "parse_extraction_output",
+                "model": model_id,
+                "workflow": workflow,
+                "error": str(exc),
+                "json_error_line": exc.lineno,
+                "json_error_column": exc.colno,
+                "stderr_sample": _sample_text(stderr_text),
+                "stdout_sample": _sample_text(raw),
+                "transcript_chars": len(transcript),
+            },
+        ) from exc
+
+    if not isinstance(memories, list):
+        raise MemoryExtractionError(
+            "memory extraction JSON was not an array",
+            {
+                "stage": "validate_extraction_output",
+                "model": model_id,
+                "workflow": workflow,
+                "output_type": type(memories).__name__,
+                "stdout_sample": _sample_text(raw),
+                "transcript_chars": len(transcript),
+            },
+        )
+
     for m in memories:
+        if not isinstance(m, dict):
+            raise MemoryExtractionError(
+                "memory extraction array contained a non-object item",
+                {
+                    "stage": "validate_extraction_output",
+                    "model": model_id,
+                    "workflow": workflow,
+                    "item_type": type(m).__name__,
+                    "stdout_sample": _sample_text(raw),
+                    "transcript_chars": len(transcript),
+                },
+            )
         m.setdefault("id", str(uuid.uuid4()))
         m["workflow"]   = workflow
         m["scope_type"] = "workflow"
@@ -132,6 +276,8 @@ async def _extract_and_store(
     model_id: str = _EXTRACTION_MODEL,
 ) -> None:
     """Fire-and-forget extraction. Swallows all exceptions and logs extraction_failed."""
+    messages: list[dict] = []
+    transcript = ""
     try:
         messages = store.get_conversation_messages(conversation_id)
         if not messages:
@@ -148,10 +294,31 @@ async def _extract_and_store(
         if memories:
             store.save_memories(memories)
     except Exception as exc:
+        payload: dict[str, Any] = {
+            "stage": "store_extraction",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "conversation_id": conversation_id,
+            "workflow": workflow,
+            "model": model_id,
+            "message_count": len(messages),
+            "transcript_chars": len(transcript),
+            "traceback": _sample_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)), 2000),
+        }
+        if isinstance(exc, MemoryExtractionError):
+            payload.update(exc.payload)
+            payload.setdefault("error", str(exc))
+            payload["error_type"] = type(exc).__name__
+            payload["conversation_id"] = conversation_id
+            payload["message_count"] = len(messages)
+            payload["transcript_chars"] = len(transcript)
+
+        _log.exception("memory_extraction_failed", extra={"diagnostics": payload})
         store.log_event(
             event_type="extraction_failed",
             event_subject="extraction",
-            payload={"error": str(exc)},
+            session_id=conversation_id,
+            payload=payload,
         )
 
 
@@ -801,6 +968,7 @@ async def chat_websocket(ws: WebSocket) -> None:
     conversation_id: str | None = None
     store = None
     current_task: asyncio.Task | None = None
+    current_turn_id: str | None = None
 
     try:
         store = ws.app.state.memory_store
@@ -858,6 +1026,7 @@ async def chat_websocket(ws: WebSocket) -> None:
                     except asyncio.CancelledError:
                         pass
                     current_task = None
+                    current_turn_id = None
                 mode     = data.get("mode", "clean")
                 old_id   = data.get("old_conversation_id") or conversation_id
                 new_prov = data.get("provider_id", provider_id)
@@ -915,6 +1084,18 @@ async def chat_websocket(ws: WebSocket) -> None:
                 content = data.get("content", "").strip()
                 if not content:
                     continue
+                turn_id = data.get("turn_id") or str(uuid.uuid4())
+                registry = _turn_registry(ws.app)
+                existing_turn = registry.get(turn_id)
+                if existing_turn and existing_turn.status == "running":
+                    existing_turn.subscribers.add(ws)
+                    await ws.send_json({
+                        "type": "resume_connection_ready",
+                        "turn_id": turn_id,
+                        "conversation_id": existing_turn.conversation_id,
+                        "status": existing_turn.status,
+                    })
+                    continue
                 if current_task and not current_task.done():
                     await ws.send_json({"type": "error", "message": "agent already running"})
                     continue
@@ -939,14 +1120,20 @@ async def chat_websocket(ws: WebSocket) -> None:
                             or model_id
                         )
 
+                record = TurnRecord(turn_id, msg_conv_id)
+                record.subscribers.add(ws)
+                registry[turn_id] = record
+                broadcaster = TurnBroadcaster(ws.app, record)
+                current_turn_id = turn_id
+
                 async def run_turn() -> None:
-                    nonlocal conversation_id, current_task
+                    nonlocal conversation_id, current_task, current_turn_id
                     try:
                         ws.app.state.agent_running = True
                         if store is not None:
                             token_store = getattr(ws.app.state, "token_store", None)
                             result_conv_id = await handle_message_with_identity(
-                                ws=ws,
+                                ws=broadcaster,
                                 content=content,
                                 conversation_id=msg_conv_id,
                                 provider_id=provider_id,
@@ -960,7 +1147,7 @@ async def chat_websocket(ws: WebSocket) -> None:
                         else:
                             # No store — fall back to stateless single-turn mode
                             response, agent, _outcome = await _handle_message(
-                                ws, content, provider_id, model_id or None,
+                                broadcaster, content, provider_id, model_id or None,
                                 memory_context="",
                             )
                             token_store = getattr(ws.app.state, "token_store", None)
@@ -979,27 +1166,83 @@ async def chat_websocket(ws: WebSocket) -> None:
                                     pass
                     except asyncio.CancelledError:
                         try:
-                            await ws.send_json({"type": "cancelled"})
+                            await broadcaster.send_json({"type": "cancelled"})
                         except Exception:
                             pass
                     finally:
                         ws.app.state.agent_running = False
+                        record.subscribers.discard(ws)
                         current_task = None
+                        current_turn_id = None
+                        asyncio.create_task(_retire_turn_later(ws.app, record.turn_id))
 
                 current_task = asyncio.create_task(run_turn())
+                record.task = current_task
+
+            elif msg_type == "resume_connection":
+                turn_id = data.get("turn_id")
+                registry = _turn_registry(ws.app)
+                record = registry.get(turn_id) if turn_id else None
+                if not record:
+                    await ws.send_json({
+                        "type": "resume_connection_ready",
+                        "turn_id": turn_id,
+                        "conversation_id": data.get("conversation_id"),
+                        "status": "gone",
+                    })
+                    continue
+                await _attach_turn_subscriber(record, ws)
+                current_turn_id = record.turn_id
+                current_task = record.task
+                await ws.send_json({
+                    "type": "resume_connection_ready",
+                    "turn_id": record.turn_id,
+                    "conversation_id": record.conversation_id,
+                    "status": record.status,
+                })
 
             elif msg_type == "cancel":
-                if current_task and not current_task.done():
-                    current_task.cancel()
+                turn_id = data.get("turn_id") or current_turn_id
+                record = _turn_registry(ws.app).get(turn_id) if turn_id else None
+                task = record.task if record else current_task
+                if task and not task.done():
+                    task.cancel()
                     try:
-                        await current_task
+                        await task
                     except asyncio.CancelledError:
                         pass
                     current_task = None
+                    current_turn_id = None
                 else:
                     await ws.send_json({"type": "cancelled"})
 
+            elif msg_type == "steer":
+                content = (data.get("content") or "").strip()
+                if not content:
+                    continue
+                turn_id = data.get("turn_id") or current_turn_id
+                record = _turn_registry(ws.app).get(turn_id) if turn_id else None
+                if not record or record.status != "running":
+                    await ws.send_json({
+                        "type": "steer_ack",
+                        "status": "gone",
+                        "turn_id": turn_id,
+                    })
+                    continue
+                record.steering_comments.append(content)
+                await TurnBroadcaster(ws.app, record).send_json({
+                    "type": "activity",
+                    "event": {"type": "steering_signal", "content": content},
+                })
+                await ws.send_json({
+                    "type": "steer_ack",
+                    "status": "accepted",
+                    "turn_id": record.turn_id,
+                })
+
     except WebSocketDisconnect:
-        if current_task and not current_task.done():
-            current_task.cancel()
+        if current_turn_id:
+            record = _turn_registry(ws.app).get(current_turn_id)
+            if record:
+                record.subscribers.discard(ws)
         pass

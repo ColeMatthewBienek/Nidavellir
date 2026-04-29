@@ -47,6 +47,16 @@ async def test_cors_header_present_for_vite_origin():
     assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
 
 @pytest.mark.asyncio
+async def test_health_returns_build_mode():
+    """Response body must contain buildMode as a non-empty string."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/health")
+    data = response.json()
+    assert "buildMode" in data
+    assert isinstance(data["buildMode"], str)
+    assert len(data["buildMode"]) > 0
+
+@pytest.mark.asyncio
 async def test_unknown_route_returns_404():
     """Non-existent routes must return 404."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

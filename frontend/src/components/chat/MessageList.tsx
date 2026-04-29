@@ -65,9 +65,9 @@ function toneColor(tone: ActivityTimelineItem['tone']): string {
 function TimelineItem({ item }: { item: ActivityTimelineItem }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '10px minmax(0, 1fr) auto', gap: 8, alignItems: 'baseline' }}>
-      <span style={{ width: 5, height: 5, borderRadius: '50%', background: toneColor(item.tone), marginTop: 8 }} />
+        <span style={{ width: 5, height: 5, borderRadius: '50%', background: toneColor(item.tone), marginTop: 8, display: 'none' }} />
       <div style={{ minWidth: 0 }}>
-        <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 500 }}>{item.label}</div>
+        <div style={{ color: 'var(--t1)', fontSize: 12, fontWeight: 400 }}>{item.label}</div>
         {item.detail && (
           <div style={{
             color: 'var(--t1)',
@@ -85,6 +85,25 @@ function TimelineItem({ item }: { item: ActivityTimelineItem }) {
 }
 
 function TimelineBlock({ block }: { block: ActivityTimelineBlock }) {
+  if (block.type === 'steering') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7, alignItems: 'flex-end' }}>
+        <div style={{ color: 'var(--t1)', fontSize: 11 }}>↳ Steered conversation</div>
+        <div style={{
+          maxWidth: '70%',
+          borderRadius: 12,
+          background: '#30363d88',
+          color: 'var(--t0)',
+          padding: '8px 11px',
+          fontSize: 12,
+          lineHeight: 1.45,
+        }}>
+          {block.text}
+        </div>
+      </div>
+    );
+  }
+
   if (block.type === 'narration') {
     return (
       <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.55 }}>
@@ -109,9 +128,9 @@ function TimelineBlock({ block }: { block: ActivityTimelineBlock }) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-      <div style={{ color: 'var(--t1)', fontSize: 12, fontWeight: 600 }}>{block.label}</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 2 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <div style={{ color: 'var(--t1)', fontSize: 12 }}>{block.label}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, paddingLeft: 0 }}>
         {block.items.map((item, index) => (
           <TimelineItem key={`${block.label}-${item.label}-${index}`} item={item} />
         ))}
@@ -124,9 +143,10 @@ function AgentActivity({ events, streaming, startedAt }: { events: StreamEvent[]
   const [open, setOpen] = useState(false);
   const blocks = buildActivityTimeline(events);
   const elapsedLabel = useElapsedLabel(startedAt, streaming);
+  const showLog = open || blocks.length > 0;
 
   return (
-    <div style={{ marginTop: 10, borderTop: '1px solid var(--bd)', paddingTop: 9 }}>
+    <div style={{ marginTop: 12, borderTop: blocks.length > 0 ? 'none' : '1px solid var(--bd)', paddingTop: blocks.length > 0 ? 2 : 9 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--t1)', fontSize: 12, marginBottom: 8 }}>
         {streaming && <WorkingIndicator />}
         <span>{elapsedLabel}</span>
@@ -146,17 +166,17 @@ function AgentActivity({ events, streaming, startedAt }: { events: StreamEvent[]
         {blocks.length > 0 && <span style={{ color: '#484f58' }}>{blocks.length}</span>}
       </button>
 
-      {open && (
+      {showLog && (
         <div
           role="log"
           aria-label="Agent activity"
           style={{
-            marginTop: 14,
+            marginTop: blocks.length > 0 ? 12 : 14,
             display: 'flex',
             flexDirection: 'column',
-            gap: 16,
-            maxHeight: 360,
-            overflowY: 'auto',
+            gap: 14,
+            maxHeight: open ? 520 : 'none',
+            overflowY: open ? 'auto' : 'visible',
             paddingRight: 4,
           }}
         >

@@ -36,6 +36,7 @@ export function StreamRenderer({ events, streaming = false, providerId: _p }: St
       case "tool_delta":
       case "tool_end":
       case "skill_use":
+      case "steering_signal":
       case "patch":
       case "reasoning_signal":
       case "think":

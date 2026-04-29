@@ -1,0 +1,10 @@
+I’m checking the websocket path and renderer.
+exec /bin/bash -lc 'sed -n "1,80p" frontend/src/lib/agentSocket.ts' in /mnt/c/Users/colebienek/projects/nidavellir
+succeeded in 271ms: export function sendMessage(content: string): boolean {
+diff --git a/frontend/src/lib/agentSocket.ts b/frontend/src/lib/agentSocket.ts
+--- a/frontend/src/lib/agentSocket.ts
++++ b/frontend/src/lib/agentSocket.ts
+@@ -1,2 +1,2 @@
+-old line
++new line
+I found the socket path.

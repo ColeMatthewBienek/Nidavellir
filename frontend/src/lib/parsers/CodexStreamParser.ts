@@ -17,7 +17,7 @@ function stripAnsi(raw: string): string {
 }
 
 function isDiffLine(line: string): boolean {
-  return /^(\+\+\+|---|@@|[+\-] )/.test(line);
+  return /^(diff --git|\+\+\+|---|@@|[+\-](?![+\-]))/.test(line);
 }
 
 const EXEC_RE = /^exec\s+(.+?)\s+in\s+(.+)$/;

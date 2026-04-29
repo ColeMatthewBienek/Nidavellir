@@ -4,11 +4,92 @@ import type { ProviderStreamParser, StreamEvent } from "@/lib/streamTypes";
 
 const WS_URL      = "ws://localhost:7430/api/ws";
 const API_BASE    = "http://localhost:7430";
+const ACTIVE_TURN_KEY = "nidavellir.activeTurn";
 
 let _ws: WebSocket | null = null;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _agentMessageOpen = false;
 let _parser: ProviderStreamParser | null = null;
+let _clientConnectionId = "";
+let _activeTurnId: string | null = null;
+
+interface PersistedTurn {
+  turnId: string;
+  conversationId: string | null;
+}
+
+function _uuid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function _connectionId(): string {
+  if (!_clientConnectionId) _clientConnectionId = _uuid();
+  return _clientConnectionId;
+}
+
+function _readPersistedTurn(): PersistedTurn | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_TURN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedTurn>;
+    if (!parsed.turnId) return null;
+    return {
+      turnId: parsed.turnId,
+      conversationId: parsed.conversationId ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function _persistActiveTurn(turnId: string, conversationId: string | null): void {
+  _activeTurnId = turnId;
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ACTIVE_TURN_KEY, JSON.stringify({ turnId, conversationId }));
+  } catch {
+    // best-effort resume metadata
+  }
+}
+
+function _clearActiveTurn(turnId?: string): void {
+  if (turnId && _activeTurnId && turnId !== _activeTurnId) return;
+  _activeTurnId = null;
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(ACTIVE_TURN_KEY);
+  } catch {
+    // best-effort cleanup
+  }
+}
+
+function _activeTurn(): PersistedTurn | null {
+  if (_activeTurnId) {
+    return {
+      turnId: _activeTurnId,
+      conversationId: useAgentStore.getState().conversationId,
+    };
+  }
+  const persisted = _readPersistedTurn();
+  if (persisted) _activeTurnId = persisted.turnId;
+  return persisted;
+}
+
+function _ensureAgentMessageOpen(): void {
+  if (_agentMessageOpen) return;
+  const state = useAgentStore.getState();
+  const last = state.messages.at(-1);
+  if (!last || last.role !== "agent" || !last.streaming) {
+    state.addMessage("agent", "");
+  }
+  useAgentStore.setState({ isStreaming: true });
+  _agentMessageOpen = true;
+  _parser = createParser(useAgentStore.getState().selectedProvider);
+}
 
 function _selectedProviderModel(): { providerId: string; modelId: string } {
   const state = useAgentStore.getState();
@@ -73,7 +154,15 @@ function connect(): void {
   ws.onopen = () => {
     const store = useAgentStore.getState();
     store.setConnectionStatus("connected");
-    if (store.conversationId) {
+    const activeTurn = _activeTurn();
+    if (activeTurn?.turnId) {
+      ws.send(JSON.stringify({
+        type: "resume_connection",
+        client_connection_id: _connectionId(),
+        conversation_id: activeTurn.conversationId ?? store.conversationId,
+        turn_id: activeTurn.turnId,
+      }));
+    } else if (store.conversationId) {
       const { providerId, modelId } = _selectedProviderModel();
       sendNewSession(providerId, modelId, store.conversationId);
     }
@@ -84,7 +173,9 @@ function connect(): void {
       type: string;
       content?: string;
       message?: string;
+      status?: string;
       conversation_id?: string;
+      turn_id?: string;
       current_tokens?: number;
       model?: string;
       provider?: string;
@@ -157,13 +248,7 @@ function connect(): void {
       }
 
       case "chunk":
-        if (!_agentMessageOpen) {
-          // First chunk of a new response — create the agent bubble
-          s.addMessage("agent", "");
-          useAgentStore.setState({ isStreaming: true });
-          _agentMessageOpen = true;
-          _parser = createParser(useAgentStore.getState().selectedProvider);
-        }
+        _ensureAgentMessageOpen();
         {
           const chunk = data.content ?? "";
           s.appendRawChunk(chunk);
@@ -174,12 +259,7 @@ function connect(): void {
 
       case "activity":
         if (data.event) {
-          if (!_agentMessageOpen) {
-            s.addMessage("agent", "");
-            useAgentStore.setState({ isStreaming: true });
-            _agentMessageOpen = true;
-            _parser = createParser(useAgentStore.getState().selectedProvider);
-          }
+          _ensureAgentMessageOpen();
           s.appendStreamEvents([data.event]);
         }
         break;
@@ -191,6 +271,7 @@ function connect(): void {
           _parser = null;
         }
         s.finalizeLastAgentMessage();
+        _clearActiveTurn(data.turn_id as string | undefined);
         _agentMessageOpen = false;
         break;
 
@@ -201,6 +282,7 @@ function connect(): void {
           _agentMessageOpen = true;
         }
         s.finalizeWithError(data.message ?? "unknown error");
+        _clearActiveTurn(data.turn_id as string | undefined);
         _parser = null;
         _agentMessageOpen = false;
         break;
@@ -209,8 +291,28 @@ function connect(): void {
         if (_agentMessageOpen || useAgentStore.getState().isStreaming) {
           s.finalizeLastAgentMessage();
         }
+        _clearActiveTurn(data.turn_id as string | undefined);
         _parser = null;
         _agentMessageOpen = false;
+        break;
+
+      case "resume_connection_ready":
+        if (data.status === "running") {
+          useAgentStore.getState().setToastMessage("Reconnected to running agent");
+          _ensureAgentMessageOpen();
+        } else if (data.status === "completed" || data.status === "cancelled") {
+          useAgentStore.getState().setToastMessage("Reconnected");
+          _clearActiveTurn(data.turn_id as string | undefined);
+          _agentMessageOpen = false;
+          _parser = null;
+        } else {
+          if (useAgentStore.getState().isStreaming) {
+            s.finalizeWithError("connection lost — response may be incomplete");
+          }
+          _clearActiveTurn(data.turn_id as string | undefined);
+          _agentMessageOpen = false;
+          _parser = null;
+        }
         break;
     }
   };
@@ -222,7 +324,7 @@ function connect(): void {
   ws.onclose = () => {
     if (_ws !== ws) return;
     const store = useAgentStore.getState();
-    if (store.isStreaming) {
+    if (store.isStreaming && !_activeTurn()?.turnId) {
       store.finalizeWithError("connection lost — response may be incomplete");
     }
     _agentMessageOpen = false;
@@ -269,22 +371,46 @@ export function sendNewSession(providerId: string, modelId: string, conversation
 export function sendMessage(content: string): boolean {
   if (_ws?.readyState !== WebSocket.OPEN) return false;
   const conversationId = useAgentStore.getState().conversationId;
+  const turnId = _uuid();
+  _persistActiveTurn(turnId, conversationId);
   if (!_agentMessageOpen) {
-    useAgentStore.getState().addMessage("agent", "");
-    useAgentStore.setState({ isStreaming: true });
-    _agentMessageOpen = true;
-    _parser = createParser(useAgentStore.getState().selectedProvider);
+    _ensureAgentMessageOpen();
   }
-  _ws.send(JSON.stringify({ type: "message", content, conversation_id: conversationId }));
+  _ws.send(JSON.stringify({
+    type: "message",
+    content,
+    conversation_id: conversationId,
+    turn_id: turnId,
+    client_connection_id: _connectionId(),
+  }));
   return true;
 }
 
 export function sendCancel(): boolean {
   if (_ws?.readyState !== WebSocket.OPEN) return false;
-  _ws.send(JSON.stringify({ type: "cancel" }));
+  _ws.send(JSON.stringify({
+    type: "cancel",
+    turn_id: _activeTurn()?.turnId,
+    client_connection_id: _connectionId(),
+  }));
   useAgentStore.getState().finalizeWithError("stopped by user");
+  _clearActiveTurn();
   _agentMessageOpen = false;
   _parser = null;
+  return true;
+}
+
+export function sendSteer(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed || _ws?.readyState !== WebSocket.OPEN) return false;
+  _ws.send(JSON.stringify({
+    type: "steer",
+    content: trimmed,
+    turn_id: _activeTurn()?.turnId,
+    conversation_id: useAgentStore.getState().conversationId,
+    client_connection_id: _connectionId(),
+  }));
+  useAgentStore.getState().appendStreamEvents([{ type: "steering_signal", content: trimmed }]);
   return true;
 }
 
@@ -303,6 +429,15 @@ export function _testResetSocket(): void {
   }
   _agentMessageOpen = false;
   _parser = null;
+  _activeTurnId = null;
+  _clientConnectionId = "";
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.removeItem(ACTIVE_TURN_KEY);
+    } catch {
+      // test cleanup only
+    }
+  }
 }
 
 /** Test-only: injects a socket-like object for payload serialization tests. */

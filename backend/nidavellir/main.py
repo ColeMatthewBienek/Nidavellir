@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routers import health, agents, ws
+from .routers import git as git_router
 from .routers import conversations as conversations_router
 from .routers import memory as memory_router
 from .routers import tokens as tokens_router
@@ -54,3 +55,4 @@ app.include_router(tokens_router.router)
 app.include_router(sessions_router.router)
 app.include_router(link_refs_router.router)
 app.include_router(skills_router.router)
+app.include_router(git_router.router)
