@@ -6,13 +6,17 @@ interface BtnProps {
   disabled?: boolean;
   primary?: boolean;
   small?: boolean;
+  title?: string;
+  ariaLabel?: string;
 }
 
-export function Btn({ children, onClick, disabled, primary, small }: BtnProps) {
+export function Btn({ children, onClick, disabled, primary, small, title, ariaLabel }: BtnProps) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      title={title}
+      aria-label={ariaLabel}
       style={{
         padding: small ? '4px 10px' : '6px 14px',
         background: primary ? 'var(--grnd)' : 'var(--bg2)',

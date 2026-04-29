@@ -173,6 +173,69 @@ describe('ChatScreen clipboard attachments', () => {
     });
   });
 
+  it('sends the message when Enter is pressed', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: 'Run the focused tests.' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: false });
+
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    expect(JSON.parse(sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'message',
+      content: 'Run the focused tests.',
+      conversation_id: 'conv-clipboard',
+    });
+    expect(input.value).toBe('');
+  });
+
+  it('keeps Shift+Enter available for multiline input', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: 'Line one' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+
+    expect(sent).toEqual([]);
+    expect(input.value).toBe('Line one');
+  });
+
+  it('allows Enter to send slash-like text when no slash menu command matches', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: '/not-a-command' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: false });
+
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    expect(JSON.parse(sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'message',
+      content: '/not-a-command',
+      conversation_id: 'conv-clipboard',
+    });
+  });
+
   it('sends composer text as steering while an agent turn is running', async () => {
     const sent: string[] = [];
     _testSetSocket({

@@ -174,6 +174,11 @@ export function ChatScreen() {
   const cwdCommand = parseCwdCommand(input);
   const skillCommand = parseSkillCommand(input);
   const steering = steeringCapabilities(providers, selectedModel);
+  const slashMenuActive = showSlash && slashFiltered.length > 0;
+  const hasValidAttachments = pendingAttachments.some((file) => file.kind !== 'unsupported');
+  const canSubmit = isStreaming
+    ? Boolean(input.trim())
+    : Boolean(input.trim() || hasValidAttachments) && (!slashMenuActive || cwdCommand.isCwd);
   const pinnedConversations = conversations.filter((conversation) => conversation.pinned);
   const recentConversations = conversations.filter((conversation) => !conversation.pinned);
   const deleteConversation = conversations.find((conversation) => conversation.id === deleteId);
@@ -246,13 +251,13 @@ export function ChatScreen() {
       sendCancel();
       return;
     }
-    if (showSlash && slashFiltered.length) {
+    if (slashMenuActive) {
       if (e.key === 'ArrowDown')  { e.preventDefault(); setSlashHL((i) => (i + 1) % slashFiltered.length); return; }
       if (e.key === 'ArrowUp')    { e.preventDefault(); setSlashHL((i) => (i - 1 + slashFiltered.length) % slashFiltered.length); return; }
       if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); handleSlashSelect(slashFiltered[slashHL]); return; }
       if (e.key === 'Escape') { setInput(''); return; }
     }
-    if (e.key === 'Enter' && !e.shiftKey && !showSlash) { e.preventDefault(); send().catch(() => {}); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send().catch(() => {}); }
   };
 
   const addPendingFiles = async (fileList: FileList | File[], source: PendingAttachment['source'] = 'drag_drop') => {
@@ -327,7 +332,6 @@ export function ChatScreen() {
   };
 
   const send = async () => {
-    const hasValidAttachments = pendingAttachments.some((file) => file.kind !== 'unsupported');
     if (isStreaming) {
       const steering = input.trim();
       if (!steering) return;
@@ -754,12 +758,15 @@ export function ChatScreen() {
               />
               <Btn
                 primary
+                title={isStreaming ? `${steering.label} (Enter)` : 'Send (Enter)'}
+                ariaLabel={isStreaming ? steering.label : 'Send'}
                 onClick={() => { send().catch(() => {}); }}
-                disabled={isStreaming
-                  ? !input.trim()
-                  : ((!input.trim() && !pendingAttachments.some((file) => file.kind !== 'unsupported')) || (showSlash && !cwdCommand.isCwd))}
+                disabled={!canSubmit}
               >
-                {isStreaming ? steering.label : 'Send'}
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                  <span>{isStreaming ? steering.label : 'Send'}</span>
+                  <span style={{ fontSize: 10, opacity: 0.72, fontFamily: 'var(--mono)' }}>↵</span>
+                </span>
               </Btn>
               {isStreaming && steering.supportsQueued && steering.supportsRedirect && (
                 <Btn
