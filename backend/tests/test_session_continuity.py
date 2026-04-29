@@ -150,6 +150,29 @@ def test_continue_mode_stores_seed_on_child(tmp_path):
     assert child.get("seed_text") is not None and len(child["seed_text"]) > 0
 
 
+def test_continue_with_prior_context_stores_canonical_mode_and_seed(tmp_path):
+    """Canonical continue decision must store canonical child mode and a seed."""
+    from nidavellir.sessions.continuity import switch_session
+
+    store = _store(tmp_path)
+    old_id = str(uuid.uuid4())
+    store.create_conversation(old_id)
+    store.append_message(old_id, str(uuid.uuid4()), "user", "Write a happy story about a lighthouse.")
+    store.append_message(old_id, str(uuid.uuid4()), "agent", "The lighthouse glowed over a cheerful harbor.")
+
+    new_id = switch_session(
+        store,
+        old_id,
+        new_provider="codex",
+        new_model="gpt-5.4",
+        mode="continue_with_prior_context",
+    )
+
+    child = store.get_conversation(new_id)
+    assert child["continuity_mode"] == "continued_with_prior_context"
+    assert child.get("seed_text") and "lighthouse" in child["seed_text"].lower()
+
+
 def test_clean_mode_has_no_seed(tmp_path):
     """switch_session with mode='clean' must store no seed on child session."""
     from nidavellir.sessions.continuity import switch_session
@@ -160,6 +183,26 @@ def test_clean_mode_has_no_seed(tmp_path):
     new_id = switch_session(store, old_id, new_provider="codex", new_model="gpt-5.4", mode="clean")
 
     child = store.get_conversation(new_id)
+    assert not child.get("seed_text")
+
+
+def test_start_clean_stores_canonical_clean_mode_without_seed(tmp_path):
+    """Canonical clean decision must be persisted as intentionally_clean."""
+    from nidavellir.sessions.continuity import switch_session
+
+    store = _store(tmp_path)
+    old_id = _conv(store, messages=4)
+
+    new_id = switch_session(
+        store,
+        old_id,
+        new_provider="codex",
+        new_model="gpt-5.4",
+        mode="start_clean",
+    )
+
+    child = store.get_conversation(new_id)
+    assert child["continuity_mode"] == "intentionally_clean"
     assert not child.get("seed_text")
 
 

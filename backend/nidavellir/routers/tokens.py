@@ -35,6 +35,7 @@ def context_usage(
     NOT accumulated session token totals from historical records.
     """
     import logging
+    from nidavellir.sessions.handoff import should_inject_seed
     from nidavellir.tokens.context_meter import estimate_payload_tokens
 
     _log = logging.getLogger(__name__)
@@ -66,8 +67,22 @@ def context_usage(
             content={"error": "conversation_not_found", "conversation_id": conv_id},
         )
 
-    # Count tokens from the actual payload — this is what the context window evaluates
-    current = estimate_payload_tokens(messages)
+    turn_number = len(messages) // 2
+    seed = memory_store.get_conversation_seed(conv_id)
+    seed_turn_start = int(conv.get("seed_turn_start") or 0)
+    includes_seed = bool(seed and should_inject_seed(max(0, turn_number - seed_turn_start)))
+    payload_messages = list(messages)
+    if includes_seed:
+        payload_messages.append({"role": "system", "content": seed})
+
+    # Count tokens from the actual payload — this is what the context window evaluates.
+    # Active working-set text files are sent in a dedicated file context block and
+    # must contribute to the same pressure calculation.
+    current = estimate_payload_tokens(payload_messages)
+    try:
+        current += memory_store.active_file_text_tokens(conv_id)
+    except Exception:
+        pass
     accuracy = "estimated"  # local heuristic; becomes "accurate" when provider pre-counts
 
     pressure = compute_context_pressure(current, model, provider, accuracy=accuracy)
@@ -83,6 +98,7 @@ def context_usage(
         "contextLimit":         pressure.context_limit,
         "reservedOutputTokens": pressure.reserved_output_tokens,
         "lastUpdatedAt":        pressure.last_updated_at,
+        "includesHandoffSeed":  includes_seed,
     }
 
 

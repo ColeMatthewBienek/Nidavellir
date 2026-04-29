@@ -67,11 +67,19 @@ CLAUDE_MODELS: list[AgentModelDef] = [
 
 CODEX_MODELS: list[AgentModelDef] = [
     AgentModelDef(
+        id="codex:gpt-5.5",
+        provider_id="codex",
+        model_id="gpt-5.5",
+        display_name="GPT-5.5",
+        description="Frontier Codex model for complex coding, research, and real-world work.",
+        cost_tier="subscription",
+    ),
+    AgentModelDef(
         id="codex:gpt-5.4",
         provider_id="codex",
         model_id="gpt-5.4",
         display_name="GPT-5.4",
-        description="Codex default — most capable model for complex coding tasks.",
+        description="Strong model for everyday coding tasks.",
         cost_tier="subscription",
     ),
     AgentModelDef(

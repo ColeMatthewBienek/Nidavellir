@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from 'electron';
 import path from 'node:path';
 
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
@@ -11,6 +11,54 @@ if (!gotLock) {
 
 const IS_DEV = !app.isPackaged;
 const VITE_DEV_URL = 'http://localhost:5173';
+
+ipcMain.handle('working-set:pick-files', async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const options: OpenDialogOptions = {
+    title: 'Add Files',
+    properties: ['openFile', 'multiSelections'],
+  };
+  const result = owner
+    ? await dialog.showOpenDialog(owner, options)
+    : await dialog.showOpenDialog(options);
+  return result.canceled ? [] : result.filePaths;
+});
+
+ipcMain.handle('workspace:pick-directory', async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const options: OpenDialogOptions = {
+    title: 'Change Working Directory',
+    properties: ['openDirectory'],
+  };
+  const result = owner
+    ? await dialog.showOpenDialog(owner, options)
+    : await dialog.showOpenDialog(options);
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+});
+
+ipcMain.handle('skills:pick-path', async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const options: OpenDialogOptions = {
+    title: 'Import Skill',
+    properties: ['openFile', 'openDirectory'],
+    filters: [
+      { name: 'Skill files', extensions: ['md', 'yaml', 'yml', 'zip'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  };
+  const result = owner
+    ? await dialog.showOpenDialog(owner, options)
+    : await dialog.showOpenDialog(options);
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+});
+
+ipcMain.handle('refs:open-code', async (_event, payload: { filePath: string; startLine?: number; endLine?: number }) => {
+  const windowsPath = payload.filePath.replace(/^\/mnt\/([a-z])\/(.*)$/i, (_match, drive: string, rest: string) =>
+    `${drive.toLowerCase()}:/${String(rest).replaceAll('\\', '/')}`
+  );
+  const suffix = payload.startLine ? `:${payload.startLine}` : '';
+  await shell.openExternal(`vscode://file/${encodeURI(windowsPath)}${suffix}`);
+});
 
 function createWindow() {
   const win = new BrowserWindow({

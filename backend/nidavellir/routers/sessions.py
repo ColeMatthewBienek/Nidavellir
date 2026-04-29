@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from nidavellir.sessions.continuity import switch_session
+from nidavellir.sessions.handoff import normalize_handoff_mode
 from nidavellir.sessions.snapshot import create_snapshot
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -40,6 +41,6 @@ async def session_switch(body: SwitchRequest, request: Request):
     child = store.get_conversation(new_id)
     return {
         "new_conversation_id": new_id,
-        "mode":                body.mode,
+        "mode":                normalize_handoff_mode(body.mode),
         "seed_text":           child.get("seed_text"),
     }

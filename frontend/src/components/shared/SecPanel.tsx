@@ -4,11 +4,12 @@ interface SecPanelProps {
   title: string;
   action?: string;
   onAction?: () => void;
+  actionTestId?: string;
   width?: number;
   children: ReactNode;
 }
 
-export function SecPanel({ title, action, onAction, width = 210, children }: SecPanelProps) {
+export function SecPanel({ title, action, onAction, actionTestId, width = 210, children }: SecPanelProps) {
   return (
     <div style={{
       width, flexShrink: 0,
@@ -25,9 +26,17 @@ export function SecPanel({ title, action, onAction, width = 210, children }: Sec
           textTransform: 'uppercase', letterSpacing: '0.7px',
         }}>{title}</span>
         {action && (
-          <span onClick={onAction} style={{ fontSize: 16, color: 'var(--t1)', cursor: 'pointer', lineHeight: 1 }}>
+          <button
+            data-testid={actionTestId}
+            onClick={onAction}
+            aria-label={action === '+' ? `New ${title.slice(0, -1) || title}` : action}
+            style={{
+              fontSize: 16, color: 'var(--t1)', cursor: 'pointer', lineHeight: 1,
+              background: 'transparent', border: 'none', padding: 0,
+            }}
+          >
             {action}
-          </span>
+          </button>
         )}
       </div>
       <div style={{ flex: 1, overflowY: 'auto' }}>{children}</div>

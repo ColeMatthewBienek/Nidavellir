@@ -114,6 +114,12 @@ describe("finalizeLastAgentMessage", () => {
     useAgentStore.getState().finalizeLastAgentMessage();
     expect(useAgentStore.getState().isStreaming).toBe(false);
   });
+
+  it("records completion time for finished agent messages", () => {
+    useAgentStore.getState().addMessage("agent", "");
+    useAgentStore.getState().finalizeLastAgentMessage();
+    expect(useAgentStore.getState().messages[0].completedAt).toBeInstanceOf(Date);
+  });
 });
 
 describe("finalizeWithError", () => {
@@ -151,5 +157,45 @@ describe("backward compatibility", () => {
     useAgentStore.getState().appendToLastAgentMessage("compat chunk");
     const msg = useAgentStore.getState().messages[0];
     expect(msg.content).toContain("compat chunk");
+  });
+});
+
+describe("conversation resume timestamps", () => {
+  it("parses backend naive UTC timestamps as UTC instead of local wall time", async () => {
+    const fetchMock = async (url: RequestInfo | URL) => {
+      const text = String(url);
+      if (text.endsWith("/api/conversations/conv-time")) {
+        return Response.json({
+          id: "conv-time",
+          title: "Time",
+          activeSessionId: "session-time",
+          activeProvider: "codex",
+          activeModel: "gpt-5.5",
+          messages: [
+            {
+              id: "m1",
+              role: "user",
+              content: "Bugfix",
+              createdAt: "2026-04-28 14:48:04",
+            },
+          ],
+          selectedFiles: [],
+        });
+      }
+      if (text.endsWith("/api/conversations/conv-time/files")) return Response.json([]);
+      if (text.includes("/api/context/usage")) return new Response("{}", { status: 500 });
+      if (text.endsWith("/api/conversations")) return Response.json([]);
+      return new Response("{}", { status: 404 });
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as typeof fetch;
+    try {
+      await useAgentStore.getState().loadConversation("conv-time");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(useAgentStore.getState().messages[0].timestamp.toISOString()).toBe("2026-04-28T14:48:04.000Z");
+    expect(useAgentStore.getState().selectedModel).toBe("codex:gpt-5.5");
   });
 });

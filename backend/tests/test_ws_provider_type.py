@@ -19,3 +19,15 @@ def test_swap_global_agent_uses_classvar():
     agent = CodexAgent(slot_id=0, workdir=Path("/tmp"))
     assert agent.provider_type == "codex"
     assert "_provider_type" not in agent.__dict__
+
+
+def test_claude_agent_uses_stream_json_for_live_activity():
+    """Claude must emit structured streaming events so Nidavellir can show live activity."""
+    from nidavellir.agents.claude_agent import ClaudeAgent
+
+    agent = ClaudeAgent(slot_id=0, workdir=Path("/tmp"), model_id="claude-sonnet-4-6")
+
+    assert "--output-format" in agent.cmd
+    assert "stream-json" in agent.cmd
+    assert "--verbose" in agent.cmd
+    assert "--include-partial-messages" in agent.cmd

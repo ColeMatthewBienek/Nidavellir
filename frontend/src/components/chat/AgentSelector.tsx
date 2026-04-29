@@ -100,6 +100,7 @@ function ModelRow({
 }
 
 const PROVIDER_ORDER = ["claude", "codex", "ollama", "gemini"];
+const API_BASE = "http://localhost:7430";
 
 interface AgentSelectorProps {
   compact?: boolean;
@@ -165,12 +166,24 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
     });
   }, []);
 
-  const handleSelect = (model: AgentModelDef) => {
+  const hasBackendContext = async (id: string | null): Promise<boolean> => {
+    if (!id) return false;
+    try {
+      const resp = await fetch(`${API_BASE}/api/sessions/${id}/snapshot`);
+      if (!resp.ok) return false;
+      const snap = await resp.json();
+      return (snap.message_count ?? 0) > 0 || Boolean((snap.summary ?? "").trim());
+    } catch {
+      return false;
+    }
+  };
+
+  const handleSelect = async (model: AgentModelDef) => {
     if (!model.available) return;
     setOpen(false);
     // Only show handoff modal when there are visible messages in the current chat.
     // contextTokens alone is too broad — it reflects historical data from the dashboard.
-    const hasMeaningfulContext = messages.length > 0;
+    const hasMeaningfulContext = messages.length > 0 || await hasBackendContext(conversationId);
     if (hasMeaningfulContext) {
       // Show handoff modal before committing to the switch
       setPendingModel(model);
@@ -185,7 +198,14 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const handleHandoffContinue = () => {
     if (!pendingModel) return;
     setSelectedModel(pendingModel.id);
-    sendSessionSwitch(pendingModel.provider_id, pendingModel.model_id, "continue", conversationId);
+    console.info(JSON.stringify({
+      event: "handoff_decision_sent",
+      decision: "continue_with_prior_context",
+      parentConversationId: conversationId,
+      targetProvider: pendingModel.provider_id,
+      targetModel: pendingModel.model_id,
+    }));
+    sendSessionSwitch(pendingModel.provider_id, pendingModel.model_id, "continue_with_prior_context", conversationId);
     setHandoffPending(false);
     setPendingModel(null);
   };
@@ -193,7 +213,14 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const handleHandoffClean = () => {
     if (!pendingModel) return;
     setSelectedModel(pendingModel.id);
-    sendSessionSwitch(pendingModel.provider_id, pendingModel.model_id, "clean", conversationId);
+    console.info(JSON.stringify({
+      event: "handoff_decision_sent",
+      decision: "start_clean",
+      parentConversationId: conversationId,
+      targetProvider: pendingModel.provider_id,
+      targetModel: pendingModel.model_id,
+    }));
+    sendSessionSwitch(pendingModel.provider_id, pendingModel.model_id, "start_clean", conversationId);
     setHandoffPending(false);
     setPendingModel(null);
   };
@@ -201,7 +228,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
   const handleHandoffReview = async () => {
     if (!pendingModel || !conversationId) return;
     try {
-      const resp = await fetch(`http://localhost:7430/api/sessions/${conversationId}/snapshot`);
+      const resp = await fetch(`${API_BASE}/api/sessions/${conversationId}/snapshot`);
       if (resp.ok) {
         const snap = await resp.json();
         setHandoffSummary(snap.summary ?? null);
@@ -293,6 +320,7 @@ export function AgentSelector({ compact = false }: AgentSelectorProps) {
     <button
       ref={btnRef}
       data-testid="provider-btn"
+      className={cn(activeTheme.colorClass, activeTheme.borderClass, activeTheme.bgClass)}
       onClick={handleToggle}
       style={{
         display: 'flex',

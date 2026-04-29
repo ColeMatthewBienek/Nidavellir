@@ -168,6 +168,38 @@ async def test_context_usage_returns_payload_token_count(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_context_usage_includes_active_handoff_seed(tmp_path):
+    """Active handoff seed text must be counted because it is in the next payload."""
+    _token_store(tmp_path)
+    memory_store = _memory_store(tmp_path)
+
+    parent_id = str(uuid.uuid4())
+    memory_store.create_conversation(parent_id)
+    memory_store.append_message(parent_id, str(uuid.uuid4()), "user", "Write about a lighthouse on Mars.")
+    memory_store.append_message(parent_id, str(uuid.uuid4()), "agent", "A lighthouse blinked red over a crater sea.")
+
+    from nidavellir.sessions.continuity import switch_session
+    child_id = switch_session(
+        memory_store,
+        parent_id,
+        new_provider="codex",
+        new_model="gpt-5.4",
+        mode="continue_with_prior_context",
+    )
+    seed = memory_store.get_conversation_seed(child_id)
+    assert seed
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get(f"/api/context/usage?conversation_id={child_id}"
+                        f"&model=gpt-5.4&provider=codex")
+
+    body = r.json()
+    assert r.status_code == 200
+    assert body["currentTokens"] >= len(seed) // 4
+    assert body["includesHandoffSeed"] is True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. Model switch recalculates against new model limit, same payload
 # ══════════════════════════════════════════════════════════════════════════════

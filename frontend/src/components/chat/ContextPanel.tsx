@@ -1,14 +1,7 @@
-import { useState } from 'react';
+import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { useAgentStore } from '@/store/agentStore';
 import { FileSearchModal } from './FileSearchModal';
-import type { ContextFile } from './FileSearchModal';
 import { MemoryHealthWidget } from './MemoryHealthWidget';
-
-const CTX_FILES_INIT: ContextFile[] = [
-  { name: 'backend/auth.py',     lines: 87,  lang: 'py' },
-  { name: 'backend/api/auth.py', lines: 34,  lang: 'py' },
-  { name: 'tests/test_auth.py',  lines: 156, lang: 'py' },
-];
 
 interface ContextPanelProps {
   onClose: () => void;
@@ -23,11 +16,19 @@ function healthOf(pct: number): { state: string; color: string } {
 }
 
 export function ContextPanel({ onClose }: ContextPanelProps) {
-  const [files,           setFiles]           = useState<ContextFile[]>(CTX_FILES_INIT);
   const [showFileSearch,  setShowFileSearch]   = useState(false);
+  const [selectedPaths,   setSelectedPaths]     = useState<string[]>([]);
   const [expanded,        setExpanded]         = useState({ files: true, tokens: true });
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const contextUsage = useAgentStore((s) => s.contextUsage);
+  const files = useAgentStore((s) => s.workingSetFiles);
+  const refreshWorkingSetFiles = useAgentStore((s) => s.refreshWorkingSetFiles);
+  const removeWorkingSetFile = useAgentStore((s) => s.removeWorkingSetFile);
+
+  useEffect(() => {
+    refreshWorkingSetFiles().catch(() => {});
+  }, [refreshWorkingSetFiles]);
 
   const model         = contextUsage?.model         ?? 'Claude Sonnet';
   const currentTokens = contextUsage?.currentTokens ?? 12847;
@@ -62,6 +63,28 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
     </div>
   );
 
+  const handleFilePick = (event: ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(event.target.files ?? []);
+    if (!picked.length) return;
+    setSelectedPaths(picked.map((file) => (file as File & { path?: string }).path || file.name));
+    setShowFileSearch(true);
+    event.target.value = '';
+  };
+
+  const openFilePicker = async () => {
+    try {
+      const picked = await window.nidavellir?.pickWorkingSetFiles?.();
+      if (picked?.length) {
+        setSelectedPaths(picked);
+        setShowFileSearch(true);
+        return;
+      }
+    } catch {
+      // Fall back to the browser file picker when the Electron bridge is unavailable.
+    }
+    fileInputRef.current?.click();
+  };
+
   return (
     <div style={{
       width: 260, flexShrink: 0,
@@ -75,7 +98,7 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--t1)', textTransform: 'uppercase', letterSpacing: '0.7px' }}>
-          Context
+          Working Set
         </span>
         <span onClick={onClose} style={{ cursor: 'pointer', color: 'var(--t1)', fontSize: 13, lineHeight: 1 }}>✕</span>
       </div>
@@ -90,7 +113,7 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
             <div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 }}>
                 {files.map((f) => (
-                  <div key={f.name} style={{
+                  <div key={f.id} data-testid={`working-set-file-${f.id}`} style={{
                     display: 'flex', alignItems: 'center', gap: 6,
                     padding: '6px 8px', borderRadius: 4,
                     background: 'var(--bg0)', border: '1px solid var(--bd)',
@@ -100,22 +123,37 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
                       background: '#1f6feb18', border: '1px solid #1f6feb33',
                       borderRadius: 2, color: 'var(--blu)',
                       fontFamily: 'var(--mono)', flexShrink: 0,
-                    }}>{f.lang}</span>
+                    }}>{f.fileKind === 'image' ? 'img' : 'txt'}</span>
                     <span style={{
                       fontSize: 11, color: 'var(--t0)', fontFamily: 'var(--mono)',
                       flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{f.name}</span>
-                    <span style={{ fontSize: 10, color: 'var(--t1)', flexShrink: 0 }}>{f.lines}L</span>
-                    <span
-                      onClick={() => setFiles((prev) => prev.filter((x) => x.name !== f.name))}
-                      style={{ cursor: 'pointer', color: 'var(--t1)', fontSize: 11, flexShrink: 0 }}
-                    >✕</span>
+                    }}>{f.fileName}</span>
+                    <span style={{ fontSize: 10, color: 'var(--t1)', flexShrink: 0 }}>
+                      {f.fileKind === 'image'
+                        ? 'image attachment'
+                        : `~${((f.estimatedTokens ?? 0) / 1000).toFixed(1)}k tokens`}
+                    </span>
+                    <button
+                      aria-label="Remove from Conversation"
+                      onClick={() => removeWorkingSetFile(f.id).catch(() => {})}
+                      style={{ cursor: 'pointer', color: 'var(--t1)', fontSize: 11, flexShrink: 0, background: 'none', border: 'none' }}
+                    >x</button>
                   </div>
                 ))}
               </div>
-              <div onClick={() => setShowFileSearch(true)} style={{ fontSize: 12, color: 'var(--blu)', cursor: 'pointer' }}>
-                + Add files
-              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={handleFilePick}
+                style={{ display: 'none' }}
+              />
+              <button
+                onClick={() => { openFilePicker().catch(() => fileInputRef.current?.click()); }}
+                style={{ fontSize: 12, color: 'var(--blu)', cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}
+              >
+                Add files
+              </button>
             </div>
           )}
         </div>
@@ -133,8 +171,8 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
                 background: 'var(--bg0)', borderRadius: 3, border: '1px solid #30363d22',
               }}>{model}</div>
 
-              {/* Context */}
-              <div style={{ fontSize: 9, color: 'var(--t1)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4, fontWeight: 600 }}>Context</div>
+              {/* Usage */}
+              <div style={{ fontSize: 9, color: 'var(--t1)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4, fontWeight: 600 }}>Usage</div>
               <div style={{ fontSize: 10, color: 'var(--t0)', fontFamily: 'var(--mono)', marginBottom: 3, fontWeight: 600 }}>
                 {currentTokens.toLocaleString()} / {usableTokens.toLocaleString()}
               </div>
@@ -168,10 +206,26 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
                 fontSize: 8, color: 'var(--t1)', lineHeight: 1.6,
                 padding: '8px 10px', background: 'var(--bg0)',
                 border: '1px solid #30363d22', borderRadius: 3,
+                marginBottom: 10,
               }}>
                 <div>Limit: {(totalLimit / 1000).toFixed(0)}k</div>
                 <div>Usable: {(usableTokens / 1000).toFixed(0)}k</div>
               </div>
+
+              {/* Link to full token dashboard */}
+              <button
+                onClick={() => window.dispatchEvent(new CustomEvent('nid:navigate', { detail: 'tokens' }))}
+                style={{
+                  width: '100%', padding: '7px 10px',
+                  background: 'var(--bg2)', border: '1px solid var(--bd)',
+                  borderRadius: 4, fontSize: 11, color: 'var(--t0)',
+                  cursor: 'pointer', fontWeight: 500,
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--t1)'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--bd)'; }}
+              >
+                Open Token Usage Dashboard →
+              </button>
             </div>
           )}
         </div>
@@ -180,27 +234,11 @@ export function ContextPanel({ onClose }: ContextPanelProps) {
         <MemoryHealthWidget />
       </div>
 
-      {/* Inspect Dashboard button */}
-      <div style={{ padding: '0 12px 12px' }}>
-        <button
-          onClick={() => window.dispatchEvent(new CustomEvent('nid:navigate', { detail: 'tokens' }))}
-          style={{
-            width: '100%', padding: '7px 10px',
-            background: 'var(--bg2)', border: '1px solid var(--bd)',
-            borderRadius: 4, fontSize: 11, color: 'var(--t0)',
-            cursor: 'pointer', fontWeight: 500,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--t1)'; }}
-          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--bd)'; }}
-        >
-          Inspect Dashboard →
-        </button>
-      </div>
-
       {showFileSearch && (
         <FileSearchModal
+          paths={selectedPaths}
           onClose={() => setShowFileSearch(false)}
-          onAddFiles={(newFiles) => setFiles((prev) => [...prev, ...newFiles])}
+          onAdded={() => refreshWorkingSetFiles().catch(() => {})}
         />
       )}
     </div>

@@ -89,6 +89,13 @@ def test_codex_model_ids_follow_convention():
         assert m.id == f"codex:{m.model_id}", f"{m.id} doesn't match convention"
 
 
+def test_codex_gpt_55_model_present_first():
+    from nidavellir.agents.models import CODEX_MODELS
+    assert CODEX_MODELS[0].id == "codex:gpt-5.5"
+    assert CODEX_MODELS[0].model_id == "gpt-5.5"
+    assert CODEX_MODELS[0].display_name == "GPT-5.5"
+
+
 # ── Ollama list parsing ───────────────────────────────────────────────────────
 
 SAMPLE_OLLAMA_OUTPUT = """\

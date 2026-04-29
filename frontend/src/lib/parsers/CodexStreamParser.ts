@@ -20,9 +20,21 @@ function isDiffLine(line: string): boolean {
   return /^(\+\+\+|---|@@|[+\-] )/.test(line);
 }
 
+const EXEC_RE = /^exec\s+(.+?)\s+in\s+(.+)$/;
+const RESULT_RE = /^(succeeded|failed)\s+in\s+\d+(?:\.\d+)?(?:ms|s):?\s*(.*)$/;
+const PROGRESS_RE = /^(?:I(?:'|’)m|I am)\s+.*\b(?:locating|checking|reading|running|looking|searching|opening|inspecting|reviewing|testing)\b/i;
+
+function textEvent(line: string): StreamEvent {
+  return PROGRESS_RE.test(line.trim())
+    ? { type: "progress", content: line + "\n" }
+    : { type: "answer_delta", content: line + "\n" };
+}
+
 export class CodexStreamParser implements ProviderStreamParser {
   private _buffer    = "";
   private _diffLines: string[] = [];
+  private _toolSeq   = 0;
+  private _activeToolId: string | null = null;
 
   feed(chunk: string): StreamEvent[] {
     const clean = stripAnsi(chunk);
@@ -37,11 +49,37 @@ export class CodexStreamParser implements ProviderStreamParser {
         this._diffLines.push(line);
       } else {
         if (this._diffLines.length > 0) {
-          events.push({ type: "diff", content: this._diffLines.join("\n") });
+          events.push({ type: "patch", content: this._diffLines.join("\n") });
           this._diffLines = [];
         }
-        if (line.trim().length > 0) {
-          events.push({ type: "text", content: line + "\n" });
+        const trimmed = line.trim();
+        if (trimmed.length > 0) {
+          const execMatch = trimmed.match(EXEC_RE);
+          if (execMatch) {
+            this._toolSeq += 1;
+            this._activeToolId = `codex-tool-${this._toolSeq}`;
+            events.push({
+              type: "tool_start",
+              id: this._activeToolId,
+              name: "exec",
+              args: `${execMatch[1]} in ${execMatch[2]}`,
+              raw: trimmed,
+            });
+            continue;
+          }
+          const resultMatch = trimmed.match(RESULT_RE);
+          if (resultMatch) {
+            const id = this._activeToolId ?? `codex-tool-${this._toolSeq || 1}`;
+            events.push({
+              type: "tool_end",
+              id,
+              status: resultMatch[1] === "succeeded" ? "success" : "error",
+              summary: trimmed,
+            });
+            this._activeToolId = null;
+            continue;
+          }
+          events.push(textEvent(line));
         }
       }
     }
@@ -52,11 +90,39 @@ export class CodexStreamParser implements ProviderStreamParser {
   flush(): StreamEvent[] {
     const events: StreamEvent[] = [];
     if (this._diffLines.length > 0) {
-      events.push({ type: "diff", content: this._diffLines.join("\n") });
+      events.push({ type: "patch", content: this._diffLines.join("\n") });
       this._diffLines = [];
     }
     if (this._buffer.trim().length > 0) {
-      events.push({ type: "text", content: this._buffer });
+      const trimmed = this._buffer.trim();
+      const execMatch = trimmed.match(EXEC_RE);
+      if (execMatch) {
+        this._toolSeq += 1;
+        this._activeToolId = `codex-tool-${this._toolSeq}`;
+        events.push({
+          type: "tool_start",
+          id: this._activeToolId,
+          name: "exec",
+          args: `${execMatch[1]} in ${execMatch[2]}`,
+          raw: trimmed,
+        });
+      } else {
+        const resultMatch = trimmed.match(RESULT_RE);
+        if (resultMatch) {
+          const id = this._activeToolId ?? `codex-tool-${this._toolSeq || 1}`;
+          events.push({
+            type: "tool_end",
+            id,
+            status: resultMatch[1] === "succeeded" ? "success" : "error",
+            summary: trimmed,
+          });
+          this._activeToolId = null;
+        } else {
+          events.push(PROGRESS_RE.test(trimmed)
+            ? { type: "progress", content: this._buffer }
+            : { type: "answer_delta", content: this._buffer });
+        }
+      }
       this._buffer = "";
     }
     events.push({ type: "done" });
@@ -66,5 +132,7 @@ export class CodexStreamParser implements ProviderStreamParser {
   reset(): void {
     this._buffer    = "";
     this._diffLines = [];
+    this._toolSeq   = 0;
+    this._activeToolId = null;
   }
 }

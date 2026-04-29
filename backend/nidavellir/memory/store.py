@@ -1,12 +1,78 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import mimetypes
+import re
 import sqlite3
+import struct
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator
 
 from .context_pack import CONFIDENCE_STORE_THRESHOLD
+
+DEFAULT_CONVERSATION_TITLE = "New Conversation"
+MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
+MAX_IMAGE_FILE_BYTES = 20 * 1024 * 1024
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+UNSUPPORTED_FILE_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz", ".rar", ".7z", ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".exe", ".dll"}
+
+
+def _auto_title_from_message(content: str) -> str:
+    title = " ".join(content.split())
+    if not title:
+        return DEFAULT_CONVERSATION_TITLE
+    if len(title) > 60:
+        return title[:60].rstrip() + "..."
+    return title
+
+
+def _estimate_text_tokens(text: str) -> int:
+    return len(text) // 4
+
+
+def _provider_supports_vision(provider: str, model: str) -> bool:
+    provider_l = provider.lower()
+    model_l = model.lower()
+    return provider_l in {"anthropic", "claude", "gemini"} or "vision" in model_l or "4o" in model_l
+
+
+def _read_png_dimensions(data: bytes) -> tuple[int | None, int | None, str | None]:
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        return struct.unpack(">II", data[16:24])[0], struct.unpack(">II", data[16:24])[1], "png"
+    return None, None, None
+
+
+def _read_image_metadata(path: Path, data: bytes) -> tuple[int | None, int | None, str | None]:
+    width, height, fmt = _read_png_dimensions(data)
+    if fmt:
+        return width, height, fmt
+    suffix = path.suffix.lower().lstrip(".")
+    return None, None, suffix or None
+
+
+def _resolve_working_set_path(path_value: str, base_dir: str | Path | None = None) -> Path:
+    path = Path(path_value).expanduser()
+    if path.exists():
+        return path
+
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", path_value)
+    if match:
+        drive = match.group(1).lower()
+        rest = match.group(2).replace("\\", "/")
+        wsl_path = Path(f"/mnt/{drive}/{rest}")
+        if wsl_path.exists():
+            return wsl_path
+
+    if not path.is_absolute() and base_dir is not None:
+        base_path = Path(base_dir).expanduser() / path
+        if base_path.exists():
+            return base_path
+        return base_path
+
+    return path
 
 # ── Schema DDL ────────────────────────────────────────────────────────────────
 
@@ -84,7 +150,12 @@ CREATE TABLE IF NOT EXISTS conversations (
     title       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    archived    INTEGER NOT NULL DEFAULT 0
+    archived    INTEGER NOT NULL DEFAULT 0,
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    deleted_at  TEXT,
+    title_manually_set INTEGER NOT NULL DEFAULT 0,
+    working_directory TEXT,
+    working_directory_display TEXT
 );
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -92,10 +163,40 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     conversation_id TEXT NOT NULL REFERENCES conversations(id),
     role            TEXT NOT NULL,
     content         TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'completed',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id);
+
+CREATE TABLE IF NOT EXISTS conversation_files (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    original_path   TEXT NOT NULL,
+    stored_path     TEXT NOT NULL,
+    file_name       TEXT NOT NULL,
+    mime_type       TEXT,
+    file_kind       TEXT NOT NULL,
+    size_bytes      INTEGER NOT NULL,
+    content_hash    TEXT NOT NULL,
+    text_content    TEXT,
+    estimated_tokens INTEGER,
+    line_count      INTEGER,
+    encoding        TEXT,
+    image_width     INTEGER,
+    image_height    INTEGER,
+    image_format    TEXT,
+    source          TEXT,
+    added_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at      TEXT,
+    active          INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_files_conversation
+ON conversation_files(conversation_id, active);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_files_hash
+ON conversation_files(content_hash);
 
 CREATE TABLE IF NOT EXISTS memory_events (
     id            TEXT PRIMARY KEY,
@@ -118,13 +219,57 @@ def _migrate_conversations_continuity(conn: sqlite3.Connection) -> None:
     """Safe migration: add continuity columns to conversations if missing."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
     for col, defn in [
+        ("title", "TEXT"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+        ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("parent_id",       "TEXT"),
         ("status",          "TEXT NOT NULL DEFAULT 'active'"),
         ("continuity_mode", "TEXT"),
         ("seed_text",       "TEXT"),
+        ("active_session_id", "TEXT"),
+        ("active_provider", "TEXT"),
+        ("active_model", "TEXT"),
+        ("seed_turn_start", "INTEGER NOT NULL DEFAULT 0"),
+        ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+        ("deleted_at", "TEXT"),
+        ("title_manually_set", "INTEGER NOT NULL DEFAULT 0"),
+        ("working_directory", "TEXT"),
+        ("working_directory_display", "TEXT"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {defn}")
+    conn.execute("UPDATE conversations SET created_at = datetime('now') WHERE created_at IS NULL")
+    conn.execute("UPDATE conversations SET updated_at = datetime('now') WHERE updated_at IS NULL")
+
+
+def _migrate_conversation_files_source(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(conversation_files)").fetchall()}
+    if "source" not in existing:
+        conn.execute("ALTER TABLE conversation_files ADD COLUMN source TEXT")
+
+
+def _migrate_conversation_message_status(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(conversation_messages)").fetchall()}
+    added_status = False
+    if "status" not in existing:
+        conn.execute("ALTER TABLE conversation_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'")
+        added_status = True
+    if added_status:
+        conn.execute("""
+            UPDATE conversation_messages
+               SET status = 'interrupted'
+             WHERE role = 'user'
+               AND id IN (
+                   SELECT cm.id
+                     FROM conversation_messages cm
+                    WHERE cm.created_at = (
+                        SELECT MAX(cm2.created_at)
+                          FROM conversation_messages cm2
+                         WHERE cm2.conversation_id = cm.conversation_id
+                    )
+               )
+        """)
 
 
 def _verify_fts5(conn: sqlite3.Connection) -> None:
@@ -167,9 +312,16 @@ class MemoryStore:
             _verify_fts5(conn)
             conn.executescript(_DDL)
             _migrate_conversations_continuity(conn)
+            _migrate_conversation_files_source(conn)
+            _migrate_conversation_message_status(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _storage_root(self) -> Path:
+        root = Path(self._db_path).parent / "conversation_files"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -469,13 +621,31 @@ class MemoryStore:
         workflow: str = "chat",
         model_id: str | None = None,
         provider_id: str | None = None,
+        title: str | None = None,
+        active_session_id: str | None = None,
+        working_directory: str | None = None,
+        working_directory_display: str | None = None,
     ) -> dict:
+        title = title or DEFAULT_CONVERSATION_TITLE
+        active_session_id = active_session_id or id
         with self._conn() as conn:
             conn.execute(
                 """INSERT OR IGNORE INTO conversations
-                   (id, workflow, model_id, provider_id)
-                   VALUES (?, ?, ?, ?)""",
-                (id, workflow, model_id, provider_id),
+                   (id, workflow, model_id, provider_id, title, active_session_id, active_provider, active_model,
+                    working_directory, working_directory_display)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    id,
+                    workflow,
+                    model_id,
+                    provider_id,
+                    title,
+                    active_session_id,
+                    provider_id,
+                    model_id,
+                    working_directory,
+                    working_directory_display,
+                ),
             )
             row = conn.execute(
                 "SELECT * FROM conversations WHERE id = ?", (id,)
@@ -488,14 +658,37 @@ class MemoryStore:
         message_id: str,
         role: str,
         content: str,
+        status: str = "completed",
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """INSERT OR IGNORE INTO conversation_messages
-                   (id, conversation_id, role, content)
-                   VALUES (?, ?, ?, ?)""",
-                (message_id, conversation_id, role, content),
+                   (id, conversation_id, role, content, status)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (message_id, conversation_id, role, content, status),
             )
+            if role == "user":
+                row = conn.execute(
+                    "SELECT title, title_manually_set FROM conversations WHERE id = ?", (conversation_id,)
+                ).fetchone()
+                if row and not row["title_manually_set"] and (row["title"] is None or row["title"] == DEFAULT_CONVERSATION_TITLE):
+                    title = _auto_title_from_message(content)
+                    conn.execute(
+                        "UPDATE conversations SET title = ? WHERE id = ?",
+                        (title, conversation_id),
+                    )
+            conn.execute(
+                "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
+                (conversation_id,),
+            )
+
+    def update_message_status(self, message_id: str, status: str) -> bool:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE conversation_messages SET status = ? WHERE id = ?",
+                (status, message_id),
+            )
+            return cursor.rowcount > 0
 
     def count_conversation_messages(self, conversation_id: str) -> int:
         with self._conn() as conn:
@@ -541,11 +734,26 @@ class MemoryStore:
         seed_text: str | None = None,
     ) -> dict:
         with self._conn() as conn:
+            parent = conn.execute(
+                "SELECT working_directory, working_directory_display FROM conversations WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
             conn.execute(
                 """INSERT OR IGNORE INTO conversations
-                   (id, workflow, model_id, provider_id, parent_id, status, continuity_mode, seed_text)
-                   VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
-                (new_id, workflow, model_id, provider_id, parent_id, continuity_mode, seed_text),
+                   (id, workflow, model_id, provider_id, parent_id, status, continuity_mode, seed_text,
+                    working_directory, working_directory_display)
+                   VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+                (
+                    new_id,
+                    workflow,
+                    model_id,
+                    provider_id,
+                    parent_id,
+                    continuity_mode,
+                    seed_text,
+                    parent["working_directory"] if parent else None,
+                    parent["working_directory_display"] if parent else None,
+                ),
             )
             row = conn.execute(
                 "SELECT * FROM conversations WHERE id = ?", (new_id,)
@@ -558,6 +766,535 @@ class MemoryStore:
                 "SELECT seed_text FROM conversations WHERE id = ?", (conversation_id,)
             ).fetchone()
         return row[0] if row else None
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        updates: dict,
+    ) -> dict:
+        allowed = {
+            "title",
+            "archived",
+            "pinned",
+            "deleted_at",
+            "title_manually_set",
+            "active_session_id",
+            "active_provider",
+            "active_model",
+            "provider_id",
+            "model_id",
+            "seed_text",
+            "seed_turn_start",
+            "continuity_mode",
+            "status",
+            "working_directory",
+            "working_directory_display",
+        }
+        fields = [k for k in updates if k in allowed]
+        if not fields:
+            return self.get_conversation(conversation_id)
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = [updates[k] for k in fields]
+        values.append(conversation_id)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE conversations SET {assignments}, updated_at = datetime('now') WHERE id = ?",
+                values,
+            )
+        return self.get_conversation(conversation_id)
+
+    def list_conversation_summaries(self, workflow: str = "chat", limit: int = 100) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT
+                       c.id,
+                       COALESCE(c.title, 'New Conversation') AS title,
+                       c.created_at,
+                       c.updated_at,
+                       c.pinned,
+                       c.archived,
+                       c.working_directory,
+                       c.working_directory_display,
+                       COALESCE(c.active_provider, c.provider_id) AS active_provider,
+                       COALESCE(c.active_model, c.model_id) AS active_model,
+                       COUNT(cm.id) AS message_count
+                   FROM conversations c
+                   LEFT JOIN conversation_messages cm ON cm.conversation_id = c.id
+                   WHERE c.workflow = ?
+                     AND c.archived = 0
+                     AND c.parent_id IS NULL
+                   GROUP BY c.id
+                   ORDER BY c.pinned DESC, c.updated_at DESC
+                   LIMIT ?""",
+                (workflow, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Conversation files / working set ─────────────────────────────────────
+
+    def _context_usage_from_tokens(self, tokens: int, provider: str, model: str) -> dict:
+        from nidavellir.tokens.context_meter import compute_context_pressure
+
+        pressure = compute_context_pressure(tokens, model, provider, accuracy="estimated")
+        return {
+            "model": pressure.model,
+            "provider": pressure.provider,
+            "currentTokens": pressure.current_tokens,
+            "usableTokens": pressure.usable_tokens,
+            "percentUsed": pressure.percent_used,
+            "state": pressure.state,
+            "accuracy": pressure.accuracy,
+            "contextLimit": pressure.context_limit,
+            "reservedOutputTokens": pressure.reserved_output_tokens,
+            "lastUpdatedAt": pressure.last_updated_at,
+        }
+
+    def active_file_text_tokens(self, conversation_id: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(estimated_tokens), 0)
+                   FROM conversation_files
+                   WHERE conversation_id = ? AND active = 1 AND file_kind = 'text'""",
+                (conversation_id,),
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def conversation_payload_tokens(self, conversation_id: str) -> int:
+        from nidavellir.tokens.context_meter import estimate_payload_tokens
+
+        return estimate_payload_tokens(self.get_conversation_messages(conversation_id)) + self.active_file_text_tokens(conversation_id)
+
+    def _inspect_file_for_working_set(
+        self,
+        path_value: str,
+        provider: str,
+        model: str,
+        base_dir: str | Path | None = None,
+    ) -> tuple[dict | None, dict | None]:
+        path = _resolve_working_set_path(path_value, base_dir=base_dir)
+        if not path.exists():
+            return None, {"path": path_value, "reason": "not_found", "message": "File was not found."}
+        if not path.is_file():
+            return None, {"path": path_value, "reason": "not_file", "message": "Path is not a file."}
+
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None, {"path": path_value, "reason": "unreadable", "message": "File metadata could not be read."}
+
+        suffix = path.suffix.lower()
+        mime_type = mimetypes.guess_type(path.name)[0]
+        if suffix in UNSUPPORTED_FILE_EXTENSIONS:
+            return None, {"path": path_value, "reason": "unsupported_binary", "message": "Unsupported file type."}
+        if suffix in IMAGE_EXTENSIONS:
+            if size > MAX_IMAGE_FILE_BYTES:
+                return None, {"path": path_value, "reason": "too_large", "message": "Image file is too large."}
+        elif size > MAX_TEXT_FILE_BYTES:
+            return None, {"path": path_value, "reason": "too_large", "message": "Text file is too large."}
+
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None, {"path": path_value, "reason": "unreadable", "message": "File could not be read."}
+
+        content_hash = hashlib.sha256(data).hexdigest()
+        base = {
+            "path": path_value,
+            "original_path": str(path),
+            "file_name": path.name,
+            "mime_type": mime_type,
+            "size_bytes": size,
+            "content_hash": content_hash,
+            "data": data,
+        }
+
+        if suffix in IMAGE_EXTENSIONS:
+            width, height, fmt = _read_image_metadata(path, data)
+            warning = None if _provider_supports_vision(provider, model) else "stored, not sent by current model"
+            return {
+                **base,
+                "file_kind": "image",
+                "image_width": width,
+                "image_height": height,
+                "image_format": fmt,
+                "warning": warning,
+            }, None
+
+        if b"\x00" in data:
+            return None, {"path": path_value, "reason": "unsupported_binary", "message": "Binary files are not supported."}
+        try:
+            text = data.decode("utf-8-sig")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            return None, {"path": path_value, "reason": "unsupported_binary", "message": "File could not be decoded as text."}
+
+        return {
+            **base,
+            "file_kind": "text",
+            "text_content": text,
+            "estimated_tokens": _estimate_text_tokens(text),
+            "line_count": len(text.splitlines()),
+            "encoding": encoding,
+        }, None
+
+    def _inspect_blob_for_working_set(
+        self,
+        *,
+        file_name: str,
+        data: bytes,
+        mime_type: str | None,
+        provider: str,
+        model: str,
+        source: str,
+    ) -> tuple[dict | None, dict | None]:
+        safe_name = Path(file_name).name
+        if not safe_name:
+            return None, {"path": file_name, "reason": "invalid_name", "message": "File name is required."}
+        suffix = Path(safe_name).suffix.lower()
+        size = len(data)
+        if suffix in UNSUPPORTED_FILE_EXTENSIONS:
+            return None, {"path": file_name, "reason": "unsupported_binary", "message": "Unsupported file type."}
+        if suffix in IMAGE_EXTENSIONS:
+            if size > MAX_IMAGE_FILE_BYTES:
+                return None, {"path": file_name, "reason": "too_large", "message": "Image file is too large."}
+        elif size > MAX_TEXT_FILE_BYTES:
+            return None, {"path": file_name, "reason": "too_large", "message": "Text file is too large."}
+
+        content_hash = hashlib.sha256(data).hexdigest()
+        base = {
+            "path": file_name,
+            "original_path": file_name,
+            "file_name": safe_name,
+            "mime_type": mime_type or mimetypes.guess_type(safe_name)[0],
+            "size_bytes": size,
+            "content_hash": content_hash,
+            "data": data,
+            "source": source,
+        }
+
+        if suffix in IMAGE_EXTENSIONS:
+            width, height, fmt = _read_image_metadata(Path(safe_name), data)
+            warning = None if _provider_supports_vision(provider, model) else "stored, not sent by current model"
+            return {
+                **base,
+                "file_kind": "image",
+                "image_width": width,
+                "image_height": height,
+                "image_format": fmt,
+                "warning": warning,
+            }, None
+
+        if b"\x00" in data:
+            return None, {"path": file_name, "reason": "unsupported_binary", "message": "Binary files are not supported."}
+        try:
+            text = data.decode("utf-8-sig")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            return None, {"path": file_name, "reason": "unsupported_binary", "message": "File could not be decoded as text."}
+
+        return {
+            **base,
+            "file_kind": "text",
+            "text_content": text,
+            "estimated_tokens": _estimate_text_tokens(text),
+            "line_count": len(text.splitlines()),
+            "encoding": encoding,
+        }, None
+
+    def preview_conversation_files(self, conversation_id: str, paths: list[str], *, provider: str, model: str) -> dict:
+        before_tokens = self.conversation_payload_tokens(conversation_id)
+        context_before = self._context_usage_from_tokens(before_tokens, provider, model)
+        conv = self.get_conversation(conversation_id)
+        base_dir = conv.get("working_directory") if conv else None
+        inspected: list[dict] = []
+        failures: list[dict] = []
+        added_text_tokens = 0
+
+        for path in paths:
+            item, failure = self._inspect_file_for_working_set(path, provider, model, base_dir=base_dir)
+            if failure:
+                failures.append(failure)
+                continue
+            assert item is not None
+            inspected.append(item)
+            added_text_tokens += int(item.get("estimated_tokens") or 0)
+
+        after_tokens = before_tokens + added_text_tokens
+        context_after = self._context_usage_from_tokens(after_tokens, provider, model)
+        can_add = not failures and context_after["state"] != "blocked"
+        blocking_reason = None
+        if context_after["state"] == "blocked":
+            can_add = False
+            blocking_reason = "Adding these files would exceed the current model context window."
+
+        files = []
+        for item in inspected:
+            files.append({
+                "path": item["path"],
+                "fileName": item["file_name"],
+                "fileKind": item["file_kind"],
+                "sizeBytes": item["size_bytes"],
+                "estimatedTokens": item.get("estimated_tokens"),
+                "lineCount": item.get("line_count"),
+                "imageWidth": item.get("image_width"),
+                "imageHeight": item.get("image_height"),
+                "warning": item.get("warning"),
+            })
+
+        return {
+            "files": files,
+            "failures": failures,
+            "contextBefore": context_before,
+            "contextAfter": context_after,
+            "addedTextTokens": added_text_tokens,
+            "projectedPercentUsed": context_after["percentUsed"],
+            "canAdd": can_add,
+            "blockingReason": blocking_reason,
+            "_inspected": inspected,
+        }
+
+    def preview_conversation_file_blobs(self, conversation_id: str, files: list[dict], *, provider: str, model: str, source: str) -> dict:
+        before_tokens = self.conversation_payload_tokens(conversation_id)
+        context_before = self._context_usage_from_tokens(before_tokens, provider, model)
+        inspected: list[dict] = []
+        failures: list[dict] = []
+        added_text_tokens = 0
+
+        for file in files:
+            item, failure = self._inspect_blob_for_working_set(
+                file_name=str(file.get("fileName") or ""),
+                data=file.get("data") or b"",
+                mime_type=file.get("mimeType"),
+                provider=provider,
+                model=model,
+                source=source,
+            )
+            if failure:
+                failures.append(failure)
+                continue
+            assert item is not None
+            inspected.append(item)
+            added_text_tokens += int(item.get("estimated_tokens") or 0)
+
+        after_tokens = before_tokens + added_text_tokens
+        context_after = self._context_usage_from_tokens(after_tokens, provider, model)
+        can_add = not failures and context_after["state"] != "blocked"
+        blocking_reason = None
+        if context_after["state"] == "blocked":
+            can_add = False
+            blocking_reason = "Adding these files would exceed the current model context window."
+
+        return {
+            "files": [{
+                "path": item["path"],
+                "fileName": item["file_name"],
+                "fileKind": item["file_kind"],
+                "sizeBytes": item["size_bytes"],
+                "estimatedTokens": item.get("estimated_tokens"),
+                "lineCount": item.get("line_count"),
+                "imageWidth": item.get("image_width"),
+                "imageHeight": item.get("image_height"),
+                "warning": item.get("warning"),
+            } for item in inspected],
+            "failures": failures,
+            "contextBefore": context_before,
+            "contextAfter": context_after,
+            "addedTextTokens": added_text_tokens,
+            "projectedPercentUsed": context_after["percentUsed"],
+            "canAdd": can_add,
+            "blockingReason": blocking_reason,
+            "_inspected": inspected,
+        }
+
+    def add_conversation_files(self, conversation_id: str, paths: list[str], *, provider: str, model: str) -> dict:
+        preview = self.preview_conversation_files(conversation_id, paths, provider=provider, model=model)
+        if preview["failures"]:
+            return {
+                "added": [],
+                "skipped": preview["failures"],
+                "contextBefore": preview["contextBefore"],
+                "contextAfter": preview["contextAfter"],
+            }
+        if not preview["canAdd"]:
+            skipped = [{
+                "path": item["path"],
+                "reason": "context_limit_exceeded",
+                "message": preview["blockingReason"] or "Adding these files would exceed the current model context window.",
+            } for item in preview["_inspected"]]
+            return {
+                "added": [],
+                "skipped": skipped,
+                "contextBefore": preview["contextBefore"],
+                "contextAfter": preview["contextAfter"],
+            }
+
+        added: list[dict] = []
+        with self._conn() as conn:
+            for item in preview["_inspected"]:
+                file_id = str(uuid.uuid4())
+                dest_dir = self._storage_root() / conversation_id
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / f"{file_id}-{Path(item['file_name']).name}"
+                dest.write_bytes(item["data"])
+                conn.execute(
+                    """INSERT INTO conversation_files
+                       (id, conversation_id, original_path, stored_path, file_name, mime_type,
+                        file_kind, size_bytes, content_hash, text_content, estimated_tokens,
+                        line_count, encoding, image_width, image_height, image_format)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        file_id,
+                        conversation_id,
+                        item["original_path"],
+                        str(dest),
+                        item["file_name"],
+                        item.get("mime_type"),
+                        item["file_kind"],
+                        item["size_bytes"],
+                        item["content_hash"],
+                        item.get("text_content"),
+                        item.get("estimated_tokens"),
+                        item.get("line_count"),
+                        item.get("encoding"),
+                        item.get("image_width"),
+                        item.get("image_height"),
+                        item.get("image_format"),
+                    ),
+                )
+                row = conn.execute("SELECT * FROM conversation_files WHERE id = ?", (file_id,)).fetchone()
+                added.append(dict(row))
+        return {
+            "added": added,
+            "skipped": [],
+            "contextBefore": preview["contextBefore"],
+            "contextAfter": preview["contextAfter"],
+        }
+
+    def add_conversation_file_blobs(self, conversation_id: str, files: list[dict], *, provider: str, model: str, source: str = "drag_drop") -> dict:
+        preview = self.preview_conversation_file_blobs(conversation_id, files, provider=provider, model=model, source=source)
+        if preview["failures"]:
+            return {
+                "added": [],
+                "skipped": preview["failures"],
+                "contextBefore": preview["contextBefore"],
+                "contextAfter": preview["contextAfter"],
+            }
+        if not preview["canAdd"]:
+            skipped = [{
+                "path": item["path"],
+                "reason": "context_limit_exceeded",
+                "message": preview["blockingReason"] or "Adding these files would exceed the current model context window.",
+            } for item in preview["_inspected"]]
+            return {
+                "added": [],
+                "skipped": skipped,
+                "contextBefore": preview["contextBefore"],
+                "contextAfter": preview["contextAfter"],
+            }
+
+        added: list[dict] = []
+        with self._conn() as conn:
+            for item in preview["_inspected"]:
+                file_id = str(uuid.uuid4())
+                dest_dir = self._storage_root() / conversation_id
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / f"{file_id}-{Path(item['file_name']).name}"
+                dest.write_bytes(item["data"])
+                conn.execute(
+                    """INSERT INTO conversation_files
+                       (id, conversation_id, original_path, stored_path, file_name, mime_type,
+                        file_kind, size_bytes, content_hash, text_content, estimated_tokens,
+                        line_count, encoding, image_width, image_height, image_format, source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        file_id,
+                        conversation_id,
+                        item["original_path"],
+                        str(dest),
+                        item["file_name"],
+                        item.get("mime_type"),
+                        item["file_kind"],
+                        item["size_bytes"],
+                        item["content_hash"],
+                        item.get("text_content"),
+                        item.get("estimated_tokens"),
+                        item.get("line_count"),
+                        item.get("encoding"),
+                        item.get("image_width"),
+                        item.get("image_height"),
+                        item.get("image_format"),
+                        item.get("source"),
+                    ),
+                )
+                row = conn.execute("SELECT * FROM conversation_files WHERE id = ?", (file_id,)).fetchone()
+                added.append(dict(row))
+        return {
+            "added": added,
+            "skipped": [],
+            "contextBefore": preview["contextBefore"],
+            "contextAfter": preview["contextAfter"],
+        }
+
+    def list_conversation_files(self, conversation_id: str, active_only: bool = True) -> list[dict]:
+        clause = "AND active = 1" if active_only else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM conversation_files
+                    WHERE conversation_id = ? {clause}
+                    ORDER BY added_at ASC""",
+                (conversation_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_conversation_file(self, file_id: str) -> dict:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM conversation_files WHERE id = ?", (file_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def delete_conversation_file(self, conversation_id: str, file_id: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE conversation_files
+                   SET active = 0, deleted_at = datetime('now')
+                   WHERE id = ? AND conversation_id = ? AND active = 1""",
+                (file_id, conversation_id),
+            )
+        return cur.rowcount > 0
+
+    def build_file_context_block(self, conversation_id: str) -> str:
+        rows = [r for r in self.list_conversation_files(conversation_id) if r.get("file_kind") == "text"]
+        if not rows:
+            return ""
+        parts = ["Attached Files:"]
+        for row in rows:
+            parts.append(f"--- file: {Path(row['file_name']).name} ---")
+            parts.append(row.get("text_content") or "")
+        return "\n\n".join(parts).strip()
+
+    def list_provider_image_attachments(self, conversation_id: str, *, provider: str, model: str) -> list[dict]:
+        if not _provider_supports_vision(provider, model):
+            return []
+        return [
+            {
+                "id": row["id"],
+                "fileName": row["file_name"],
+                "storedPath": row["stored_path"],
+                "mimeType": row["mime_type"],
+                "width": row["image_width"],
+                "height": row["image_height"],
+            }
+            for row in self.list_conversation_files(conversation_id)
+            if row.get("file_kind") == "image"
+        ]
+
+    def list_image_attachment_warnings(self, conversation_id: str, *, provider: str, model: str) -> list[dict]:
+        if _provider_supports_vision(provider, model):
+            return []
+        return [
+            {"id": row["id"], "fileName": row["file_name"], "warning": "image_not_supported_by_model"}
+            for row in self.list_conversation_files(conversation_id)
+            if row.get("file_kind") == "image"
+        ]
 
     def get_recent_conversations(self, workflow: str = "chat", limit: int = 20) -> list[dict]:
         with self._conn() as conn:

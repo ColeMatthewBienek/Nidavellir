@@ -5,3 +5,20 @@ Specs/
 backend/.venv/
 frontend/dist/
 electron/dist/
+
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local app state
+backend/data/
+backend/workspace/
+
+# Frontend test artifacts
+frontend/test-results/
+frontend/playwright-report/
+
+# Local agent metadata
+.codex
+.claude/

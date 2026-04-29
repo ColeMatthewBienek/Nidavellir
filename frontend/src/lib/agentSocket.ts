@@ -1,4 +1,6 @@
 import { useAgentStore } from "@/store/agentStore";
+import { createParser } from "@/lib/parsers";
+import type { ProviderStreamParser, StreamEvent } from "@/lib/streamTypes";
 
 const WS_URL      = "ws://localhost:7430/api/ws";
 const API_BASE    = "http://localhost:7430";
@@ -6,6 +8,21 @@ const API_BASE    = "http://localhost:7430";
 let _ws: WebSocket | null = null;
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _agentMessageOpen = false;
+let _parser: ProviderStreamParser | null = null;
+
+function _selectedProviderModel(): { providerId: string; modelId: string } {
+  const state = useAgentStore.getState();
+  const [providerId, ...modelParts] = state.selectedModel.split(":");
+  return {
+    providerId: providerId || state.selectedProvider,
+    modelId: modelParts.join(":") || state.selectedModel,
+  };
+}
+
+function _syncSelectedModel(providerId?: string, modelId?: string): void {
+  if (!providerId || !modelId) return;
+  useAgentStore.getState().setSelectedModel(`${providerId}:${modelId}`);
+}
 
 async function _fetchContextUsage(conversationId: string, model: string, provider: string): Promise<void> {
   // Guard: a valid conversation_id is required — never fetch with an empty id
@@ -54,7 +71,12 @@ function connect(): void {
   _ws = ws;
 
   ws.onopen = () => {
-    useAgentStore.getState().setConnectionStatus("connected");
+    const store = useAgentStore.getState();
+    store.setConnectionStatus("connected");
+    if (store.conversationId) {
+      const { providerId, modelId } = _selectedProviderModel();
+      sendNewSession(providerId, modelId, store.conversationId);
+    }
   };
 
   ws.onmessage = (event: MessageEvent) => {
@@ -66,7 +88,12 @@ function connect(): void {
       current_tokens?: number;
       model?: string;
       provider?: string;
+      provider_id?: string;
+      model_id?: string;
       session_id?: string;
+      working_directory?: string;
+      working_directory_display?: string;
+      event?: StreamEvent;
     };
     try {
       data = JSON.parse(event.data as string);
@@ -76,8 +103,16 @@ function connect(): void {
     const s = useAgentStore.getState();
     switch (data.type) {
       case "session_ready":
+        _syncSelectedModel(
+          (data.provider_id ?? data.provider) as string | undefined,
+          (data.model_id ?? data.model) as string | undefined,
+        );
         if (data.conversation_id) {
           s.setConversationId(data.conversation_id as string);
+          useAgentStore.setState({
+            workingDirectory: data.working_directory ?? useAgentStore.getState().workingDirectory,
+            workingDirectoryDisplay: data.working_directory_display ?? data.working_directory ?? useAgentStore.getState().workingDirectoryDisplay,
+          });
           _fetchMemories().catch(() => {});
         }
         break;
@@ -103,7 +138,17 @@ function connect(): void {
       case "session_switch_ready": {
         const sid = data.conversation_id as string | undefined;
         if (sid) s.setConversationId(sid);
-        s.clearMessages();
+        useAgentStore.setState({
+          workingDirectory: data.working_directory ?? useAgentStore.getState().workingDirectory,
+          workingDirectoryDisplay: data.working_directory_display ?? data.working_directory ?? useAgentStore.getState().workingDirectoryDisplay,
+        });
+        _syncSelectedModel(
+          (data.provider_id ?? data.provider) as string | undefined,
+          (data.model_id ?? data.model) as string | undefined,
+        );
+        if (useAgentStore.getState().isStreaming) {
+          s.finalizeLastAgentMessage();
+        }
         s.setHandoffPending(false);
         const provider = (data.provider as string | undefined) ?? useAgentStore.getState().selectedProvider;
         s.setToastMessage(`Model changed to ${provider}`);
@@ -117,11 +162,34 @@ function connect(): void {
           s.addMessage("agent", "");
           useAgentStore.setState({ isStreaming: true });
           _agentMessageOpen = true;
+          _parser = createParser(useAgentStore.getState().selectedProvider);
         }
-        s.appendRawChunk(data.content ?? "");
+        {
+          const chunk = data.content ?? "";
+          s.appendRawChunk(chunk);
+          const events = _parser?.feed(chunk) ?? [];
+          if (events.length > 0) s.appendStreamEvents(events);
+        }
+        break;
+
+      case "activity":
+        if (data.event) {
+          if (!_agentMessageOpen) {
+            s.addMessage("agent", "");
+            useAgentStore.setState({ isStreaming: true });
+            _agentMessageOpen = true;
+            _parser = createParser(useAgentStore.getState().selectedProvider);
+          }
+          s.appendStreamEvents([data.event]);
+        }
         break;
 
       case "done":
+        {
+          const events = _parser?.flush() ?? [];
+          if (events.length > 0) s.appendStreamEvents(events);
+          _parser = null;
+        }
         s.finalizeLastAgentMessage();
         _agentMessageOpen = false;
         break;
@@ -133,6 +201,15 @@ function connect(): void {
           _agentMessageOpen = true;
         }
         s.finalizeWithError(data.message ?? "unknown error");
+        _parser = null;
+        _agentMessageOpen = false;
+        break;
+
+      case "cancelled":
+        if (_agentMessageOpen || useAgentStore.getState().isStreaming) {
+          s.finalizeLastAgentMessage();
+        }
+        _parser = null;
         _agentMessageOpen = false;
         break;
     }
@@ -149,6 +226,7 @@ function connect(): void {
       store.finalizeWithError("connection lost — response may be incomplete");
     }
     _agentMessageOpen = false;
+    _parser = null;
     store.setConnectionStatus("disconnected");
     _ws = null;
     _reconnectTimer = setTimeout(connect, 3000);
@@ -168,7 +246,7 @@ export function initSocket(): void {
 export function sendSessionSwitch(
   providerId: string,
   modelId: string,
-  mode: "continue" | "clean" | "review",
+  mode: "continue_with_prior_context" | "start_clean" | "continue" | "clean" | "review",
   oldConversationId?: string | null,
 ): void {
   if (_ws?.readyState !== WebSocket.OPEN) return;
@@ -188,10 +266,26 @@ export function sendNewSession(providerId: string, modelId: string, conversation
   _ws.send(JSON.stringify(payload));
 }
 
-export function sendMessage(content: string): void {
-  if (_ws?.readyState !== WebSocket.OPEN) return;
+export function sendMessage(content: string): boolean {
+  if (_ws?.readyState !== WebSocket.OPEN) return false;
   const conversationId = useAgentStore.getState().conversationId;
+  if (!_agentMessageOpen) {
+    useAgentStore.getState().addMessage("agent", "");
+    useAgentStore.setState({ isStreaming: true });
+    _agentMessageOpen = true;
+    _parser = createParser(useAgentStore.getState().selectedProvider);
+  }
   _ws.send(JSON.stringify({ type: "message", content, conversation_id: conversationId }));
+  return true;
+}
+
+export function sendCancel(): boolean {
+  if (_ws?.readyState !== WebSocket.OPEN) return false;
+  _ws.send(JSON.stringify({ type: "cancel" }));
+  useAgentStore.getState().finalizeWithError("stopped by user");
+  _agentMessageOpen = false;
+  _parser = null;
+  return true;
 }
 
 /** Test-only: resets internal socket state without triggering reconnect. */
@@ -208,4 +302,10 @@ export function _testResetSocket(): void {
     _reconnectTimer = null;
   }
   _agentMessageOpen = false;
+  _parser = null;
+}
+
+/** Test-only: injects a socket-like object for payload serialization tests. */
+export function _testSetSocket(ws: WebSocket): void {
+  _ws = ws;
 }

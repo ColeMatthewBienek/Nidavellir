@@ -3,14 +3,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 import nidavellir.agents.registry as _agent_registry
+from nidavellir.agents.events import frontend_event
 from nidavellir.memory.injector import get_context_prefix
+from nidavellir.prompt.assembly import assemble_prompt
+from nidavellir.prompt.models import PromptAssemblyResult, PromptSection
+from nidavellir.sessions.handoff import build_seed, mode_uses_prior_context, normalize_handoff_mode
+from nidavellir.sessions.snapshot import create_snapshot
+from nidavellir.skills.activation import activate_skills
+from nidavellir.skills.compilers.generic import GenericSkillCompiler
+from nidavellir.skills.models import SkillTaskContext
+from nidavellir.workspace import effective_default_working_directory
 
 _log = logging.getLogger(__name__)
 
@@ -18,7 +26,7 @@ router = APIRouter(tags=["ws"])
 
 DEFAULT_PROVIDER = "claude"
 DEFAULT_MODEL    = "claude-sonnet-4-6"
-WORKDIR          = Path(os.environ.get("NIDAVELLIR_WORKDIR", "./workspace"))
+WORKDIR          = Path(effective_default_working_directory())
 
 
 def _build_session_ready(
@@ -26,13 +34,19 @@ def _build_session_ready(
     provider_id: str,
     model_id: str,
     conversation_id: str,
+    working_directory: str | None = None,
+    working_directory_display: str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "type":            "session_ready",
         "provider_id":     provider_id,
         "model_id":        model_id,
         "conversation_id": conversation_id,
     }
+    if working_directory:
+        payload["working_directory"] = working_directory
+        payload["working_directory_display"] = working_directory_display or working_directory
+    return payload
 
 
 def _build_context_update(
@@ -147,7 +161,9 @@ async def _handle_message(
     provider_id: str,
     model_id: str | None,
     memory_context: str = "",
-) -> tuple[str, object]:
+    workdir: Path | None = None,
+    workdir_explicit: bool = False,
+) -> tuple[str, object, str]:
     """Runs one full agent turn.
 
     Returns (full_response_text, agent_instance).
@@ -155,23 +171,92 @@ async def _handle_message(
     """
     agent = None
     response_parts: list[str] = []
+    heartbeat_task: asyncio.Task | None = None
+
+    async def send_activity(event: dict) -> None:
+        await ws.send_json({"type": "activity", "event": event})
+
+    async def heartbeat() -> None:
+        elapsed = 0
+        try:
+            while True:
+                await asyncio.sleep(10)
+                elapsed += 10
+                await send_activity({
+                    "type": "progress",
+                    "content": f"Provider is still working ({elapsed}s elapsed)",
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
     try:
-        WORKDIR.mkdir(parents=True, exist_ok=True)
-        agent = _agent_registry.make_agent(provider_id, slot_id=0, workdir=WORKDIR, model_id=model_id)
+        run_workdir = workdir or WORKDIR
+        _preflight_agent_workdir(run_workdir, explicit=workdir_explicit)
+        await send_activity({
+            "type": "progress",
+            "content": f"Starting {provider_id} in {run_workdir}",
+            "metadata": {"working_directory": str(run_workdir.resolve(strict=False))},
+        })
+        agent = _agent_registry.make_agent(provider_id, slot_id=0, workdir=run_workdir, model_id=model_id)
         await agent.start()
+        await send_activity({
+            "type": "progress",
+            "content": "Provider process started",
+        })
 
-        outbound = f"{memory_context}\n\n{content}" if memory_context else content
+        outbound = (
+            f"{memory_context}\n\nCurrent user message:\nUser: {content}"
+            if memory_context else content
+        )
         await agent.send(outbound)
+        await send_activity({
+            "type": "progress",
+            "content": "Prompt sent to provider",
+        })
+        heartbeat_task = asyncio.create_task(heartbeat())
 
-        async for chunk in agent.stream():
+        async for item in agent.stream():
+            if isinstance(item, dict) or hasattr(item, "to_frontend"):
+                await send_activity(frontend_event(item))
+                continue
+            chunk = str(item)
+            if not chunk:
+                continue
             response_parts.append(chunk)
             await ws.send_json({"type": "chunk", "content": chunk})
 
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        await send_activity({
+            "type": "progress",
+            "content": "Provider stream finished",
+        })
         await ws.send_json({"type": "done"})
-        return "".join(response_parts), agent
+        return "".join(response_parts), agent, "completed"
+    except asyncio.CancelledError:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+        if agent is not None:
+            try:
+                await agent.kill()
+            except Exception:
+                pass
+        try:
+            await ws.send_json({"type": "cancelled"})
+        except Exception:
+            pass
+        return "", agent, "cancelled"
     except Exception as exc:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
         await ws.send_json({"type": "error", "message": str(exc)})
-        return "", agent
+        return "", agent, "interrupted"
     # Note: caller handles kill so usage can be read first
 
 
@@ -181,6 +266,7 @@ async def _ingest_turn_usage(
     model_id: str,
     session_id: str,
     token_store,
+    workdir: Path | None = None,
 ) -> dict | None:
     """Read usage from agent, store record, return context totals dict."""
     if token_store is None:
@@ -197,9 +283,10 @@ async def _ingest_turn_usage(
 
         usage: ProviderUsageResult | None = None
         request_id = str(uuid.uuid4())
+        usage_workdir = workdir or WORKDIR
 
         if provider_id == "claude":
-            entry = await read_latest_claude_usage(cwd=WORKDIR)
+            entry = await read_latest_claude_usage(cwd=usage_workdir)
             if entry:
                 usage = parse_claude_jsonl_entry(entry)
                 if usage and usage.request_id:
@@ -237,6 +324,316 @@ def _build_conversation_history(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _split_interrupted_tail(messages: list[dict]) -> tuple[list[dict], dict | None]:
+    """Separate a persisted interrupted/cancelled user request from history."""
+    interrupted_statuses = {"pending", "running", "interrupted", "cancelled"}
+    completed = [msg for msg in messages if msg.get("status", "completed") == "completed"]
+    if (
+        messages
+        and messages[-1].get("role") == "user"
+        and messages[-1].get("status") in interrupted_statuses
+    ):
+        return completed, messages[-1]
+    return completed, None
+
+
+def _conversation_workdir(conv: dict | None) -> Path:
+    if conv and conv.get("working_directory"):
+        return Path(conv["working_directory"])
+    return WORKDIR
+
+
+def _conversation_workdir_explicit(conv: dict | None) -> bool:
+    return bool(conv and conv.get("working_directory"))
+
+
+def _looks_like_empty_scratch_workdir(path: Path) -> bool:
+    try:
+        entries = [item.name for item in path.iterdir() if item.name not in {".gitkeep"}]
+    except OSError:
+        return False
+    return path.name == "workspace" and not entries
+
+
+def _preflight_agent_workdir(path: Path, *, explicit: bool) -> None:
+    if not path.exists():
+        raise RuntimeError(f"working_directory_not_found: {path}")
+    if not path.is_dir():
+        raise RuntimeError(f"working_directory_not_a_directory: {path}")
+    if not os_access_writable(path):
+        raise RuntimeError(f"working_directory_not_writable: {path}")
+    if not explicit and _looks_like_empty_scratch_workdir(path):
+        raise RuntimeError(
+            "working_directory_empty_scratch: set /cwd to the project directory before running an agent"
+        )
+
+
+def os_access_writable(path: Path) -> bool:
+    import os
+    return os.access(path, os.W_OK)
+
+
+def resolve_new_session_state(
+    *,
+    store,
+    requested_conversation_id: str | None,
+    requested_provider: str,
+    requested_model: str,
+    workflow: str = "chat",
+) -> tuple[str, str, str]:
+    """Resolve websocket session state without overwriting an existing conversation.
+
+    Reconnect/resume is server-authoritative: if the conversation exists, keep its
+    persisted active provider/model even when the frontend has stale local state.
+    """
+    conversation_id = requested_conversation_id or str(uuid.uuid4())
+    if store is None:
+        return conversation_id, requested_provider, requested_model
+
+    conv = store.get_conversation(conversation_id)
+    if conv:
+        provider = conv.get("active_provider") or conv.get("provider_id") or requested_provider
+        model = conv.get("active_model") or conv.get("model_id") or requested_model
+        return conversation_id, provider, model
+
+    store.create_conversation(
+        conversation_id,
+        workflow=workflow,
+        model_id=requested_model,
+        provider_id=requested_provider,
+        working_directory=effective_default_working_directory(),
+        working_directory_display=effective_default_working_directory(),
+    )
+    return conversation_id, requested_provider, requested_model
+
+
+def switch_active_session_for_conversation(
+    store,
+    conversation_id: str,
+    *,
+    new_provider: str,
+    new_model: str,
+    mode: str = "start_clean",
+) -> dict:
+    """Create a new execution session boundary without changing conversation id."""
+    conv = store.get_conversation(conversation_id)
+    if not conv:
+        raise ValueError("conversation_not_found")
+
+    prior_messages = store.get_conversation_messages(conversation_id)
+    seed_text: str | None = None
+    if mode_uses_prior_context(mode):
+        snap = create_snapshot(store, conversation_id)
+        if snap["message_count"] > 0:
+            seed_text = build_seed(snap)
+
+    session_id = str(uuid.uuid4())
+    store.update_conversation(
+        conversation_id,
+        {
+            "active_session_id": session_id,
+            "active_provider": new_provider,
+            "active_model": new_model,
+            "provider_id": new_provider,
+            "model_id": new_model,
+            "continuity_mode": normalize_handoff_mode(mode),
+            "seed_text": seed_text,
+            "seed_turn_start": len(prior_messages) // 2,
+        },
+    )
+    return {
+        "conversation_id": conversation_id,
+        "session_id": session_id,
+        "seed": seed_text,
+        "mode": normalize_handoff_mode(mode),
+    }
+
+
+def ensure_context_capacity_for_conversation(
+    store,
+    conversation_id: str,
+    *,
+    provider_id: str,
+    model_id: str,
+) -> dict:
+    """Roll over to a seeded active session when the conversation payload is blocked."""
+    from nidavellir.tokens.context_meter import compute_context_pressure, estimate_payload_tokens
+
+    messages = store.get_conversation_messages(conversation_id)
+    current_tokens = estimate_payload_tokens(messages)
+    if hasattr(store, "active_file_text_tokens"):
+        current_tokens += store.active_file_text_tokens(conversation_id)
+    pressure = compute_context_pressure(current_tokens, model_id, provider_id)
+    pressure_dict = {
+        "current_tokens": pressure.current_tokens,
+        "usable_tokens": pressure.usable_tokens,
+        "percent_used": pressure.percent_used,
+        "state": pressure.state,
+    }
+    conv = store.get_conversation(conversation_id)
+    if pressure.state != "blocked":
+        return {
+            "rolled_over": False,
+            "conversation_id": conversation_id,
+            "session_id": conv.get("active_session_id") if conv else None,
+            "pressure": pressure_dict,
+        }
+
+    switched = switch_active_session_for_conversation(
+        store,
+        conversation_id,
+        new_provider=provider_id,
+        new_model=model_id,
+        mode="continue_with_prior_context",
+    )
+    return {
+        "rolled_over": True,
+        "conversation_id": conversation_id,
+        "session_id": switched["session_id"],
+        "pressure": pressure_dict,
+    }
+
+
+def _build_provider_context(
+    *,
+    store,
+    conversation_id: str,
+    prior_messages: list[dict],
+    current_content: str,
+    workflow: str,
+) -> tuple[str, bool, int]:
+    """Build non-user context prepended to the provider request."""
+    from nidavellir.sessions.handoff import should_inject_seed
+    from nidavellir.tokens.context_meter import estimate_payload_tokens
+
+    turn_number = len(prior_messages) // 2
+    is_first_turn = len(prior_messages) == 0
+    context_parts: list[str] = []
+    completed_messages, interrupted_tail = _split_interrupted_tail(prior_messages)
+
+    conv = store.get_conversation(conversation_id)
+    seed = conv.get("seed_text") if conv else store.get_conversation_seed(conversation_id)
+    seed_turn_start = int(conv.get("seed_turn_start") or 0) if conv else 0
+    includes_seed = bool(seed and should_inject_seed(max(0, turn_number - seed_turn_start)))
+    history_start = seed_turn_start * 2 if includes_seed else 0
+    history_text = _build_conversation_history(completed_messages[history_start:])
+    if history_text:
+        context_parts.append(
+            "Prior transcript for background only. The current user message is the only instruction to act on."
+        )
+        context_parts.append(history_text)
+    if interrupted_tail:
+        interrupted_content = (interrupted_tail.get("content") or "").strip()
+        if interrupted_content:
+            context_parts.append(
+                "Interrupted prior user request, not completed. Do not act on this unless the current user message explicitly asks to continue it:\n"
+                f"User: {interrupted_content}"
+            )
+    if includes_seed:
+        context_parts.append(seed)
+    file_context = store.build_file_context_block(conversation_id) if hasattr(store, "build_file_context_block") else ""
+    if file_context:
+        context_parts.append(file_context)
+
+    if is_first_turn:
+        prefix = get_context_prefix(store, current_content, workflow, session_id=conversation_id)
+        if prefix:
+            context_parts.append(prefix)
+
+    memory_context = "\n\n".join(part.strip() for part in context_parts if part and part.strip())
+    seed_tokens = estimate_payload_tokens([{"role": "system", "content": seed or ""}]) if includes_seed else 0
+    _log.debug("handoff_seed_loaded_for_payload", extra={
+        "event": "handoff_seed_loaded_for_payload",
+        "conversation_id": conversation_id,
+        "seed_present": bool(seed),
+        "seed_length": len(seed or ""),
+        "turn_index": turn_number,
+        "should_inject_seed": includes_seed,
+    })
+    return memory_context, includes_seed, seed_tokens
+
+
+def _build_prompt_assembly(
+    *,
+    store,
+    skill_store,
+    conversation_id: str,
+    provider_id: str,
+    model_id: str,
+    current_content: str,
+    memory_context: str,
+    workdir: Path,
+) -> PromptAssemblyResult:
+    """Build the provider payload through structured sections."""
+    sections: list[PromptSection] = []
+    if memory_context:
+        sections.append(PromptSection(
+            name="conversation/session context",
+            content=memory_context,
+            source="conversation",
+        ))
+
+    selected_files: list[str] = []
+    if hasattr(store, "list_conversation_files"):
+        try:
+            selected_files = [row.get("original_path") or row.get("file_name") for row in store.list_conversation_files(conversation_id)]
+            selected_files = [path for path in selected_files if path]
+        except Exception:
+            selected_files = []
+
+    if skill_store is not None:
+        context = SkillTaskContext(
+            conversation_id=conversation_id,
+            session_id=conversation_id,
+            user_message=current_content,
+            repo_path=str(workdir),
+            selected_files=selected_files,
+            provider=provider_id,
+            model=model_id,
+        )
+        activation = activate_skills(skill_store.list_skills(), context)
+        compiled = GenericSkillCompiler().compile(
+            activation.activated,
+            suppressed=[item.model_dump() for item in activation.suppressed],
+        )
+        if compiled.prompt_fragment:
+            sections.append(PromptSection(
+                name="activated skills",
+                content=compiled.prompt_fragment,
+                source="skills",
+                token_estimate=compiled.estimated_tokens,
+                metadata={
+                    "injected_skill_ids": compiled.injected_skill_ids,
+                    "suppressed_skill_ids": [item["skill_id"] for item in compiled.suppressed],
+                },
+            ))
+        for log in activation.logs:
+            try:
+                skill_store.log_activation(
+                    skill_id=log.skill_id,
+                    conversation_id=conversation_id,
+                    session_id=conversation_id,
+                    provider=provider_id,
+                    model=model_id,
+                    trigger_reason=log.reason,
+                    score=log.score,
+                    matched_triggers=log.matched_triggers,
+                    compatibility_status=log.compatibility_status,
+                    diagnostics=[],
+                    token_estimate=log.token_estimate,
+                    injected=log.injected,
+                )
+            except Exception:
+                _log.exception("skill_activation_log_failed")
+
+    sections.append(PromptSection(
+        name="user message",
+        content=current_content,
+        source="user",
+    ))
+    return assemble_prompt(sections)
+
+
 async def handle_message_with_identity(
     *,
     ws,
@@ -253,8 +650,6 @@ async def handle_message_with_identity(
     Returns the resolved conversation_id (may differ from input if auto-created).
     Sends WS error and returns None if the conversation cannot be resolved.
     """
-    from nidavellir.sessions.handoff import should_inject_seed
-
     # ── Resolve conversation identity ─────────────────────────────────────────
     if conversation_id:
         # Validate provided id exists — reject phantoms
@@ -279,6 +674,8 @@ async def handle_message_with_identity(
             workflow=workflow,
             model_id=model_id,
             provider_id=provider_id,
+            working_directory=effective_default_working_directory(),
+            working_directory_display=effective_default_working_directory(),
         )
         _log.info("conversation_created_for_send", extra={
             "event":           "conversation_created_for_send",
@@ -292,36 +689,40 @@ async def handle_message_with_identity(
             })
         except Exception:
             pass
+        conv = store.get_conversation(conversation_id)
 
     # ── Build provider payload with conversation history ──────────────────────
     prior_messages = store.get_conversation_messages(conversation_id)
-    turn_number    = len(prior_messages) // 2
-    is_first_turn  = len(prior_messages) == 0
+    workdir = _conversation_workdir(conv)
+    workdir_explicit = _conversation_workdir_explicit(conv)
 
     # Persist user message BEFORE building payload
-    store.append_message(conversation_id, str(uuid.uuid4()), "user", content)
+    user_message_id = str(uuid.uuid4())
+    store.append_message(conversation_id, user_message_id, "user", content, status="running")
     _log.debug("conversation_message_persisted", extra={
         "event": "conversation_message_persisted",
         "conversation_id": conversation_id,
         "role": "user",
     })
 
-    # Build context: history + seeds + memory
-    memory_context = ""
-
-    seed = store.get_conversation_seed(conversation_id)
-    if seed and should_inject_seed(turn_number):
-        memory_context = seed + "\n\n"
-
-    if is_first_turn:
-        memory_context += get_context_prefix(
-            store, content, workflow, session_id=conversation_id,
-        )
-
-    # Prepend prior conversation history for multi-turn continuity
-    history_text = _build_conversation_history(prior_messages)
-    if history_text:
-        memory_context = (history_text + "\n\n" + memory_context).strip()
+    memory_context, includes_seed, seed_tokens = _build_provider_context(
+        store=store,
+        conversation_id=conversation_id,
+        prior_messages=prior_messages,
+        current_content=content,
+        workflow=workflow,
+    )
+    skill_store = getattr(ws.app.state, "skill_store", None)
+    assembly = _build_prompt_assembly(
+        store=store,
+        skill_store=skill_store,
+        conversation_id=conversation_id,
+        provider_id=provider_id,
+        model_id=model_id or DEFAULT_MODEL,
+        current_content=content,
+        memory_context=memory_context,
+        workdir=workdir,
+    )
 
     _log.debug("provider_payload_built", extra={
         "event":           "provider_payload_built",
@@ -329,12 +730,17 @@ async def handle_message_with_identity(
         "message_count":   len(prior_messages) + 1,
         "provider":        provider_id,
         "model":           model_id,
+        "includes_handoff_seed": includes_seed,
+        "handoff_seed_tokens_estimate": seed_tokens,
+        "injected_skill_ids": assembly.injected_skill_ids,
     })
 
     # ── Run agent ─────────────────────────────────────────────────────────────
-    response, agent = await _handle_message(
-        ws, content, provider_id, model_id or None,
-        memory_context=memory_context,
+    response, agent, outcome = await _handle_message(
+        ws, assembly.rendered_text, provider_id, model_id or None,
+        memory_context="",
+        workdir=workdir,
+        workdir_explicit=workdir_explicit,
     )
 
     # Read token usage before killing
@@ -344,6 +750,7 @@ async def handle_message_with_identity(
         model_id=model_id or DEFAULT_MODEL,
         session_id=conversation_id,
         token_store=token_store,
+        workdir=workdir,
     )
     if agent is not None:
         try:
@@ -353,7 +760,8 @@ async def handle_message_with_identity(
 
     # ── Persist assistant response ─────────────────────────────────────────────
     if response:
-        store.append_message(conversation_id, str(uuid.uuid4()), "agent", response)
+        store.update_message_status(user_message_id, "completed")
+        store.append_message(conversation_id, str(uuid.uuid4()), "agent", response, status="completed")
         _log.debug("conversation_message_persisted", extra={
             "event": "conversation_message_persisted",
             "conversation_id": conversation_id,
@@ -361,6 +769,11 @@ async def handle_message_with_identity(
         })
         asyncio.create_task(
             _extract_and_store(store=store, conversation_id=conversation_id, workflow=workflow)
+        )
+    else:
+        store.update_message_status(
+            user_message_id,
+            "cancelled" if outcome == "cancelled" else "interrupted",
         )
 
     # ── Emit context_update ───────────────────────────────────────────────────
@@ -387,6 +800,7 @@ async def chat_websocket(ws: WebSocket) -> None:
     workflow:        str       = "chat"
     conversation_id: str | None = None
     store = None
+    current_task: asyncio.Task | None = None
 
     try:
         store = ws.app.state.memory_store
@@ -402,26 +816,30 @@ async def chat_websocket(ws: WebSocket) -> None:
                 await ws.send_json({"type": "pong"})
 
             elif msg_type == "new_session":
-                provider_id     = data.get("provider_id", DEFAULT_PROVIDER)
-                model_id        = data.get("model_id",    DEFAULT_MODEL)
-                workflow        = data.get("workflow",    "chat")
-                conversation_id = data.get("conversation_id") or str(uuid.uuid4())
-
-                if store is not None:
-                    try:
-                        store.create_conversation(
-                            conversation_id,
-                            workflow=workflow,
-                            model_id=model_id,
-                            provider_id=provider_id,
-                        )
-                    except Exception:
-                        pass
+                requested_provider = data.get("provider_id", DEFAULT_PROVIDER)
+                requested_model    = data.get("model_id",    DEFAULT_MODEL)
+                workflow           = data.get("workflow",    "chat")
+                conversation_id, provider_id, model_id = resolve_new_session_state(
+                    store=store,
+                    requested_conversation_id=data.get("conversation_id"),
+                    requested_provider=requested_provider,
+                    requested_model=requested_model,
+                    workflow=workflow,
+                )
+                conv = store.get_conversation(conversation_id) if store else None
+                workdir = _conversation_workdir(conv)
+                workdir_display = (
+                    conv.get("working_directory_display")
+                    if conv and conv.get("working_directory_display")
+                    else str(workdir)
+                )
 
                 await ws.send_json(_build_session_ready(
                     provider_id=provider_id,
                     model_id=model_id,
                     conversation_id=conversation_id,
+                    working_directory=str(workdir),
+                    working_directory_display=workdir_display,
                 ))
                 # Emit context_update so frontend refreshes pressure for new provider/model
                 _cu = _build_context_update(
@@ -433,20 +851,35 @@ async def chat_websocket(ws: WebSocket) -> None:
                     await ws.send_json(_cu)
 
             elif msg_type == "session_switch":
+                if current_task and not current_task.done():
+                    current_task.cancel()
+                    try:
+                        await current_task
+                    except asyncio.CancelledError:
+                        pass
+                    current_task = None
                 mode     = data.get("mode", "clean")
-                old_id   = conversation_id or data.get("old_conversation_id")
+                old_id   = data.get("old_conversation_id") or conversation_id
                 new_prov = data.get("provider_id", provider_id)
                 new_mod  = data.get("model_id",    model_id)
+                _log.info("session_switch_requested", extra={
+                    "event": "session_switch_requested",
+                    "decision": mode,
+                    "parent_conversation_id": old_id,
+                    "target_provider": new_prov,
+                    "target_model": new_mod,
+                })
 
                 if store is not None and old_id:
                     try:
-                        from nidavellir.sessions.continuity import switch_session
-                        conversation_id = switch_session(
-                            store, old_id,
+                        switched = switch_active_session_for_conversation(
+                            store,
+                            old_id,
                             new_provider=new_prov,
                             new_model=new_mod,
                             mode=mode,
                         )
+                        conversation_id = switched["conversation_id"]
                     except Exception:
                         conversation_id = str(uuid.uuid4())
                 else:
@@ -456,10 +889,18 @@ async def chat_websocket(ws: WebSocket) -> None:
                 model_id    = new_mod
 
                 seed = store.get_conversation_seed(conversation_id) if store else None
+                conv = store.get_conversation(conversation_id) if store else {}
                 await ws.send_json({
                     "type":            "session_switch_ready",
                     "conversation_id": conversation_id,
-                    "mode":            mode,
+                    "session_id":       conv.get("active_session_id"),
+                    "provider_id":      provider_id,
+                    "model_id":         model_id,
+                    "provider":         provider_id,
+                    "model":            model_id,
+                    "working_directory": conv.get("working_directory") or str(_conversation_workdir(conv)),
+                    "working_directory_display": conv.get("working_directory_display") or str(_conversation_workdir(conv)),
+                    "mode":            normalize_handoff_mode(mode),
                     "seed":            seed,
                 })
                 _cu2 = _build_context_update(
@@ -474,44 +915,91 @@ async def chat_websocket(ws: WebSocket) -> None:
                 content = data.get("content", "").strip()
                 if not content:
                     continue
+                if current_task and not current_task.done():
+                    await ws.send_json({"type": "error", "message": "agent already running"})
+                    continue
 
                 # Use conversation_id from message payload if provided
                 # (handles reconnect case where WS scope lost its identity)
                 msg_conv_id = data.get("conversation_id") or conversation_id
+                if store is not None and msg_conv_id:
+                    try:
+                        conv = store.get_conversation(msg_conv_id)
+                    except Exception:
+                        conv = None
+                    if conv:
+                        provider_id = (
+                            conv.get("active_provider")
+                            or conv.get("provider_id")
+                            or provider_id
+                        )
+                        model_id = (
+                            conv.get("active_model")
+                            or conv.get("model_id")
+                            or model_id
+                        )
 
-                if store is not None:
-                    token_store = getattr(ws.app.state, "token_store", None)
-                    result_conv_id = await handle_message_with_identity(
-                        ws=ws,
-                        content=content,
-                        conversation_id=msg_conv_id,
-                        provider_id=provider_id,
-                        model_id=model_id or DEFAULT_MODEL,
-                        workflow=workflow,
-                        store=store,
-                        token_store=token_store,
-                    )
-                    if result_conv_id:
-                        conversation_id = result_conv_id
-                else:
-                    # No store — fall back to stateless single-turn mode
-                    response, agent = await _handle_message(
-                        ws, content, provider_id, model_id or None,
-                        memory_context="",
-                    )
-                    token_store = getattr(ws.app.state, "token_store", None)
-                    await _ingest_turn_usage(
-                        agent=agent,
-                        provider_id=provider_id,
-                        model_id=model_id or DEFAULT_MODEL,
-                        session_id=conversation_id or "default",
-                        token_store=token_store,
-                    )
-                    if agent is not None:
+                async def run_turn() -> None:
+                    nonlocal conversation_id, current_task
+                    try:
+                        ws.app.state.agent_running = True
+                        if store is not None:
+                            token_store = getattr(ws.app.state, "token_store", None)
+                            result_conv_id = await handle_message_with_identity(
+                                ws=ws,
+                                content=content,
+                                conversation_id=msg_conv_id,
+                                provider_id=provider_id,
+                                model_id=model_id or DEFAULT_MODEL,
+                                workflow=workflow,
+                                store=store,
+                                token_store=token_store,
+                            )
+                            if result_conv_id:
+                                conversation_id = result_conv_id
+                        else:
+                            # No store — fall back to stateless single-turn mode
+                            response, agent, _outcome = await _handle_message(
+                                ws, content, provider_id, model_id or None,
+                                memory_context="",
+                            )
+                            token_store = getattr(ws.app.state, "token_store", None)
+                            await _ingest_turn_usage(
+                                agent=agent,
+                                provider_id=provider_id,
+                                model_id=model_id or DEFAULT_MODEL,
+                                session_id=conversation_id or "default",
+                                token_store=token_store,
+                                workdir=WORKDIR,
+                            )
+                            if agent is not None:
+                                try:
+                                    await agent.kill()
+                                except Exception:
+                                    pass
+                    except asyncio.CancelledError:
                         try:
-                            await agent.kill()
+                            await ws.send_json({"type": "cancelled"})
                         except Exception:
                             pass
+                    finally:
+                        ws.app.state.agent_running = False
+                        current_task = None
+
+                current_task = asyncio.create_task(run_turn())
+
+            elif msg_type == "cancel":
+                if current_task and not current_task.done():
+                    current_task.cancel()
+                    try:
+                        await current_task
+                    except asyncio.CancelledError:
+                        pass
+                    current_task = None
+                else:
+                    await ws.send_json({"type": "cancelled"})
 
     except WebSocketDisconnect:
+        if current_task and not current_task.done():
+            current_task.cancel()
         pass

@@ -20,6 +20,7 @@ function stripAnsi(raw: string): string {
 
 export class ClaudeStreamParser implements ProviderStreamParser {
   private _buffer = "";
+  private _toolSeq = 0;
 
   feed(chunk: string): StreamEvent[] {
     const clean = stripAnsi(chunk);
@@ -32,14 +33,16 @@ export class ClaudeStreamParser implements ProviderStreamParser {
     for (const line of lines) {
       const toolMatch = line.trim().match(TOOL_USE_RE);
       if (toolMatch) {
+        this._toolSeq += 1;
         events.push({
-          type: "tool_use",
-          tool: toolMatch[1],
+          type: "tool_start",
+          id: `claude-tool-${this._toolSeq}`,
+          name: toolMatch[1],
           args: toolMatch[2].replace(/\)$/, ""),
           raw:  line,
         });
       } else if (line.trim().length > 0) {
-        events.push({ type: "text", content: line + "\n" });
+        events.push({ type: "answer_delta", content: line + "\n" });
       }
     }
 
@@ -52,14 +55,16 @@ export class ClaudeStreamParser implements ProviderStreamParser {
       const clean = stripAnsi(this._buffer);
       const toolMatch = clean.trim().match(TOOL_USE_RE);
       if (toolMatch) {
+        this._toolSeq += 1;
         events.push({
-          type: "tool_use",
-          tool: toolMatch[1],
+          type: "tool_start",
+          id: `claude-tool-${this._toolSeq}`,
+          name: toolMatch[1],
           args: toolMatch[2].replace(/\)$/, ""),
           raw:  clean,
         });
       } else {
-        events.push({ type: "text", content: clean });
+        events.push({ type: "answer_delta", content: clean });
       }
       this._buffer = "";
     }
@@ -69,5 +74,6 @@ export class ClaudeStreamParser implements ProviderStreamParser {
 
   reset(): void {
     this._buffer = "";
+    this._toolSeq = 0;
   }
 }

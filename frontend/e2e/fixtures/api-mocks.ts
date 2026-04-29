@@ -140,6 +140,9 @@ export async function mockApi(page: Page): Promise<void> {
   await page.route('**/api/agents/models', (route) =>
     route.fulfill({ json: { models: MOCK_AGENT_MODELS } })
   );
+  await page.route('**/api/conversations', (route) =>
+    route.fulfill({ json: [] })
+  );
 }
 
 /** Simulates backend completely unreachable */

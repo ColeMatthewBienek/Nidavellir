@@ -14,9 +14,9 @@ describe('Placeholder screens', () => {
     expect(() => render(<ChatScreen />)).not.toThrow();
   });
 
-  it('ChatScreen renders the thread panel header', () => {
+  it('ChatScreen renders the conversations panel header', () => {
     render(<ChatScreen />);
-    expect(screen.getAllByText('Threads').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Conversations').length).toBeGreaterThan(0);
   });
 
   it('PlanScreen renders without crashing', () => {

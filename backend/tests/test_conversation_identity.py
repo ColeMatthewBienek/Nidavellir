@@ -65,6 +65,20 @@ def _conv(store, *, messages=0) -> str:
     return cid
 
 
+def test_conversation_messages_have_persisted_status(tmp_path):
+    store = _setup_stores(tmp_path)
+    cid = str(uuid.uuid4())
+    mid = str(uuid.uuid4())
+    store.create_conversation(cid)
+    store.append_message(cid, mid, "user", "Do the work.", status="running")
+
+    msg = store.get_conversation_messages(cid)[0]
+    assert msg["status"] == "running"
+
+    assert store.update_message_status(mid, "interrupted")
+    assert store.get_conversation_messages(cid)[0]["status"] == "interrupted"
+
+
 # ── Backend Test 1 — message without conversation_id creates one ───────────────
 
 @pytest.mark.asyncio
@@ -143,6 +157,157 @@ async def test_follow_up_includes_prior_messages_in_payload(tmp_path, monkeypatc
         "Prior messages must appear in outbound provider payload"
     )
     assert "rap pattern" in payload.lower() or "make it rhyme" in payload.lower()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_prior_user_request_is_not_active_instruction(tmp_path, monkeypatch):
+    """Interrupted turn status, not dangling shape, must drive resume context."""
+    import nidavellir.agents.registry as reg
+    from nidavellir.routers import ws as ws_router
+    store = _setup_stores(tmp_path)
+    agent = FakeAgent()
+    monkeypatch.setattr(reg, "make_agent", lambda *a, **kw: agent)
+    monkeypatch.setattr(ws_router, "_extract_and_store", _noop_extract)
+
+    cid = str(uuid.uuid4())
+    store.create_conversation(cid, workflow="chat", model_id="gpt-5.5", provider_id="codex")
+    store.append_message(
+        cid,
+        str(uuid.uuid4()),
+        "user",
+        "Bugfix the resume provider and model retention.",
+        status="interrupted",
+    )
+
+    ws = FakeWS()
+    await ws_router.handle_message_with_identity(
+        ws=ws,
+        content="What model are you?",
+        conversation_id=cid,
+        provider_id="codex",
+        model_id="gpt-5.5",
+        workflow="chat",
+        store=store,
+        token_store=None,
+    )
+
+    assert len(agent.sent) == 1
+    payload = agent.sent[0]
+    assert "Interrupted prior user request, not completed" in payload
+    assert "Do not act on this unless the current user message explicitly asks to continue it" in payload
+    assert payload.rstrip().endswith("What model are you?")
+
+
+@pytest.mark.asyncio
+async def test_successful_turn_marks_user_and_agent_messages_completed(tmp_path, monkeypatch):
+    import nidavellir.agents.registry as reg
+    from nidavellir.routers import ws as ws_router
+    store = _setup_stores(tmp_path)
+    monkeypatch.setattr(reg, "make_agent", lambda *a, **kw: FakeAgent())
+    monkeypatch.setattr(ws_router, "_extract_and_store", _noop_extract)
+
+    ws = FakeWS()
+    cid = await ws_router.handle_message_with_identity(
+        ws=ws,
+        content="What model are you?",
+        conversation_id=None,
+        provider_id="codex",
+        model_id="gpt-5.5",
+        workflow="chat",
+        store=store,
+        token_store=None,
+    )
+
+    messages = store.get_conversation_messages(cid)
+    assert [m["role"] for m in messages] == ["user", "agent"]
+    assert [m["status"] for m in messages] == ["completed", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_child_session_injects_handoff_seed_into_payload(tmp_path, monkeypatch):
+    """A continued child session must inject its seed into the outbound payload."""
+    import nidavellir.agents.registry as reg
+    from nidavellir.routers import ws as ws_router
+    from nidavellir.sessions.continuity import switch_session
+
+    store = _setup_stores(tmp_path)
+    agent = FakeAgent()
+    monkeypatch.setattr(reg, "make_agent", lambda *a, **kw: agent)
+    monkeypatch.setattr(ws_router, "_extract_and_store", _noop_extract)
+
+    parent_id = str(uuid.uuid4())
+    store.create_conversation(parent_id, workflow="chat", model_id="claude-sonnet-4-6", provider_id="claude")
+    store.append_message(parent_id, str(uuid.uuid4()), "user", "Write a happy story about a lighthouse.")
+    store.append_message(parent_id, str(uuid.uuid4()), "agent", "The lighthouse smiled over a silver bay.")
+    child_id = switch_session(
+        store,
+        parent_id,
+        new_provider="codex",
+        new_model="gpt-5.4",
+        mode="continue_with_prior_context",
+    )
+
+    ws = FakeWS()
+    await ws_router.handle_message_with_identity(
+        ws=ws,
+        content="Make it rhyme like a rap.",
+        conversation_id=child_id,
+        provider_id="codex",
+        model_id="gpt-5.4",
+        workflow="chat",
+        store=store,
+        token_store=None,
+    )
+
+    assert len(agent.sent) == 1
+    payload = agent.sent[0]
+    assert "prior session context" in payload.lower()
+    assert "lighthouse" in payload.lower()
+    assert "make it rhyme" in payload.lower()
+
+
+@pytest.mark.asyncio
+async def test_child_session_seed_expires_after_8_turns(tmp_path, monkeypatch):
+    """Seed must not be injected once the child has eight completed turns."""
+    import nidavellir.agents.registry as reg
+    from nidavellir.routers import ws as ws_router
+    from nidavellir.sessions.continuity import switch_session
+
+    store = _setup_stores(tmp_path)
+    agent = FakeAgent()
+    monkeypatch.setattr(reg, "make_agent", lambda *a, **kw: agent)
+    monkeypatch.setattr(ws_router, "_extract_and_store", _noop_extract)
+
+    parent_id = str(uuid.uuid4())
+    store.create_conversation(parent_id)
+    store.append_message(parent_id, str(uuid.uuid4()), "user", "The prior topic was a lighthouse.")
+    store.append_message(parent_id, str(uuid.uuid4()), "agent", "A lighthouse guided ships.")
+    child_id = switch_session(
+        store,
+        parent_id,
+        new_provider="codex",
+        new_model="gpt-5.4",
+        mode="continue_with_prior_context",
+    )
+    for i in range(16):
+        role = "user" if i % 2 == 0 else "agent"
+        store.append_message(child_id, str(uuid.uuid4()), role, f"Child turn content {i}")
+
+    ws = FakeWS()
+    await ws_router.handle_message_with_identity(
+        ws=ws,
+        content="Continue.",
+        conversation_id=child_id,
+        provider_id="codex",
+        model_id="gpt-5.4",
+        workflow="chat",
+        store=store,
+        token_store=None,
+    )
+
+    assert len(agent.sent) == 1
+    payload = agent.sent[0]
+    assert "prior session context" not in payload.lower()
 
 
 # ── Backend Test 3 — unknown conversation_id sends WS error ───────────────────

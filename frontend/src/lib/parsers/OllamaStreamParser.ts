@@ -25,18 +25,18 @@ export class OllamaStreamParser implements ProviderStreamParser {
           const possibleTag = this._buffer.lastIndexOf("<");
           if (possibleTag !== -1 && possibleTag > this._buffer.length - 8) {
             const safe = this._buffer.slice(0, possibleTag);
-            if (safe.length > 0) events.push({ type: "text", content: safe });
+            if (safe.length > 0) events.push({ type: "answer_delta", content: safe });
             this._buffer = this._buffer.slice(possibleTag);
             break;
           }
           if (this._buffer.length > 0) {
-            events.push({ type: "text", content: this._buffer });
+            events.push({ type: "answer_delta", content: this._buffer });
           }
           this._buffer = "";
           break;
         }
         if (openIdx > 0) {
-          events.push({ type: "text", content: this._buffer.slice(0, openIdx) });
+          events.push({ type: "answer_delta", content: this._buffer.slice(0, openIdx) });
         }
         this._buffer = this._buffer.slice(openIdx + 7); // skip "<think>"
         this._inThink = true;
@@ -51,7 +51,7 @@ export class OllamaStreamParser implements ProviderStreamParser {
         }
         this._thinkBuffer += this._buffer.slice(0, closeIdx);
         this._buffer = this._buffer.slice(closeIdx + 8); // skip "</think>"
-        events.push({ type: "think", content: this._thinkBuffer.trim() });
+        events.push({ type: "reasoning_signal", content: this._thinkBuffer.trim() });
         this._thinkBuffer = "";
         this._inThink = false;
       }
@@ -63,11 +63,11 @@ export class OllamaStreamParser implements ProviderStreamParser {
   flush(): StreamEvent[] {
     const events: StreamEvent[] = [];
     if (this._inThink && this._thinkBuffer.length > 0) {
-      events.push({ type: "think", content: this._thinkBuffer.trim() });
+      events.push({ type: "reasoning_signal", content: this._thinkBuffer.trim() });
       this._thinkBuffer = "";
     }
     if (this._buffer.length > 0) {
-      events.push({ type: "text", content: this._buffer });
+      events.push({ type: "answer_delta", content: this._buffer });
       this._buffer = "";
     }
     events.push({ type: "done" });

@@ -1,12 +1,20 @@
-export const SLASH_CMDS = [
+export interface SlashCommand {
+  cmd: string;
+  desc: string;
+  action: string;
+}
+
+export const SLASH_CMDS: SlashCommand[] = [
   { cmd: '/plan',    desc: 'Start or resume a plan',       action: 'nav:plan'   },
   { cmd: '/spawn',   desc: 'Spawn a new agent',             action: 'spawn'      },
   { cmd: '/agents',  desc: 'Show active agent status',      action: 'nav:agents' },
   { cmd: '/tasks',   desc: 'View task queue',               action: 'nav:tasks'  },
   { cmd: '/skills',  desc: 'Browse & invoke a skill',       action: 'nav:skills' },
-  { cmd: '/context', desc: 'Toggle file context panel',     action: 'context'    },
+  { cmd: '/skill',   desc: 'Invoke a skill by slug',         action: 'skill'      },
+  { cmd: '/cwd',     desc: 'Change Working Directory',       action: 'cwd'        },
+  { cmd: '/context', desc: 'Toggle Working Set panel',      action: 'context'    },
   { cmd: '/memory',  desc: 'Search memory store',           action: 'memory'     },
-  { cmd: '/clear',   desc: 'Clear this thread',             action: 'clear'      },
+  { cmd: '/clear',   desc: 'Clear this conversation',       action: 'clear'      },
   { cmd: '/help',    desc: 'List all available commands',   action: 'help'       },
 ];
 
@@ -14,11 +22,12 @@ interface SlashMenuProps {
   query: string;
   highlight: number;
   setHighlight: (i: number) => void;
-  onSelect: (cmd: typeof SLASH_CMDS[0]) => void;
+  onSelect: (cmd: SlashCommand) => void;
+  commands?: SlashCommand[];
 }
 
-export function SlashMenu({ query, highlight, setHighlight, onSelect }: SlashMenuProps) {
-  const filtered = SLASH_CMDS.filter((c) => c.cmd.startsWith(query));
+export function SlashMenu({ query, highlight, setHighlight, onSelect, commands = SLASH_CMDS }: SlashMenuProps) {
+  const filtered = commands.filter((c) => c.cmd.startsWith(query));
   if (!filtered.length) return null;
   return (
     <div style={{

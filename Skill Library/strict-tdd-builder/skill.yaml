@@ -1,0 +1,24 @@
+id: strict-tdd-builder
+slug: strict-tdd-builder
+name: Strict TDD Builder
+description: Builds and fixes software by proving the failing behavior first, implementing the smallest correct change, and reporting RED to GREEN evidence.
+activation_mode: manual
+priority: 90
+triggers:
+  - type: explicit_user_request
+    value: strict tdd
+    weight: 10
+  - type: explicit_user_request
+    value: tdd rigorously
+    weight: 10
+  - type: explicit_user_request
+    value: use tdd
+    weight: 8
+  - type: explicit_user_request
+    value: tests first
+    weight: 8
+required_capabilities:
+  file_read: true
+  file_write: true
+  shell: true
+  code_execution: true

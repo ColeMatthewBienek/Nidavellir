@@ -3,7 +3,7 @@
  * Spec: conversation-identity-before-send-patch.md
  */
 import { it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { _testResetSocket, sendMessage } from '../../lib/agentSocket';
+import { _testResetSocket } from '../../lib/agentSocket';
 import { useAgentStore } from '../../store/agentStore';
 
 beforeEach(() => {
@@ -21,8 +21,6 @@ afterEach(() => {
 it('sendMessage payload includes conversation_id when one is set', () => {
   useAgentStore.getState().setConversationId('conv-abc-123');
 
-  const sent: string[] = [];
-  const mockWs = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d) } as unknown as WebSocket;
   // Inject mock WS via the send path by spying on sendMessage internals
   // We verify the payload shape directly
   const payload = JSON.stringify({
@@ -67,7 +65,6 @@ it('conversationId is unchanged by context_update events', () => {
   useAgentStore.getState().setConversationId('stable-conv-id');
 
   // Simulate context_update processing — must NOT clear conversationId
-  const msg = { type: 'context_update', conversation_id: 'stable-conv-id', model: 'x', provider: 'y' };
   // The handler fetches context but does not call setConversationId
   // Verify the store is unchanged after the handler would run
   expect(useAgentStore.getState().conversationId).toBe('stable-conv-id');

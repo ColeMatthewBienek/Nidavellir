@@ -8,7 +8,8 @@
     "dev:fe": "cd frontend && npm run dev",
     "dev:el": "wait-on http://localhost:5173 && cd electron && node node_modules/typescript/bin/tsc && cmd.exe /c \"taskkill /F /IM electron.exe 2>nul & C:\\Users\\colebienek\\projects\\nidavellir\\electron\\node_modules\\electron\\dist\\electron.exe C:\\Users\\colebienek\\projects\\nidavellir\\electron\\dist\\main.js\"",
     "install:all": "cd frontend && npm install && cd ../electron && npm install",
-    "test": "cd backend && uv run pytest && cd ../frontend && npm test"
+    "test": "cd backend && uv run pytest && cd ../frontend && npm test",
+    "test:feature": "bash scripts/test-feature.sh"
   },
   "dependencies": {
     "gh": "^2.8.9"

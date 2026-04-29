@@ -1,7 +1,10 @@
 import { useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { useAgentStore } from "@/store/agentStore";
+import { buildCodePreviewUrl, parseCodeRef, type CodeRef } from "@/lib/liveRefs";
 
 // All structural layout uses inline styles — Tailwind structural classes are broken in this build.
 // Colour-only Tailwind classes (text-*, bg-*, border-*) are kept where convenient.
@@ -97,6 +100,153 @@ function CodeBlock({ language, children }: { language: string; children: string 
   );
 }
 
+type CodePreviewLine = {
+  number: number;
+  text: string;
+  highlighted: boolean;
+};
+
+type CodePreview = {
+  path: string;
+  fileName: string;
+  startLine: number;
+  endLine: number;
+  lineCount: number;
+  lines: CodePreviewLine[];
+};
+
+function CodePreviewModal({ preview, onClose }: { preview: CodePreview; onClose: () => void }) {
+  return (
+    <div
+      role="dialog"
+      aria-label="Code reference preview"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: '#010409aa',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+        padding: 24,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          width: 'min(920px, 92vw)',
+          maxHeight: '80vh',
+          background: '#0d1117',
+          border: '1px solid #30363d',
+          borderRadius: 8,
+          overflow: 'hidden',
+          boxShadow: '0 20px 60px #00000088',
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderBottom: '1px solid #30363d', background: '#161b22' }}>
+          <span style={{ color: '#e6edf3', fontWeight: 600, fontSize: 12 }}>{preview.fileName}</span>
+          <span style={{ color: '#8b949e', fontSize: 11, fontFamily: 'var(--mono)' }}>
+            L{preview.startLine}{preview.endLine !== preview.startLine ? `-L${preview.endLine}` : ''}
+          </span>
+          <span style={{ color: '#484f58', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preview.path}</span>
+          <button
+            type="button"
+            aria-label="Close code preview"
+            onClick={onClose}
+            style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#8b949e', cursor: 'pointer', fontSize: 16 }}
+          >
+            x
+          </button>
+        </div>
+        <pre style={{ margin: 0, maxHeight: '65vh', overflow: 'auto', padding: '10px 0', background: '#0d1117' }}>
+          {preview.lines.map((line) => (
+            <div
+              key={line.number}
+              data-testid={line.highlighted ? 'highlighted-code-line' : undefined}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '64px minmax(0, 1fr)',
+                background: line.highlighted ? '#1f6feb24' : 'transparent',
+                borderLeft: line.highlighted ? '3px solid #1f6feb' : '3px solid transparent',
+                color: '#c9d1d9',
+                fontSize: 12,
+                lineHeight: 1.6,
+                fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+              }}
+            >
+              <span style={{ color: line.highlighted ? '#58a6ff' : '#484f58', textAlign: 'right', paddingRight: 12, userSelect: 'none' }}>{line.number}</span>
+              <code style={{ whiteSpace: 'pre', paddingRight: 16 }}>{line.text || ' '}</code>
+            </div>
+          ))}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function CodeRefLink({ refInfo, children }: { refInfo: CodeRef; children: React.ReactNode }) {
+  const base = useAgentStore((state) => state.workingDirectory);
+  const [preview, setPreview] = useState<CodePreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const childLabel = typeof children === 'string'
+    ? children
+    : Array.isArray(children)
+      ? children.map((child) => typeof child === 'string' ? child : '').join('')
+      : refInfo.label;
+
+  const open = useCallback(async () => {
+    setError(null);
+    window.dispatchEvent(new CustomEvent('nid:code-ref-open', { detail: refInfo }));
+    try {
+      const response = await fetch(buildCodePreviewUrl(refInfo, base));
+      if (!response.ok) throw new Error(`http_${response.status}`);
+      const resolvedPreview = await response.json() as CodePreview;
+      setPreview(resolvedPreview);
+      if (window.nidavellir?.openCodeRef) {
+        window.nidavellir.openCodeRef(
+          resolvedPreview.path,
+          resolvedPreview.startLine,
+          resolvedPreview.endLine,
+        ).catch(() => {});
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not open reference');
+    }
+  }, [base, refInfo]);
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={`Open ${refInfo.kind} reference ${childLabel || refInfo.label}`}
+        onClick={open}
+        title={refInfo.label}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          maxWidth: '100%',
+          padding: '1px 6px',
+          borderRadius: 4,
+          border: '1px solid #1f6feb55',
+          background: '#1f6feb16',
+          color: '#79c0ff',
+          fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+          fontSize: '0.82em',
+          cursor: 'pointer',
+          verticalAlign: 'baseline',
+        }}
+      >
+        <span style={{ color: '#58a6ff' }}>{refInfo.kind === 'document' ? 'doc' : 'code'}</span>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{children}</span>
+      </button>
+      {error && <span style={{ color: '#f85149', fontSize: 11, marginLeft: 6 }}>{error}</span>}
+      {preview && createPortal(<CodePreviewModal preview={preview} onClose={() => setPreview(null)} />, document.body)}
+    </>
+  );
+}
+
 interface MarkdownRendererProps {
   content:    string;
   className?: string;
@@ -106,6 +256,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
       <ReactMarkdown
+        urlTransform={(url) => url}
         components={{
           code({ className: cls, children, ...props }) {
             const match  = /language-(\w+)/.exec(cls ?? "");
@@ -114,6 +265,10 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
             if (isBlock) {
               return <CodeBlock language={match![1]}>{raw}</CodeBlock>;
+            }
+            const refInfo = parseCodeRef(raw);
+            if (refInfo) {
+              return <CodeRefLink refInfo={refInfo}>{raw}</CodeRefLink>;
             }
             return (
               <code
@@ -134,6 +289,10 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           },
 
           a({ href, children }) {
+            const refInfo = href ? parseCodeRef(href) : null;
+            if (refInfo) {
+              return <CodeRefLink refInfo={refInfo}>{children}</CodeRefLink>;
+            }
             return (
               <a
                 href={href}
@@ -154,21 +313,21 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
           h1({ children }) {
             return (
-              <h1 style={{ fontSize: 15, fontWeight: 600, color: '#e6edf3', marginTop: 16, marginBottom: 8, paddingBottom: 4, borderBottom: '1px solid #21262d' }}>
+              <h1 style={{ fontSize: 15, fontWeight: 650, color: '#f0f6fc', marginTop: 14, marginBottom: 7, paddingBottom: 0, borderBottom: 'none', lineHeight: 1.35 }}>
                 {children}
               </h1>
             );
           },
           h2({ children }) {
             return (
-              <h2 style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3', marginTop: 12, marginBottom: 6 }}>
+              <h2 style={{ fontSize: 13.5, fontWeight: 650, color: '#f0f6fc', marginTop: 12, marginBottom: 5, lineHeight: 1.35 }}>
                 {children}
               </h2>
             );
           },
           h3({ children }) {
             return (
-              <h3 style={{ fontSize: 13, fontWeight: 600, color: '#e6edf3', marginTop: 8, marginBottom: 4 }}>
+              <h3 style={{ fontSize: 13, fontWeight: 650, color: '#f0f6fc', marginTop: 8, marginBottom: 3, lineHeight: 1.35 }}>
                 {children}
               </h3>
             );
@@ -176,7 +335,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
           p({ children }) {
             return (
-              <p style={{ fontSize: 13, color: '#c9d1d9', lineHeight: 1.65, marginBottom: 8 }}>
+              <p style={{ fontSize: 13, color: '#d6dee6', lineHeight: 1.55, margin: '0 0 8px' }}>
                 {children}
               </p>
             );
@@ -184,14 +343,14 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
           ul({ children }) {
             return (
-              <ul style={{ margin: '8px 0', marginLeft: 16, padding: 0, listStyle: 'none' }}>
+              <ul style={{ margin: '6px 0 10px', marginLeft: 16, padding: 0, listStyle: 'none' }}>
                 {children}
               </ul>
             );
           },
           ol({ children }) {
             return (
-              <ol style={{ margin: '8px 0', marginLeft: 16, paddingLeft: 16, listStyleType: 'decimal' }}>
+              <ol style={{ margin: '6px 0 10px', marginLeft: 16, paddingLeft: 16, listStyleType: 'decimal' }}>
                 {children}
               </ol>
             );
@@ -204,9 +363,10 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
                 alignItems: 'flex-start',
                 gap: 8,
                 fontSize: 13,
-                color: '#c9d1d9',
-                lineHeight: 1.6,
+                color: '#d6dee6',
+                lineHeight: 1.5,
                 listStyle: 'none',
+                marginBottom: 5,
               }}>
                 {!isTask && (
                   <span style={{

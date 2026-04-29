@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { useAgentStore } from "@/store/agentStore";
-import { initSocket, _testResetSocket } from "@/lib/agentSocket";
+import { initSocket, sendCancel, sendMessage, _testResetSocket } from "@/lib/agentSocket";
 
 // ── MockWebSocket ────────────────────────────────────────────────────────────
 
@@ -29,7 +29,9 @@ class MockWebSocket {
     wsInstances.push(this);
   }
 
-  send(_data: string) {}
+  sent: string[] = [];
+
+  send(data: string) { this.sent.push(data); }
 
   close() {
     this.readyState = MockWebSocket.CLOSED;
@@ -104,6 +106,80 @@ describe("connection", () => {
 // ── Chunk handling — raw storage ─────────────────────────────────────────────
 
 describe("chunk handling — raw storage", () => {
+  it("opens an empty streaming agent message immediately when sending", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-now" });
+
+    expect(sendMessage("hello")).toBe(true);
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.role).toBe("agent");
+    expect(msg.content).toBe("");
+    expect(msg.streaming).toBe(true);
+    expect(useAgentStore.getState().isStreaming).toBe(true);
+    expect(JSON.parse(ws.sent.at(-1)!)).toMatchObject({ type: "message", content: "hello", conversation_id: "conv-now" });
+  });
+
+  it("sends cancel and finalizes the active agent message locally", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.getState().addMessage("agent", "");
+    useAgentStore.setState({ isStreaming: true });
+
+    expect(sendCancel()).toBe(true);
+
+    expect(JSON.parse(ws.sent.at(-1)!)).toMatchObject({ type: "cancel" });
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.streaming).toBe(false);
+    expect(useAgentStore.getState().isStreaming).toBe(false);
+  });
+
+  it("finalizes streaming state when backend confirms cancellation", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.getState().addMessage("agent", "");
+    useAgentStore.setState({ isStreaming: true });
+
+    ws.simulateMessage({ type: "cancelled" });
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.streaming).toBe(false);
+    expect(useAgentStore.getState().isStreaming).toBe(false);
+  });
+
+  it("keeps visible chat history when a session switch completes in the same conversation", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.getState().addMessage("user", "old question");
+    useAgentStore.getState().addMessage("agent", "old answer");
+    useAgentStore.getState().finalizeLastAgentMessage();
+
+    ws.simulateMessage({
+      type: "session_switch_ready",
+      conversation_id: "conv-now",
+      provider: "codex",
+      mode: "continue_with_prior_context",
+    });
+
+    const messages = useAgentStore.getState().messages;
+    expect(messages.map((msg) => msg.content)).toEqual(["old question", "old answer"]);
+    expect(useAgentStore.getState().conversationId).toBe("conv-now");
+    expect(useAgentStore.getState().isStreaming).toBe(false);
+  });
+
+  it("stores server-authoritative workspace from session_ready", () => {
+    const ws = setupOpenSocket();
+
+    ws.simulateMessage({
+      type: "session_ready",
+      conversation_id: "conv-now",
+      provider_id: "codex",
+      model_id: "gpt-5.5",
+      working_directory: "/mnt/c/Users/colebienek/projects/nidavellir",
+      working_directory_display: "C:\\Users\\colebienek\\projects\\nidavellir",
+    });
+
+    expect(useAgentStore.getState().workingDirectory).toBe("/mnt/c/Users/colebienek/projects/nidavellir");
+    expect(useAgentStore.getState().workingDirectoryDisplay).toBe("C:\\Users\\colebienek\\projects\\nidavellir");
+  });
+
   it("stores raw chunk including ANSI codes — stripping is parser responsibility", () => {
     const ws = setupOpenSocket();
     // First chunk creates the agent bubble automatically
@@ -121,6 +197,74 @@ describe("chunk handling — raw storage", () => {
     const msgs = useAgentStore.getState().messages;
     const msg = msgs[msgs.length - 1];
     expect(msg.rawChunks).toContain("plain text");
+  });
+
+  it("parses provider chunks into stream events for the live activity feed", () => {
+    useAgentStore.setState({ selectedProvider: "claude", selectedModel: "claude:claude-sonnet-4-6" });
+    const ws = setupOpenSocket();
+
+    ws.simulateMessage({ type: "chunk", content: "◆ Bash(ls -la)\n" });
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.events).toContainEqual({
+      type: "tool_start",
+      id: "claude-tool-1",
+      name: "Bash",
+      args: "ls -la",
+      raw: "◆ Bash(ls -la)",
+    });
+  });
+
+  it("appends backend activity frames before answer chunks arrive", () => {
+    const ws = setupOpenSocket();
+
+    ws.simulateMessage({
+      type: "activity",
+      event: { type: "progress", content: "Prompt sent to provider" },
+    });
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.role).toBe("agent");
+    expect(msg.streaming).toBe(true);
+    expect(msg.events).toContainEqual({ type: "progress", content: "Prompt sent to provider" });
+  });
+
+  it("preserves typed provider activity metadata from the backend", () => {
+    const ws = setupOpenSocket();
+
+    ws.simulateMessage({
+      type: "activity",
+      event: {
+        type: "tool_start",
+        provider: "codex",
+        id: "call-1",
+        name: "exec",
+        args: "/bin/bash -lc pwd",
+        raw: { type: "item.started" },
+      },
+    });
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.events).toContainEqual({
+      type: "tool_start",
+      provider: "codex",
+      id: "call-1",
+      name: "exec",
+      args: "/bin/bash -lc pwd",
+      raw: { type: "item.started" },
+    });
+  });
+
+  it("flushes parser events when the response finishes", () => {
+    useAgentStore.setState({ selectedProvider: "claude", selectedModel: "claude:claude-sonnet-4-6" });
+    const ws = setupOpenSocket();
+
+    ws.simulateMessage({ type: "chunk", content: "final partial" });
+    ws.simulateMessage({ type: "done" });
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.events).toContainEqual({ type: "answer_delta", content: "final partial" });
+    expect(msg.events).toContainEqual({ type: "done" });
   });
 
   it("calls finalizeLastAgentMessage on done message", () => {
