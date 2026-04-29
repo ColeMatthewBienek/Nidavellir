@@ -184,3 +184,29 @@ async def test_handle_message_streams_activity_frames_separately_from_answer(mon
         "type": "activity",
         "event": {"type": "tool_end", "id": "tool-1", "status": "success", "summary": "ok"},
     } in fake_ws.sent
+
+
+@pytest.mark.asyncio
+async def test_handle_message_exposes_live_agent_for_future_interactive_steering(monkeypatch, tmp_path):
+    agent = ActivityAgent(slot_id=0, workdir=tmp_path)
+    fake_ws = FakeWS()
+    started_agents = []
+
+    monkeypatch.setattr(
+        ws_router._agent_registry,
+        "make_agent",
+        lambda provider_id, slot_id, workdir, model_id: agent,
+    )
+
+    await ws_router._handle_message(
+        fake_ws,
+        "inspect",
+        "test",
+        "test-model",
+        memory_context="",
+        workdir=tmp_path,
+        on_agent_started=started_agents.append,
+    )
+
+    assert started_agents == [agent]
+    assert await agent.steer("mid-turn note") is False

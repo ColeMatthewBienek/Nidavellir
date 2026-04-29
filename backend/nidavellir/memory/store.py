@@ -155,7 +155,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     deleted_at  TEXT,
     title_manually_set INTEGER NOT NULL DEFAULT 0,
     working_directory TEXT,
-    working_directory_display TEXT
+    working_directory_display TEXT,
+    queued_steering_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -236,6 +237,7 @@ def _migrate_conversations_continuity(conn: sqlite3.Connection) -> None:
         ("title_manually_set", "INTEGER NOT NULL DEFAULT 0"),
         ("working_directory", "TEXT"),
         ("working_directory_display", "TEXT"),
+        ("queued_steering_json", "TEXT"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {defn}")
@@ -689,6 +691,60 @@ class MemoryStore:
                 (status, message_id),
             )
             return cursor.rowcount > 0
+
+    def queue_steering_comment(self, conversation_id: str, content: str) -> list[str]:
+        text = content.strip()
+        if not text:
+            return self.get_queued_steering_comments(conversation_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT queued_steering_json FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            comments: list[str] = []
+            if row and row["queued_steering_json"]:
+                try:
+                    parsed = json.loads(row["queued_steering_json"])
+                    if isinstance(parsed, list):
+                        comments = [str(item) for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    comments = []
+            comments.append(text)
+            conn.execute(
+                """UPDATE conversations
+                      SET queued_steering_json = ?, updated_at = datetime('now')
+                    WHERE id = ?""",
+                (json.dumps(comments), conversation_id),
+            )
+            return comments
+
+    def get_queued_steering_comments(self, conversation_id: str) -> list[str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT queued_steering_json FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if not row or not row["queued_steering_json"]:
+            return []
+        try:
+            parsed = json.loads(row["queued_steering_json"])
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed if str(item).strip()]
+
+    def pop_queued_steering_comments(self, conversation_id: str) -> list[str]:
+        comments = self.get_queued_steering_comments(conversation_id)
+        if comments:
+            with self._conn() as conn:
+                conn.execute(
+                    """UPDATE conversations
+                          SET queued_steering_json = NULL, updated_at = datetime('now')
+                        WHERE id = ?""",
+                    (conversation_id,),
+                )
+        return comments
 
     def count_conversation_messages(self, conversation_id: str) -> int:
         with self._conn() as conn:

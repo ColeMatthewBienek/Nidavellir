@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { useAgentStore } from "@/store/agentStore";
-import { initSocket, sendCancel, sendMessage, sendSteer, _testResetSocket } from "@/lib/agentSocket";
+import { initSocket, sendCancel, sendMessage, sendRedirectSteer, sendSteer, _testResetSocket } from "@/lib/agentSocket";
 
 // ── MockWebSocket ────────────────────────────────────────────────────────────
 
@@ -159,6 +159,30 @@ describe("chunk handling — raw storage", () => {
     expect(msg.events).toContainEqual({
       type: "steering_signal",
       content: "Check the Git tab tree while you are there.",
+    });
+  });
+
+  it("sends redirect steering and finalizes the local active stream", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-now" });
+    expect(sendMessage("start long task")).toBe(true);
+    const messageFrame = JSON.parse(ws.sent.at(-1)!);
+
+    expect(sendRedirectSteer("Stop and use the tree-view approach.")).toBe(true);
+
+    expect(JSON.parse(ws.sent.at(-1)!)).toMatchObject({
+      type: "redirect",
+      content: "Stop and use the tree-view approach.",
+      conversation_id: "conv-now",
+      turn_id: messageFrame.turn_id,
+      client_connection_id: expect.any(String),
+    });
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(msg.streaming).toBe(false);
+    expect(useAgentStore.getState().isStreaming).toBe(false);
+    expect(msg.events).toContainEqual({
+      type: "steering_signal",
+      content: "Redirected: Stop and use the tree-view approach.",
     });
   });
 

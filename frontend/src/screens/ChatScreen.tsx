@@ -6,7 +6,8 @@ import { ContextPanel } from '../components/chat/ContextPanel';
 import { MessageList } from '../components/chat/MessageList';
 import { AgentSelector } from '../components/chat/AgentSelector';
 import { useAgentStore } from '../store/agentStore';
-import { sendCancel, sendMessage, sendSteer } from '../lib/agentSocket';
+import { sendCancel, sendMessage, sendRedirectSteer, sendSteer } from '../lib/agentSocket';
+import type { ProviderInfo } from '../lib/types';
 
 type PendingAttachmentKind = 'text' | 'image' | 'unsupported';
 type PendingAttachment = {
@@ -92,6 +93,16 @@ function parseSkillCommand(value: string): { isSkill: boolean; slug: string | nu
   return { isSkill: true, slug, prompt: prompt || null };
 }
 
+function steeringCapabilities(providers: ProviderInfo[], selectedModel: string) {
+  const providerId = selectedModel.split(':')[0] || 'claude';
+  const provider = providers.find((item) => item.id === providerId);
+  return {
+    supportsQueued: provider?.supports_queued_steering ?? true,
+    supportsRedirect: provider?.supports_redirect_steering ?? true,
+    label: provider?.steering_label || (provider?.supports_live_steering ? 'Steer' : 'Queue note'),
+  };
+}
+
 export function ChatScreen() {
   const addMessage    = useAgentStore((s) => s.addMessage);
   const clearMessages = useAgentStore((s) => s.clearMessages);
@@ -109,6 +120,7 @@ export function ChatScreen() {
   const workingDirectoryDisplay = useAgentStore((s) => s.workingDirectoryDisplay);
   const refreshWorkingSetFiles = useAgentStore((s) => s.refreshWorkingSetFiles);
   const selectedModel = useAgentStore((s) => s.selectedModel);
+  const providers = useAgentStore((s) => s.providers);
 
   useEffect(() => {
     const restoredId = useAgentStore.getState().activeConversationId;
@@ -161,6 +173,7 @@ export function ChatScreen() {
   const slashFiltered = showSlash ? slashCommands.filter((c) => c.cmd.startsWith(slashQuery!)) : [];
   const cwdCommand = parseCwdCommand(input);
   const skillCommand = parseSkillCommand(input);
+  const steering = steeringCapabilities(providers, selectedModel);
   const pinnedConversations = conversations.filter((conversation) => conversation.pinned);
   const recentConversations = conversations.filter((conversation) => !conversation.pinned);
   const deleteConversation = conversations.find((conversation) => conversation.id === deleteId);
@@ -746,8 +759,20 @@ export function ChatScreen() {
                   ? !input.trim()
                   : ((!input.trim() && !pendingAttachments.some((file) => file.kind !== 'unsupported')) || (showSlash && !cwdCommand.isCwd))}
               >
-                {isStreaming ? 'Steer' : 'Send'}
+                {isStreaming ? steering.label : 'Send'}
               </Btn>
+              {isStreaming && steering.supportsQueued && steering.supportsRedirect && (
+                <Btn
+                  onClick={() => {
+                    const text = input.trim();
+                    if (!text) return;
+                    if (sendRedirectSteer(text)) setInput('');
+                  }}
+                  disabled={!input.trim()}
+                >
+                  Redirect
+                </Btn>
+              )}
             </div>
             {pendingAttachments.length > 0 && (
               <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>

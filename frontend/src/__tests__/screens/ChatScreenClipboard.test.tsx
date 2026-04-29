@@ -52,6 +52,34 @@ describe('ChatScreen clipboard attachments', () => {
       conversationId: 'conv-clipboard',
       selectedModel: 'claude:claude-sonnet-4-6',
       selectedProvider: 'claude',
+      providers: [{
+        id: 'claude',
+        display_name: 'Claude Code',
+        description: '',
+        available: true,
+        roles: ['chat'],
+        supports_session_resume: true,
+        supports_persistent_context: true,
+        supports_multiline_input: true,
+        supports_file_context: true,
+        supports_image_input: true,
+        supports_live_steering: false,
+        supports_queued_steering: true,
+        supports_redirect_steering: true,
+        steering_label: 'Queue note',
+        supports_interrupt: true,
+        streams_incrementally: true,
+        emits_tool_use_blocks: true,
+        output_format: 'ansi_rich',
+        supports_bash_execution: true,
+        supports_file_write: true,
+        supports_worktree_isolation: true,
+        cost_tier: 'subscription',
+        requires_network: true,
+        latency_tier: 'medium',
+        supports_parallel_slots: true,
+        max_concurrent_slots: null,
+      }],
       agentModels: [],
       agentModelsLoaded: true,
       isStreaming: false,
@@ -160,7 +188,7 @@ describe('ChatScreen clipboard attachments', () => {
     const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
 
     fireEvent.change(input, { target: { value: 'Also make the Git tab a tree view.' } });
-    const steerButton = screen.getByRole('button', { name: 'Steer' });
+    const steerButton = screen.getByRole('button', { name: 'Queue note' });
     expect(steerButton).not.toBeDisabled();
     fireEvent.click(steerButton);
 
@@ -175,5 +203,34 @@ describe('ChatScreen clipboard attachments', () => {
       type: 'steering_signal',
       content: 'Also make the Git tab a tree view.',
     });
+  });
+
+  it('can redirect a one-shot provider by cancelling and queuing the steering note', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.setState({ isStreaming: true });
+
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: 'Stop and use the tree-view approach instead.' } });
+    const redirectButton = screen.getByRole('button', { name: 'Redirect' });
+    expect(redirectButton).not.toBeDisabled();
+    fireEvent.click(redirectButton);
+
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    expect(JSON.parse(sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'redirect',
+      content: 'Stop and use the tree-view approach instead.',
+      conversation_id: 'conv-clipboard',
+    });
+    expect(input.value).toBe('');
+    expect(useAgentStore.getState().isStreaming).toBe(false);
   });
 });

@@ -29,6 +29,13 @@ class CLIAgent(ABC):
     @abstractmethod
     async def send(self, text: str) -> None: ...
 
+    async def steer(self, text: str) -> bool:
+        """Attempt mid-turn steering for interactive transports.
+
+        One-shot CLI providers should keep this default and use queued steering.
+        """
+        return False
+
     @abstractmethod
     def stream(self) -> AsyncIterator[AgentStreamItem]: ...
 

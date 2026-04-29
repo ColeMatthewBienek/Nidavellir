@@ -414,6 +414,24 @@ export function sendSteer(content: string): boolean {
   return true;
 }
 
+export function sendRedirectSteer(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed || _ws?.readyState !== WebSocket.OPEN) return false;
+  _ws.send(JSON.stringify({
+    type: "redirect",
+    content: trimmed,
+    turn_id: _activeTurn()?.turnId,
+    conversation_id: useAgentStore.getState().conversationId,
+    client_connection_id: _connectionId(),
+  }));
+  useAgentStore.getState().appendStreamEvents([{ type: "steering_signal", content: `Redirected: ${trimmed}` }]);
+  useAgentStore.getState().finalizeWithError("redirected by user");
+  _clearActiveTurn();
+  _agentMessageOpen = false;
+  _parser = null;
+  return true;
+}
+
 /** Test-only: resets internal socket state without triggering reconnect. */
 export function _testResetSocket(): void {
   if (_ws) {

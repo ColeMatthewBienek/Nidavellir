@@ -34,6 +34,10 @@ class ProviderManifest:
     supports_multiline_input: bool = True
     supports_file_context:    bool = False
     supports_image_input:     bool = False
+    supports_live_steering:   bool = False
+    supports_queued_steering: bool = True
+    supports_redirect_steering: bool = True
+    steering_label:           str = "Queue note"
 
     # ── Output & Streaming ────────────────────────────────────────────────────
     supports_interrupt:    bool         = True
@@ -71,6 +75,10 @@ class ProviderManifest:
             "supports_multiline_input":    self.supports_multiline_input,
             "supports_file_context":       self.supports_file_context,
             "supports_image_input":        self.supports_image_input,
+            "supports_live_steering":      self.supports_live_steering,
+            "supports_queued_steering":    self.supports_queued_steering,
+            "supports_redirect_steering":  self.supports_redirect_steering,
+            "steering_label":              self.steering_label,
             "supports_interrupt":          self.supports_interrupt,
             "streams_incrementally":       self.streams_incrementally,
             "emits_tool_use_blocks":       self.emits_tool_use_blocks,

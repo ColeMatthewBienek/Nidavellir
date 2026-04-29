@@ -105,6 +105,10 @@ def test_capability_flags_types():
     assert isinstance(m.requires_network, bool)
     assert isinstance(m.supports_parallel_slots, bool)
     assert isinstance(m.extra_flags, list)
+    assert isinstance(m.supports_live_steering, bool)
+    assert isinstance(m.supports_queued_steering, bool)
+    assert isinstance(m.supports_redirect_steering, bool)
+    assert isinstance(m.steering_label, str)
 
 
 def test_claude_capability_flags():
@@ -122,6 +126,19 @@ def test_claude_capability_flags():
     assert m.requires_network is True
     assert m.supports_parallel_slots is True
     assert "--dangerously-skip-permissions" in m.extra_flags
+    assert m.supports_live_steering is False
+    assert m.supports_queued_steering is True
+    assert m.supports_redirect_steering is True
+    assert m.steering_label == "Queue note"
+
+
+def test_codex_current_transport_uses_queued_steering_not_live():
+    from nidavellir.agents.registry import PROVIDER_REGISTRY
+    m = PROVIDER_REGISTRY["codex"]
+    assert m.supports_live_steering is False
+    assert m.supports_queued_steering is True
+    assert m.supports_redirect_steering is True
+    assert m.steering_label == "Queue note"
 
 
 def test_ollama_capability_flags():

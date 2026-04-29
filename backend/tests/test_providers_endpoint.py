@@ -37,6 +37,8 @@ def test_provider_has_required_fields(client):
         "supports_file_write", "supports_worktree_isolation", "emits_tool_use_blocks",
         "cost_tier", "requires_network", "latency_tier",
         "supports_parallel_slots", "max_concurrent_slots", "output_format",
+        "supports_live_steering", "supports_queued_steering",
+        "supports_redirect_steering", "steering_label",
     ]
     for field in required:
         assert field in provider, f"Missing field: {field}"
@@ -66,3 +68,12 @@ def test_ollama_cost_tier_is_local(client):
     ollama = next(p for p in resp.json()["providers"] if p["id"] == "ollama")
     assert ollama["cost_tier"] == "local"
     assert ollama["requires_network"] is False
+
+
+def test_codex_steering_capabilities_are_queued_for_current_transport(client):
+    resp = client.get("/api/agents/providers")
+    codex = next(p for p in resp.json()["providers"] if p["id"] == "codex")
+    assert codex["supports_live_steering"] is False
+    assert codex["supports_queued_steering"] is True
+    assert codex["supports_redirect_steering"] is True
+    assert codex["steering_label"] == "Queue note"

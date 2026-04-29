@@ -38,6 +38,7 @@ class TurnRecord:
         self.status = "running"
         self.frames: list[dict[str, Any]] = []
         self.steering_comments: list[str] = []
+        self.live_agent: Any | None = None
         self.subscribers: set[WebSocket] = set()
         self.task: asyncio.Task | None = None
 
@@ -330,6 +331,7 @@ async def _handle_message(
     memory_context: str = "",
     workdir: Path | None = None,
     workdir_explicit: bool = False,
+    on_agent_started=None,
 ) -> tuple[str, object, str]:
     """Runs one full agent turn.
 
@@ -368,6 +370,8 @@ async def _handle_message(
         })
         agent = _agent_registry.make_agent(provider_id, slot_id=0, workdir=run_workdir, model_id=model_id)
         await agent.start()
+        if on_agent_started is not None:
+            on_agent_started(agent)
         await send_activity({
             "type": "progress",
             "content": "Provider process started",
@@ -696,6 +700,15 @@ def _build_provider_context(
                 "Interrupted prior user request, not completed. Do not act on this unless the current user message explicitly asks to continue it:\n"
                 f"User: {interrupted_content}"
             )
+    if hasattr(store, "pop_queued_steering_comments"):
+        queued_steering = store.pop_queued_steering_comments(conversation_id)
+        if queued_steering:
+            lines = "\n".join(f"- {item}" for item in queued_steering)
+            context_parts.append(
+                "Queued steering notes from the user during the previous active turn. "
+                "Treat these as constraints/background for the current user message, not as a separate completed request:\n"
+                f"{lines}"
+            )
     if includes_seed:
         context_parts.append(seed)
     file_context = store.build_file_context_block(conversation_id) if hasattr(store, "build_file_context_block") else ""
@@ -811,6 +824,7 @@ async def handle_message_with_identity(
     workflow: str = "chat",
     store,
     token_store,
+    on_agent_started=None,
 ) -> str | None:
     """Handle one user message turn with full conversation identity enforcement.
 
@@ -908,6 +922,7 @@ async def handle_message_with_identity(
         memory_context="",
         workdir=workdir,
         workdir_explicit=workdir_explicit,
+        on_agent_started=on_agent_started,
     )
 
     # Read token usage before killing
@@ -1141,6 +1156,7 @@ async def chat_websocket(ws: WebSocket) -> None:
                                 workflow=workflow,
                                 store=store,
                                 token_store=token_store,
+                                on_agent_started=lambda agent: setattr(record, "live_agent", agent),
                             )
                             if result_conv_id:
                                 conversation_id = result_conv_id
@@ -1149,6 +1165,7 @@ async def chat_websocket(ws: WebSocket) -> None:
                             response, agent, _outcome = await _handle_message(
                                 broadcaster, content, provider_id, model_id or None,
                                 memory_context="",
+                                on_agent_started=lambda agent: setattr(record, "live_agent", agent),
                             )
                             token_store = getattr(ws.app.state, "token_store", None)
                             await _ingest_turn_usage(
@@ -1230,13 +1247,57 @@ async def chat_websocket(ws: WebSocket) -> None:
                     })
                     continue
                 record.steering_comments.append(content)
+                manifest = _agent_registry.PROVIDER_REGISTRY.get(provider_id)
+                live_sent = False
+                if manifest and manifest.supports_live_steering and record.live_agent is not None:
+                    try:
+                        live_sent = bool(await record.live_agent.steer(content))
+                    except Exception:
+                        live_sent = False
+                if not live_sent and store is not None and record.conversation_id and hasattr(store, "queue_steering_comment"):
+                    store.queue_steering_comment(record.conversation_id, content)
                 await TurnBroadcaster(ws.app, record).send_json({
                     "type": "activity",
                     "event": {"type": "steering_signal", "content": content},
                 })
                 await ws.send_json({
                     "type": "steer_ack",
-                    "status": "accepted",
+                    "status": "accepted" if live_sent else "queued",
+                    "turn_id": record.turn_id,
+                })
+
+            elif msg_type == "redirect":
+                content = (data.get("content") or "").strip()
+                if not content:
+                    continue
+                turn_id = data.get("turn_id") or current_turn_id
+                record = _turn_registry(ws.app).get(turn_id) if turn_id else None
+                if not record or record.status != "running":
+                    await ws.send_json({
+                        "type": "redirect_ack",
+                        "status": "gone",
+                        "turn_id": turn_id,
+                    })
+                    continue
+                record.steering_comments.append(content)
+                if store is not None and record.conversation_id and hasattr(store, "queue_steering_comment"):
+                    store.queue_steering_comment(record.conversation_id, content)
+                await TurnBroadcaster(ws.app, record).send_json({
+                    "type": "activity",
+                    "event": {"type": "steering_signal", "content": f"Redirected: {content}"},
+                })
+                task = record.task if record else current_task
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    current_task = None
+                    current_turn_id = None
+                await ws.send_json({
+                    "type": "redirect_ack",
+                    "status": "queued",
                     "turn_id": record.turn_id,
                 })
 

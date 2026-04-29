@@ -79,6 +79,27 @@ def test_conversation_messages_have_persisted_status(tmp_path):
     assert store.get_conversation_messages(cid)[0]["status"] == "interrupted"
 
 
+def test_conversation_queues_and_pops_steering_comments(tmp_path):
+    store = _setup_stores(tmp_path)
+    cid = str(uuid.uuid4())
+    store.create_conversation(cid)
+
+    assert store.queue_steering_comment(cid, "Check the Git tree.") == ["Check the Git tree."]
+    assert store.queue_steering_comment(cid, "Keep the diff review open.") == [
+        "Check the Git tree.",
+        "Keep the diff review open.",
+    ]
+    assert store.get_queued_steering_comments(cid) == [
+        "Check the Git tree.",
+        "Keep the diff review open.",
+    ]
+    assert store.pop_queued_steering_comments(cid) == [
+        "Check the Git tree.",
+        "Keep the diff review open.",
+    ]
+    assert store.get_queued_steering_comments(cid) == []
+
+
 # ── Backend Test 1 — message without conversation_id creates one ───────────────
 
 @pytest.mark.asyncio
@@ -196,6 +217,41 @@ async def test_interrupted_prior_user_request_is_not_active_instruction(tmp_path
     assert "Interrupted prior user request, not completed" in payload
     assert "Do not act on this unless the current user message explicitly asks to continue it" in payload
     assert payload.rstrip().endswith("What model are you?")
+
+
+@pytest.mark.asyncio
+async def test_queued_steering_is_injected_into_next_turn_and_cleared(tmp_path, monkeypatch):
+    import nidavellir.agents.registry as reg
+    from nidavellir.routers import ws as ws_router
+    store = _setup_stores(tmp_path)
+    agent = FakeAgent()
+    monkeypatch.setattr(reg, "make_agent", lambda *a, **kw: agent)
+    monkeypatch.setattr(ws_router, "_extract_and_store", _noop_extract)
+
+    cid = str(uuid.uuid4())
+    store.create_conversation(cid, workflow="chat", model_id="gpt-5.5", provider_id="codex")
+    store.queue_steering_comment(cid, "Also make the Git tab a filterable tree.")
+    store.queue_steering_comment(cid, "Do not keep the flat changed-file list.")
+
+    ws = FakeWS()
+    await ws_router.handle_message_with_identity(
+        ws=ws,
+        content="Continue the sidebar work.",
+        conversation_id=cid,
+        provider_id="codex",
+        model_id="gpt-5.5",
+        workflow="chat",
+        store=store,
+        token_store=None,
+    )
+
+    payload = agent.sent[0]
+    assert "Queued steering notes from the user during the previous active turn" in payload
+    assert "Also make the Git tab a filterable tree." in payload
+    assert "Do not keep the flat changed-file list." in payload
+    assert "## User Message" in payload
+    assert payload.rstrip().endswith("Continue the sidebar work.")
+    assert store.get_queued_steering_comments(cid) == []
 
 
 @pytest.mark.asyncio

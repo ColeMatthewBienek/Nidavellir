@@ -26,6 +26,10 @@ export interface ProviderInfo {
   supports_multiline_input: boolean;
   supports_file_context:    boolean;
   supports_image_input:     boolean;
+  supports_live_steering:   boolean;
+  supports_queued_steering: boolean;
+  supports_redirect_steering: boolean;
+  steering_label:           string;
 
   // Output / streaming
   supports_interrupt:     boolean;
