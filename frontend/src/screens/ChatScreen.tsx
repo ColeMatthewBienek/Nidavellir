@@ -155,7 +155,7 @@ export function ChatScreen() {
         action: `skill:${skill.slug}`,
       })),
   ], [slashSkills]);
-  const slashMatch    = input.match(/^(\/\S*)/);
+  const slashMatch    = input.match(/^(\/\S*)$/);
   const slashQuery    = slashMatch ? slashMatch[1].toLowerCase() : null;
   const showSlash     = !!slashQuery;
   const slashFiltered = showSlash ? slashCommands.filter((c) => c.cmd.startsWith(slashQuery!)) : [];

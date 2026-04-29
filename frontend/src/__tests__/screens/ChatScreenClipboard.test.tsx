@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatScreen } from '../../screens/ChatScreen';
 import { useAgentStore } from '../../store/agentStore';
+import { _testResetSocket, _testSetSocket } from '../../lib/agentSocket';
 
 function mockFetch() {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -42,6 +43,7 @@ function mockFetch() {
 
 describe('ChatScreen clipboard attachments', () => {
   beforeEach(() => {
+    _testResetSocket();
     mockFetch();
     useAgentStore.setState({
       messages: [],
@@ -109,5 +111,37 @@ describe('ChatScreen clipboard attachments', () => {
       expect(screen.getByText('/strict-tdd-builder')).toBeTruthy();
     });
     expect(screen.getByText('Invoke Strict TDD Builder')).toBeTruthy();
+  });
+
+  it('allows sending an invoked slash skill once task text is present', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, {
+      target: {
+        value: '/strict-tdd-builder Add a tiny backend health metadata field called buildMode',
+      },
+    });
+
+    expect(screen.queryByText('/strict-tdd-builder')).toBeNull();
+    const sendButton = screen.getByRole('button', { name: 'Send' });
+    expect(sendButton).not.toBeDisabled();
+    fireEvent.click(sendButton);
+
+    await waitFor(() => {
+      expect(sent.length).toBeGreaterThan(0);
+    });
+    expect(JSON.parse(sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'message',
+      content: '/strict-tdd-builder Add a tiny backend health metadata field called buildMode',
+      conversation_id: 'conv-clipboard',
+    });
   });
 });
