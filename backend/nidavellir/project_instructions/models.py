@@ -12,7 +12,19 @@ class ProjectInstruction(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class ProjectInstructionSuppression(BaseModel):
+    name: str
+    path: str
+    scope: str
+    reason: str
+    duplicate_of: str | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
 class ProjectInstructionDiscoveryResult(BaseModel):
     instructions: list[ProjectInstruction]
+    discovered: list[ProjectInstruction] = Field(default_factory=list)
+    suppressed: list[ProjectInstructionSuppression] = Field(default_factory=list)
     rendered_text: str
     token_estimate: int
+    provider: str | None = None

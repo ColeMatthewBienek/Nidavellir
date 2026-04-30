@@ -11,6 +11,9 @@ from nidavellir.skills.compatibility import compatibility_for_skill
 from nidavellir.skills.compilers.generic import GenericSkillCompiler
 from nidavellir.skills.importer import import_skill_from_markdown, import_skill_from_path
 from nidavellir.skills.models import SkillTaskContext
+from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
+from nidavellir.routers.permissions import evaluate_and_audit
+from nidavellir.workspace import effective_default_working_directory
 
 router = APIRouter(tags=["skills"])
 
@@ -88,8 +91,31 @@ def get_skill(skill_id: str, request: Request) -> dict:
 
 @router.post("/api/skills/{skill_id}/enabled")
 def set_skill_enabled(skill_id: str, body: EnableSkillRequest, request: Request) -> dict:
+    store = _store(request)
+    skill = store.get_skill(skill_id)
+    if skill is None:
+        raise HTTPException(status_code=404, detail="skill_not_found")
+    if body.enabled:
+        decision = evaluate_and_audit(
+            request,
+            PermissionEvaluationRequest(
+                action="skill_enable",
+                actor="user",
+                workspace=effective_default_working_directory(),
+                metadata={
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "required_capabilities": skill.required_capabilities.model_dump(mode="json"),
+                },
+            ),
+        )
+        if decision.decision == PermissionDecision.ASK:
+            raise HTTPException(status_code=403, detail={
+                "code": "permission_required",
+                "permission": decision.model_dump(mode="json"),
+            })
     try:
-        return skill_summary(_store(request).set_enabled(skill_id, body.enabled))
+        return skill_summary(store.set_enabled(skill_id, body.enabled))
     except KeyError:
         raise HTTPException(status_code=404, detail="skill_not_found") from None
 
@@ -105,6 +131,21 @@ def set_skill_show_in_slash(skill_id: str, body: ShowInSlashRequest, request: Re
 @router.post("/api/skills/import/local")
 def import_local_skill(body: ImportLocalRequest, request: Request) -> dict:
     store = _store(request)
+    decision = evaluate_and_audit(
+        request,
+        PermissionEvaluationRequest(
+            action="package_import",
+            path=body.path,
+            actor="user",
+            workspace=effective_default_working_directory(),
+            metadata={"source": "skills.import.local"},
+        ),
+    )
+    if decision.decision == PermissionDecision.ASK:
+        raise HTTPException(status_code=403, detail={
+            "code": "permission_required",
+            "permission": decision.model_dump(mode="json"),
+        })
     result = import_skill_from_path(body.path)
     skill = None
     if result.skill is not None:

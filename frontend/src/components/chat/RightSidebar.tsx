@@ -5,7 +5,7 @@ import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionR
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
-type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'git';
+type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'git';
 type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
 interface RightSidebarProps {
@@ -16,6 +16,7 @@ const TABS: Array<{ id: RightSidebarTab; label: string }> = [
   { id: 'working-set', label: 'Working Set' },
   { id: 'summary', label: 'Summary' },
   { id: 'review', label: 'Review' },
+  { id: 'instructions', label: 'Instructions' },
   { id: 'git', label: 'Git' },
 ];
 
@@ -50,6 +51,56 @@ interface LocalComment {
   path: string;
   line: number;
   text: string;
+}
+
+interface ProjectInstructionItem {
+  name: string;
+  path: string;
+  content: string;
+  scope: string;
+  token_estimate: number;
+  metadata: Record<string, unknown>;
+}
+
+interface ProjectInstructionSuppression {
+  name: string;
+  path: string;
+  scope: string;
+  reason: string;
+  duplicate_of?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+interface EditableInstructionFile {
+  name: string;
+  path: string;
+  exists: boolean;
+  content: string;
+  sizeBytes: number;
+  modifiedAt?: number | null;
+}
+
+interface ProjectInstructionResponse {
+  workspace: string;
+  provider?: string | null;
+  instructions: ProjectInstructionItem[];
+  discovered: ProjectInstructionItem[];
+  suppressed: ProjectInstructionSuppression[];
+  renderedText: string;
+  tokenEstimate: number;
+  editableFiles: EditableInstructionFile[];
+}
+
+interface PermissionEvaluationResult {
+  action: string;
+  decision: 'allow' | 'deny' | 'ask' | 'allow_once' | 'allow_for_conversation' | 'allow_for_project';
+  reason: string;
+  path?: string | null;
+  normalized_path?: string | null;
+  protected: boolean;
+  outside_workspace: boolean;
+  matched_rule?: string | null;
+  requires_user_choice: boolean;
 }
 
 interface CommentDraft {
@@ -1123,6 +1174,387 @@ function GitTab({ onReviewFile, selectedPath }: { onReviewFile: (path: string) =
   );
 }
 
+function instructionRoleLabel(file: EditableInstructionFile, provider: string): string {
+  if (file.name === 'NIDAVELLIR.md') return 'Shared';
+  if (file.name === 'PROJECT.md') return 'Project';
+  if (file.name === 'AGENTS.md') return provider === 'codex' ? 'Codex active' : 'Codex';
+  if (file.name === 'CLAUDE.md') return provider === 'claude' || provider === 'anthropic' ? 'Claude active' : 'Claude';
+  return 'Instruction';
+}
+
+function instructionStatus(file: EditableInstructionFile, data: ProjectInstructionResponse | null): { label: string; color: string } {
+  if (!data) return { label: file.exists ? 'Found' : 'Missing', color: file.exists ? 'var(--t1)' : '#8b949e' };
+  if (data.instructions.some((item) => item.path === file.path)) return { label: 'Active', color: 'var(--grn)' };
+  const suppressed = data.suppressed.find((item) => item.path === file.path);
+  if (suppressed?.reason === 'duplicate_content') return { label: 'Duplicate', color: 'var(--yel)' };
+  if (suppressed?.reason === 'provider_mismatch') return { label: 'Inactive', color: 'var(--t1)' };
+  return { label: file.exists ? 'Available' : 'Missing', color: file.exists ? 'var(--t1)' : '#8b949e' };
+}
+
+function PermissionGate({
+  permission,
+  onAllowOnce,
+  onDeny,
+  busy,
+}: {
+  permission: PermissionEvaluationResult;
+  onAllowOnce: () => void;
+  onDeny: () => void;
+  busy?: boolean;
+}) {
+  return (
+    <div
+      role="alert"
+      style={{
+        border: '1px solid #f0b42966',
+        borderRadius: 7,
+        background: '#f0b42914',
+        padding: 10,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 9,
+      }}
+    >
+      <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 700 }}>Permission required</div>
+      <div style={{ color: 'var(--t1)', fontSize: 12, lineHeight: 1.45 }}>
+        {permission.reason}
+        {permission.matched_rule && <span> ({permission.matched_rule})</span>}
+      </div>
+      {permission.normalized_path && (
+        <code style={{
+          color: 'var(--t1)',
+          fontFamily: 'var(--mono)',
+          fontSize: 11,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {permission.normalized_path}
+        </code>
+      )}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button
+          type="button"
+          onClick={onDeny}
+          disabled={busy}
+          style={{
+            border: 'none',
+            background: 'transparent',
+            color: 'var(--t1)',
+            cursor: busy ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+          }}
+        >
+          Deny
+        </button>
+        <button
+          type="button"
+          onClick={onAllowOnce}
+          disabled={busy}
+          style={{
+            border: '1px solid var(--bd)',
+            borderRadius: 6,
+            background: '#23863633',
+            color: 'var(--t0)',
+            cursor: busy ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+            padding: '5px 10px',
+            fontWeight: 650,
+          }}
+        >
+          Allow once
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ProjectInstructionsTab() {
+  const workingDirectory = useAgentStore((state) => state.workingDirectory);
+  const selectedProvider = useAgentStore((state) => state.selectedProvider);
+  const [data, setData] = useState<ProjectInstructionResponse | null>(null);
+  const [selectedName, setSelectedName] = useState<string>('NIDAVELLIR.md');
+  const [draft, setDraft] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingPermission, setPendingPermission] = useState<PermissionEvaluationResult | null>(null);
+
+  const selectedFile = data?.editableFiles.find((file) => file.name === selectedName) ?? data?.editableFiles[0] ?? null;
+
+  const load = () => {
+    if (!workingDirectory) {
+      setData(null);
+      setError(null);
+      return;
+    }
+    const params = new URLSearchParams({ workspace: workingDirectory, provider: selectedProvider || 'claude' });
+    setLoading(true);
+    setError(null);
+    fetch(`http://localhost:7430/api/project-instructions?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`project_instructions_${response.status}`);
+        return response.json() as Promise<ProjectInstructionResponse>;
+      })
+      .then((body) => {
+        setData(body);
+        const current = body.editableFiles.find((file) => file.name === selectedName) ?? body.editableFiles[0] ?? null;
+        if (current) {
+          setSelectedName(current.name);
+          setDraft(current.content);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'project_instructions_unavailable'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workingDirectory, selectedProvider]);
+
+  useEffect(() => {
+    if (selectedFile) setDraft(selectedFile.content);
+  }, [selectedFile?.path]);
+
+  const persist = (permissionOverride?: 'allow_once') => {
+    if (!workingDirectory || !selectedFile) return;
+    setSaving(true);
+    setError(null);
+    fetch('http://localhost:7430/api/project-instructions', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspace: workingDirectory,
+        filename: selectedFile.name,
+        content: draft,
+        provider: selectedProvider || 'claude',
+        permissionOverride,
+      }),
+    })
+      .then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = body?.detail;
+          throw new Error(typeof detail === 'string' ? detail : detail?.code ?? `project_instruction_save_${response.status}`);
+        }
+        return body as ProjectInstructionResponse;
+      })
+      .then((body) => {
+        setPendingPermission(null);
+        setData(body);
+        const current = body.editableFiles.find((file) => file.name === selectedFile.name);
+        if (current) setDraft(current.content);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'project_instruction_save_failed'))
+      .finally(() => setSaving(false));
+  };
+
+  const save = () => {
+    if (!workingDirectory || !selectedFile) return;
+    setSaving(true);
+    setError(null);
+    setPendingPermission(null);
+    fetch('http://localhost:7430/api/permissions/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'file_write',
+        actor: 'user',
+        path: selectedFile.path,
+        workspace: workingDirectory,
+        metadata: { source: 'project_instructions.write', filename: selectedFile.name },
+      }),
+    })
+      .then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(`permission_evaluate_${response.status}`);
+        return body as PermissionEvaluationResult;
+      })
+      .then((permission) => {
+        if (permission.decision === 'ask') {
+          setPendingPermission(permission);
+          return;
+        }
+        if (permission.decision === 'deny') {
+          setError(permission.reason || 'permission_denied');
+          return;
+        }
+        persist();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'permission_evaluate_failed'))
+      .finally(() => setSaving(false));
+  };
+
+  if (!workingDirectory) {
+    return (
+      <EmptySidebarTab
+        title="Project Instructions"
+        description="Set a working directory to inspect instruction files for this conversation."
+      />
+    );
+  }
+
+  return (
+    <div style={{
+      flex: 1,
+      overflowY: 'auto',
+      padding: 14,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <SidebarSectionTitle>Project Instructions</SidebarSectionTitle>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          style={{
+            border: '1px solid var(--bd)',
+            borderRadius: 6,
+            background: 'var(--bg2)',
+            color: 'var(--t0)',
+            cursor: loading ? 'not-allowed' : 'pointer',
+            padding: '5px 8px',
+            fontSize: 11,
+          }}
+        >
+          Reload
+        </button>
+      </div>
+
+      {error && <div style={{ color: 'var(--red)', fontSize: 12 }}>{error}</div>}
+      {loading && <div style={{ color: 'var(--t1)', fontSize: 12 }}>Loading instruction files...</div>}
+
+      {data && (
+        <>
+          <div style={{
+            border: '1px solid var(--bd)',
+            borderRadius: 7,
+            background: 'var(--bg0)',
+            overflow: 'hidden',
+          }}>
+            {data.editableFiles.map((file) => {
+              const selected = selectedName === file.name;
+              const status = instructionStatus(file, data);
+              return (
+                <button
+                  key={file.name}
+                  type="button"
+                  onClick={() => setSelectedName(file.name)}
+                  style={{
+                    width: '100%',
+                    border: 'none',
+                    borderTop: file.name === data.editableFiles[0].name ? 'none' : '1px solid #30363d55',
+                    background: selected ? '#1f6feb18' : 'transparent',
+                    color: 'var(--t0)',
+                    cursor: 'pointer',
+                    padding: '8px 10px',
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0, 1fr) auto',
+                    gap: 8,
+                    textAlign: 'left',
+                  }}
+                >
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: 'block', fontFamily: 'var(--mono)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {file.name}
+                    </span>
+                    <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 3 }}>
+                      {instructionRoleLabel(file, selectedProvider)}
+                    </span>
+                  </span>
+                  <span style={{ color: status.color, fontSize: 11, alignSelf: 'center' }}>{status.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedFile && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: 'var(--t0)', fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700 }}>{selectedFile.name}</div>
+                  <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedFile.path}</div>
+                </div>
+                <span style={{ color: instructionStatus(selectedFile, data).color, fontSize: 11 }}>
+                  {instructionStatus(selectedFile, data).label}
+                </span>
+              </div>
+
+              <textarea
+                aria-label={`Edit ${selectedFile.name}`}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                spellCheck={false}
+                style={{
+                  width: '100%',
+                  minHeight: 230,
+                  resize: 'vertical',
+                  border: '1px solid var(--bd)',
+                  borderRadius: 7,
+                  background: 'var(--bg0)',
+                  color: 'var(--t0)',
+                  padding: 10,
+                  fontFamily: 'var(--mono)',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  outline: 'none',
+                }}
+              />
+
+              {pendingPermission && (
+                <PermissionGate
+                  permission={pendingPermission}
+                  busy={saving}
+                  onDeny={() => setPendingPermission(null)}
+                  onAllowOnce={() => persist('allow_once')}
+                />
+              )}
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ color: 'var(--t1)', fontSize: 11 }}>
+                  Effective tokens: {data.tokenEstimate}
+                </span>
+                <button
+                  type="button"
+                  onClick={save}
+                  disabled={saving || draft === selectedFile.content}
+                  style={{
+                    border: '1px solid var(--bd)',
+                    borderRadius: 6,
+                    background: draft === selectedFile.content ? 'transparent' : '#23863633',
+                    color: draft === selectedFile.content ? 'var(--t1)' : 'var(--t0)',
+                    cursor: saving || draft === selectedFile.content ? 'not-allowed' : 'pointer',
+                    padding: '6px 11px',
+                    fontSize: 12,
+                    fontWeight: 650,
+                  }}
+                >
+                  {saving ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {data.suppressed.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+              <SidebarSectionTitle>Suppressed</SidebarSectionTitle>
+              {data.suppressed.map((item) => (
+                <div key={item.path} style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
+                  <span style={{ color: 'var(--t0)', fontFamily: 'var(--mono)' }}>{item.name}</span>
+                  {' '}· {item.reason === 'duplicate_content' ? 'duplicate content' : 'provider mismatch'}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function RightSidebar({ onClose }: RightSidebarProps) {
   const [activeTab, setActiveTab] = useState<RightSidebarTab>('working-set');
   const [reviewScope, setReviewScope] = useState<ReviewScope>('last-turn');
@@ -1210,7 +1642,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
         aria-label="Right sidebar sections"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+          gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
           gap: 4,
           padding: 8,
           borderBottom: '1px solid var(--bd)',
@@ -1258,6 +1690,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
           onAddComment={addComment}
         />
       )}
+      {activeTab === 'instructions' && <ProjectInstructionsTab />}
       {activeTab === 'git' && <GitTab selectedPath={selectedReviewRef?.path} onReviewFile={(path) => {
         setSelectedReviewRef({ kind: 'code', path, label: path });
         setReviewScope('unstaged');

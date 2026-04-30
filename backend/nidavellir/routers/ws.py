@@ -800,7 +800,7 @@ def _build_prompt_assembly(
 ) -> PromptAssemblyResult:
     """Build the provider payload through structured sections."""
     sections: list[PromptSection] = []
-    project_instructions = discover_project_instructions(cwd=workdir)
+    project_instructions = discover_project_instructions(cwd=workdir, provider=provider_id)
     if project_instructions.rendered_text:
         sections.append(PromptSection(
             name="project instructions",
@@ -810,6 +810,7 @@ def _build_prompt_assembly(
             metadata={
                 "instruction_paths": [item.path for item in project_instructions.instructions],
                 "instruction_scopes": [item.scope for item in project_instructions.instructions],
+                "suppressed": [item.model_dump(mode="json") for item in project_instructions.suppressed],
             },
         ))
 

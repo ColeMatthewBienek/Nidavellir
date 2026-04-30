@@ -10,12 +10,50 @@ describe('ContextPanel — Token Usage section', () => {
       activeConversationId: 'conv-test',
       conversationId: 'conv-test',
       selectedModel: 'claude:claude-sonnet-4-6',
+      selectedProvider: 'claude',
+      workingDirectory: '/repo',
       workingSetFiles: [],
       refreshWorkingSetFiles: vi.fn().mockResolvedValue(undefined),
       removeWorkingSetFile: vi.fn().mockResolvedValue(undefined),
       addWorkingSetFiles: vi.fn().mockResolvedValue(true),
     });
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/api/project-instructions')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            workspace: '/repo',
+            provider: 'claude',
+            instructions: [
+              { name: 'NIDAVELLIR.md', path: '/repo/NIDAVELLIR.md', content: 'Shared rules', scope: 'project', token_estimate: 3, metadata: { role: 'nidavellir' } },
+              { name: 'CLAUDE.md', path: '/repo/CLAUDE.md', content: 'Claude rules', scope: 'project', token_estimate: 3, metadata: { role: 'provider_specific' } },
+            ],
+            discovered: [],
+            suppressed: [{ name: 'AGENTS.md', path: '/repo/AGENTS.md', scope: 'project', reason: 'provider_mismatch', metadata: {} }],
+            renderedText: 'Shared rules\n\nClaude rules',
+            tokenEstimate: 6,
+            editableFiles: [
+              { name: 'NIDAVELLIR.md', path: '/repo/NIDAVELLIR.md', exists: true, content: 'Shared rules', sizeBytes: 12, modifiedAt: null },
+              { name: 'AGENTS.md', path: '/repo/AGENTS.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+              { name: 'CLAUDE.md', path: '/repo/CLAUDE.md', exists: true, content: 'Claude rules', sizeBytes: 12, modifiedAt: null },
+              { name: 'PROJECT.md', path: '/repo/PROJECT.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+            ],
+          }),
+        });
+      }
+      if (String(url).includes('/api/permissions/evaluate')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            action: 'file_write',
+            decision: 'allow',
+            reason: 'path allowed by default policy',
+            protected: false,
+            outside_workspace: false,
+            requires_user_choice: false,
+          }),
+        });
+      }
       if (String(url).includes('/api/memory/quality/summary')) {
         return Promise.resolve({
           ok: true,
@@ -106,6 +144,7 @@ describe('ContextPanel — Token Usage section', () => {
     expect(screen.getByRole('tab', { name: 'Working Set' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', { name: 'Summary' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Review' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Instructions' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Git' })).toBeTruthy();
   });
 
@@ -122,6 +161,98 @@ describe('ContextPanel — Token Usage section', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Working Set' }));
     expect(screen.getByRole('button', { name: 'Add files' })).toBeTruthy();
+  });
+
+  it('shows editable project instructions and suppression diagnostics', async () => {
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Instructions' }));
+
+    expect(await screen.findByText('Project Instructions')).toBeTruthy();
+    expect(screen.getAllByText('NIDAVELLIR.md').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('CLAUDE.md').length).toBeGreaterThan(0);
+    expect(screen.getByText(/provider mismatch/i)).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Edit NIDAVELLIR.md' })).toBeTruthy();
+  });
+
+  it('shows a permission gate before allowing a guarded instruction write', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/api/permissions/evaluate')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            action: 'file_write',
+            decision: 'ask',
+            reason: 'path matches protected path policy',
+            path: '/repo/NIDAVELLIR.md',
+            normalized_path: '/repo/NIDAVELLIR.md',
+            protected: true,
+            outside_workspace: false,
+            matched_rule: 'test_rule',
+            requires_user_choice: true,
+          }),
+        });
+      }
+      if (String(url).includes('/api/project-instructions') && options?.method === 'PUT') {
+        const parsed = JSON.parse(String(options.body));
+        expect(parsed.permissionOverride).toBe('allow_once');
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            workspace: '/repo',
+            provider: 'claude',
+            instructions: [],
+            discovered: [],
+            suppressed: [],
+            renderedText: '',
+            tokenEstimate: 0,
+            editableFiles: [
+              { name: 'NIDAVELLIR.md', path: '/repo/NIDAVELLIR.md', exists: true, content: parsed.content, sizeBytes: parsed.content.length, modifiedAt: null },
+              { name: 'AGENTS.md', path: '/repo/AGENTS.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+              { name: 'CLAUDE.md', path: '/repo/CLAUDE.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+              { name: 'PROJECT.md', path: '/repo/PROJECT.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+            ],
+          }),
+        });
+      }
+      if (String(url).includes('/api/project-instructions')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            workspace: '/repo',
+            provider: 'claude',
+            instructions: [],
+            discovered: [],
+            suppressed: [],
+            renderedText: '',
+            tokenEstimate: 0,
+            editableFiles: [
+              { name: 'NIDAVELLIR.md', path: '/repo/NIDAVELLIR.md', exists: true, content: 'Shared rules', sizeBytes: 12, modifiedAt: null },
+              { name: 'AGENTS.md', path: '/repo/AGENTS.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+              { name: 'CLAUDE.md', path: '/repo/CLAUDE.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+              { name: 'PROJECT.md', path: '/repo/PROJECT.md', exists: false, content: '', sizeBytes: 0, modifiedAt: null },
+            ],
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ContextPanel onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Instructions' }));
+    const editor = await screen.findByRole('textbox', { name: 'Edit NIDAVELLIR.md' });
+    fireEvent.change(editor, { target: { value: 'Changed rules' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Permission required')).toBeTruthy();
+    expect(screen.getByText(/path matches protected path policy/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:7430/api/project-instructions',
+      expect.objectContaining({ method: 'PUT' }),
+    ));
   });
 
   it('shows live Summary progress while a build turn is still running', () => {
