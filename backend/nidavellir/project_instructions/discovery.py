@@ -1,39 +1,83 @@
 from __future__ import annotations
 
+import re
+from hashlib import sha256
 from pathlib import Path
 
-from .models import ProjectInstruction, ProjectInstructionDiscoveryResult
+from .models import ProjectInstruction, ProjectInstructionDiscoveryResult, ProjectInstructionSuppression
 
 INSTRUCTION_FILENAMES = ("NIDAVELLIR.md", "AGENTS.md", "CLAUDE.md", "PROJECT.md")
+GENERIC_LAYER_ORDER = {
+    "PROJECT.md": 10,
+    "NIDAVELLIR.md": 20,
+    "AGENTS.md": 30,
+    "CLAUDE.md": 30,
+}
+PROVIDER_FILES = {
+    "codex": "AGENTS.md",
+    "claude": "CLAUDE.md",
+    "anthropic": "CLAUDE.md",
+}
 
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4) if text.strip() else 0
 
 
-def _read_instruction(path: Path, *, scope: str) -> ProjectInstruction | None:
+def _instruction_role(filename: str, provider: str | None) -> str:
+    expected = PROVIDER_FILES.get((provider or "").lower())
+    if expected == filename:
+        return "provider_specific"
+    if filename in PROVIDER_FILES.values():
+        return "provider_specific"
+    if filename == "NIDAVELLIR.md":
+        return "nidavellir"
+    return "project"
+
+
+def _normalize_content(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    lines = normalized.splitlines()
+    if lines and re.match(r"^#\s+(?:NIDAVELLIR|PROJECT|AGENTS|CLAUDE)(?:\.md)?\s*$", lines[0].strip(), re.I):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _content_hash(text: str) -> str:
+    return sha256(_normalize_content(text).encode("utf-8")).hexdigest()
+
+
+def _read_instruction(path: Path, *, scope: str, dir_index: int = 0, provider: str | None = None) -> ProjectInstruction | None:
     try:
         content = path.read_text(encoding="utf-8").strip()
     except OSError:
         return None
     if not content:
         return None
+    role = _instruction_role(path.name, provider)
     return ProjectInstruction(
         name=path.name,
         path=str(path),
         content=content,
         scope=scope,
         token_estimate=_estimate_tokens(content),
-        metadata={"directory": str(path.parent)},
+        metadata={
+            "directory": str(path.parent),
+            "dir_index": dir_index,
+            "layer_order": GENERIC_LAYER_ORDER.get(path.name, 50),
+            "role": role,
+            "content_hash": _content_hash(content),
+        },
     )
 
 
-def _instruction_files_in_dir(directory: Path, *, scope: str) -> list[ProjectInstruction]:
+def _instruction_files_in_dir(directory: Path, *, scope: str, dir_index: int = 0, provider: str | None = None) -> list[ProjectInstruction]:
     instructions: list[ProjectInstruction] = []
     for filename in INSTRUCTION_FILENAMES:
         path = directory / filename
         if path.is_file():
-            instruction = _read_instruction(path, scope=scope)
+            instruction = _read_instruction(path, scope=scope, dir_index=dir_index, provider=provider)
             if instruction is not None:
                 instructions.append(instruction)
     return instructions
@@ -53,10 +97,91 @@ def _render(instructions: list[ProjectInstruction]) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _provider_filename(provider: str | None) -> str | None:
+    return PROVIDER_FILES.get((provider or "").lower())
+
+
+def _role_priority(instruction: ProjectInstruction) -> int:
+    role = instruction.metadata.get("role")
+    if role == "provider_specific":
+        return 30
+    if role == "nidavellir":
+        return 20
+    return 10
+
+
+def _sort_key(instruction: ProjectInstruction) -> tuple[int, int, str]:
+    return (
+        int(instruction.metadata.get("dir_index", 0)),
+        int(instruction.metadata.get("layer_order", 50)),
+        instruction.name,
+    )
+
+
+def _apply_provider_filter_and_dedupe(
+    instructions: list[ProjectInstruction],
+    *,
+    provider: str | None,
+) -> tuple[list[ProjectInstruction], list[ProjectInstructionSuppression]]:
+    if provider is None:
+        return instructions, []
+
+    expected_provider_file = _provider_filename(provider)
+    suppressed: list[ProjectInstructionSuppression] = []
+    eligible: list[ProjectInstruction] = []
+
+    for instruction in instructions:
+        if instruction.name in PROVIDER_FILES.values() and instruction.name != expected_provider_file:
+            suppressed.append(ProjectInstructionSuppression(
+                name=instruction.name,
+                path=instruction.path,
+                scope=instruction.scope,
+                reason="provider_mismatch",
+                metadata={
+                    "provider": provider,
+                    "active_provider_file": expected_provider_file,
+                    **instruction.metadata,
+                },
+            ))
+            continue
+        eligible.append(instruction)
+
+    winners_by_hash: dict[str, ProjectInstruction] = {}
+    for instruction in eligible:
+        content_hash = str(instruction.metadata.get("content_hash") or "")
+        current = winners_by_hash.get(content_hash)
+        if current is None:
+            winners_by_hash[content_hash] = instruction
+            continue
+        candidate_score = (_role_priority(instruction), int(instruction.metadata.get("dir_index", 0)))
+        current_score = (_role_priority(current), int(current.metadata.get("dir_index", 0)))
+        if candidate_score > current_score:
+            winners_by_hash[content_hash] = instruction
+
+    active_paths = {winner.path for winner in winners_by_hash.values()}
+    for instruction in eligible:
+        if instruction.path in active_paths:
+            continue
+        content_hash = str(instruction.metadata.get("content_hash") or "")
+        winner = winners_by_hash[content_hash]
+        suppressed.append(ProjectInstructionSuppression(
+            name=instruction.name,
+            path=instruction.path,
+            scope=instruction.scope,
+            reason="duplicate_content",
+            duplicate_of=winner.path,
+            metadata=instruction.metadata,
+        ))
+
+    active = sorted(winners_by_hash.values(), key=_sort_key)
+    return active, suppressed
+
+
 def discover_project_instructions(
     *,
     cwd: str | Path,
     agent_dir: str | Path | None = None,
+    provider: str | None = None,
 ) -> ProjectInstructionDiscoveryResult:
     """Discover durable project guidance from global config and cwd ancestors.
 
@@ -67,21 +192,26 @@ def discover_project_instructions(
     seen: set[str] = set()
 
     if agent_dir is not None:
-        for instruction in _instruction_files_in_dir(Path(agent_dir).expanduser(), scope="global"):
+        for instruction in _instruction_files_in_dir(Path(agent_dir).expanduser(), scope="global", dir_index=-1, provider=provider):
             resolved = str(Path(instruction.path).resolve())
             if resolved not in seen:
                 instructions.append(instruction)
                 seen.add(resolved)
 
-    for directory in _ancestor_dirs(Path(cwd).expanduser()):
-        for instruction in _instruction_files_in_dir(directory, scope="project"):
+    for index, directory in enumerate(_ancestor_dirs(Path(cwd).expanduser())):
+        for instruction in _instruction_files_in_dir(directory, scope="project", dir_index=index, provider=provider):
             resolved = str(Path(instruction.path).resolve())
             if resolved not in seen:
                 instructions.append(instruction)
                 seen.add(resolved)
+
+    active, suppressed = _apply_provider_filter_and_dedupe(instructions, provider=provider)
 
     return ProjectInstructionDiscoveryResult(
-        instructions=instructions,
-        rendered_text=_render(instructions),
-        token_estimate=sum(item.token_estimate for item in instructions),
+        instructions=active,
+        discovered=instructions,
+        suppressed=suppressed,
+        rendered_text=_render(active),
+        token_estimate=sum(item.token_estimate for item in active),
+        provider=provider,
     )

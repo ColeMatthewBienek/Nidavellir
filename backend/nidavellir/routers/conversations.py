@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
+from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
+from nidavellir.routers.permissions import evaluate_and_audit
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 VALID_BLOB_FILE_SOURCES = {"file_picker", "clipboard", "drag_drop", "clipboard_paste", "mixed"}
@@ -203,6 +205,24 @@ def preview_conversation_files(conversation_id: str, body: ConversationFilesRequ
     conv = store.get_conversation(conversation_id)
     if not conv or conv.get("archived"):
         raise HTTPException(404, "conversation_not_found")
+    workspace = conv.get("working_directory") or effective_default_working_directory()
+    for path in body.paths:
+        decision = evaluate_and_audit(
+            request,
+            PermissionEvaluationRequest(
+                action="file_read",
+                path=path,
+                actor="user",
+                conversation_id=conversation_id,
+                workspace=workspace,
+                metadata={"source": "conversation_files.preview"},
+            ),
+        )
+        if decision.decision == PermissionDecision.ASK:
+            raise HTTPException(status_code=403, detail={
+                "code": "permission_required",
+                "permission": decision.model_dump(mode="json"),
+            })
     preview = store.preview_conversation_files(conversation_id, body.paths, provider=body.provider, model=body.model)
     return {k: v for k, v in preview.items() if k != "_inspected"}
 
@@ -213,6 +233,24 @@ def add_conversation_files(conversation_id: str, body: ConversationFilesRequest,
     conv = store.get_conversation(conversation_id)
     if not conv or conv.get("archived"):
         raise HTTPException(404, "conversation_not_found")
+    workspace = conv.get("working_directory") or effective_default_working_directory()
+    for path in body.paths:
+        decision = evaluate_and_audit(
+            request,
+            PermissionEvaluationRequest(
+                action="file_read",
+                path=path,
+                actor="user",
+                conversation_id=conversation_id,
+                workspace=workspace,
+                metadata={"source": "conversation_files.add"},
+            ),
+        )
+        if decision.decision == PermissionDecision.ASK:
+            raise HTTPException(status_code=403, detail={
+                "code": "permission_required",
+                "permission": decision.model_dump(mode="json"),
+            })
     result = store.add_conversation_files(conversation_id, body.paths, provider=body.provider, model=body.model)
     return {
         "added": [_file_item(row) for row in result["added"]],
