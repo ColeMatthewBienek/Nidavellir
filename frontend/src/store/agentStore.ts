@@ -115,6 +115,23 @@ function collapseAdjacentDuplicateText(content: string): string {
   let next = content;
   let changed = true;
 
+  const collapseRepeatedLineRuns = (value: string): string => {
+    const lines = value.split("\n");
+    for (let start = 0; start < lines.length; start += 1) {
+      const remaining = lines.length - start;
+      for (let size = Math.floor(remaining / 2); size >= 2; size -= 1) {
+        const left = lines.slice(start, start + size).join("\n").trim();
+        const right = lines.slice(start + size, start + size * 2).join("\n").trim();
+        if (!left || left !== right) continue;
+        return [
+          ...lines.slice(0, start + size),
+          ...lines.slice(start + size * 2),
+        ].join("\n");
+      }
+    }
+    return value;
+  };
+
   while (changed) {
     changed = false;
     const trimmed = next.trim();
@@ -133,6 +150,12 @@ function collapseAdjacentDuplicateText(content: string): string {
       changed = true;
       return repeated;
     });
+
+    const withoutRepeatedLines = collapseRepeatedLineRuns(next);
+    if (withoutRepeatedLines !== next) {
+      next = withoutRepeatedLines;
+      changed = true;
+    }
   }
 
   return next;

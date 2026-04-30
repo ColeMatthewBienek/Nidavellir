@@ -268,6 +268,88 @@ describe('ChatScreen clipboard attachments', () => {
     });
   });
 
+  it('treats slash-prefixed text as steering while an agent turn is running', async () => {
+    const sent: string[] = [];
+    _testSetSocket({
+      readyState: WebSocket.OPEN,
+      send: (payload: string) => {
+        sent.push(payload);
+      },
+    } as unknown as WebSocket);
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.setState({ isStreaming: true });
+
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: '/strict-tdd-builder keep the failing test first' } });
+    expect(screen.queryByText('COMMANDS')).toBeNull();
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: false });
+
+    await waitFor(() => expect(sent.length).toBeGreaterThan(0));
+    expect(JSON.parse(sent.at(-1) ?? '{}')).toMatchObject({
+      type: 'steer',
+      content: '/strict-tdd-builder keep the failing test first',
+    });
+  });
+
+  it('labels live steering distinctly when the selected provider supports it', async () => {
+    useAgentStore.setState({
+      providers: [{
+        ...useAgentStore.getState().providers[0],
+        supports_live_steering: true,
+        supports_queued_steering: false,
+        supports_redirect_steering: false,
+        steering_label: 'Steer',
+      }],
+    });
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.setState({ isStreaming: true });
+
+    render(<ChatScreen />);
+
+    expect(screen.getByRole('button', { name: 'Steer' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Redirect' })).toBeNull();
+    expect(screen.getByText('live steering')).toBeTruthy();
+  });
+
+  it('shows a Codex-style review changes strip for the latest build report', async () => {
+    useAgentStore.setState({
+      messages: [{
+        id: 'agent-report',
+        role: 'agent',
+        content: 'Implemented the focused change.',
+        timestamp: new Date('2026-04-29T10:00:00Z'),
+        completedAt: new Date('2026-04-29T10:01:00Z'),
+        streaming: false,
+        rawChunks: [],
+        events: [{
+          type: 'diff',
+          content: [
+            'diff --git a/frontend/src/screens/ChatScreen.tsx b/frontend/src/screens/ChatScreen.tsx',
+            '--- a/frontend/src/screens/ChatScreen.tsx',
+            '+++ b/frontend/src/screens/ChatScreen.tsx',
+            '@@ -1,1 +1,2 @@',
+            ' existing',
+            '+added',
+          ].join('\n'),
+        }],
+      }],
+    });
+
+    render(<ChatScreen />);
+
+    const strip = screen.getByTestId('review-changes-strip');
+    expect(strip.textContent).toContain('1 file changed');
+    expect(strip.textContent).toContain('+1');
+    const reviewButton = screen.getByRole('button', { name: /Review changes/i });
+    fireEvent.click(reviewButton);
+
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: 'Review' }).getAttribute('aria-selected')).toBe('true');
+    });
+  });
+
   it('can redirect a one-shot provider by cancelling and queuing the steering note', async () => {
     const sent: string[] = [];
     _testSetSocket({

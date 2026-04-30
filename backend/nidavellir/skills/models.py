@@ -36,6 +36,14 @@ class SkillSourceFormat(str, Enum):
     IMPORTED_REPO = "imported_repo"
 
 
+class SkillTrustStatus(str, Enum):
+    UNTRUSTED = "untrusted"
+    REVIEWED = "reviewed"
+    TRUSTED = "trusted"
+    DISABLED = "disabled"
+    FAILED_IMPORT = "failed_import"
+
+
 class SkillStatus(str, Enum):
     DRAFT = "draft"
     VALIDATED = "validated"
@@ -86,8 +94,15 @@ class SkillCapabilityRequirements(BaseModel):
 class SkillSource(BaseModel):
     format: SkillSourceFormat
     origin: str | None = None
+    source_type: str | None = None
     import_path: str | None = None
     repository_url: str | None = None
+    package_id: str | None = None
+    package_name: str | None = None
+    package_version: str | None = None
+    package_scope: str | None = None
+    trust_status: SkillTrustStatus = SkillTrustStatus.UNTRUSTED
+    imported_at: str | None = None
 
 
 class NidavellirSkill(BaseModel):

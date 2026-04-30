@@ -1,4 +1,5 @@
 import type { StreamEvent } from "@/lib/streamTypes";
+import { parseDiffFiles } from "@/lib/completionReport";
 
 export type ActivityTone = "read" | "search" | "test" | "write" | "run";
 export type ActivityStatus = "running" | "success" | "error" | string;
@@ -8,6 +9,9 @@ export interface ActivityTimelineItem {
   detail?: string;
   status: ActivityStatus;
   tone: ActivityTone;
+  path?: string;
+  additions?: number;
+  deletions?: number;
 }
 
 export type ActivityTimelineBlock =
@@ -36,6 +40,7 @@ const LIFECYCLE_PROGRESS_RE = [
   /^turn started$/i,
   /^Provider is still working\b/i,
   /^Claude usage updated$/i,
+  /^Claude session (?:init|status)$/i,
 ];
 
 function compactText(value: string, limit = 180): string {
@@ -104,7 +109,8 @@ function searchLabel(command: string): string {
 function itemFromTool(tool: ToolRecord): ActivityTimelineItem {
   const command = parseToolCommand(tool.name, tool.args);
   const tone = classifyCommand(command);
-  const detail = tool.summary ? compactText(tool.summary, 220) : compactText(command, 220);
+  const genericSummary = /^(success|completed|complete|ok|done|read ok)$/i.test((tool.summary ?? "").trim());
+  const detail = tool.summary && !genericSummary ? compactText(tool.summary, 220) : compactText(command, 220);
 
   if (tone === "read") {
     const path = lastPath(command);
@@ -113,6 +119,7 @@ function itemFromTool(tool: ToolRecord): ActivityTimelineItem {
       detail: path ?? detail,
       status: tool.status,
       tone,
+      path: path ?? undefined,
     };
   }
 
@@ -149,6 +156,18 @@ function itemFromTool(tool: ToolRecord): ActivityTimelineItem {
     status: tool.status,
     tone,
   };
+}
+
+function itemsFromPatch(content: string): ActivityTimelineItem[] {
+  return parseDiffFiles(content).map((file) => ({
+    label: `Edited ${basename(file.path)}`,
+    detail: file.path,
+    status: "success",
+    tone: "write",
+    path: file.path,
+    additions: file.additions,
+    deletions: file.deletions,
+  }));
 }
 
 function plural(count: number, singular: string, pluralValue = `${singular}s`): string {
@@ -198,14 +217,36 @@ function flushTools(blocks: ActivityTimelineBlock[], tools: ToolRecord[]): void 
   }
 }
 
+function flushPatchItems(blocks: ActivityTimelineBlock[], items: ActivityTimelineItem[]): void {
+  if (items.length === 0) return;
+  const unique = new Map<string, ActivityTimelineItem>();
+  for (const item of items) {
+    const key = item.path ?? item.label;
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, { ...item });
+      continue;
+    }
+    existing.additions = (existing.additions ?? 0) + (item.additions ?? 0);
+    existing.deletions = (existing.deletions ?? 0) + (item.deletions ?? 0);
+  }
+  const merged = [...unique.values()];
+  blocks.push({
+    type: "summary",
+    label: `Edited ${plural(merged.length, "file")}`,
+    items: merged,
+  });
+}
+
 export function buildActivityTimeline(events: StreamEvent[]): ActivityTimelineBlock[] {
   const blocks: ActivityTimelineBlock[] = [];
   const activeTools = new Map<string, ToolRecord>();
   const finishedTools: ToolRecord[] = [];
-  let patchSeen = false;
+  const patchItems: ActivityTimelineItem[] = [];
 
   const flushFinished = () => {
     flushTools(blocks, finishedTools.splice(0));
+    flushPatchItems(blocks, patchItems.splice(0));
   };
 
   for (const event of events) {
@@ -227,6 +268,11 @@ export function buildActivityTimeline(events: StreamEvent[]): ActivityTimelineBl
         });
         break;
       }
+      case "tool_delta": {
+        const tool = activeTools.get(event.id);
+        if (tool) tool.args += event.content;
+        break;
+      }
       case "tool_end": {
         const tool = activeTools.get(event.id) ?? {
           id: event.id,
@@ -245,10 +291,8 @@ export function buildActivityTimeline(events: StreamEvent[]): ActivityTimelineBl
       case "patch":
       case "diff": {
         flushFinished();
-        if (!patchSeen) {
-          blocks.push({ type: "narration", text: "Prepared code changes." });
-          patchSeen = true;
-        }
+        patchItems.push(...itemsFromPatch(event.content));
+        if (patchItems.length === 0) blocks.push({ type: "narration", text: "Prepared code changes." });
         break;
       }
       case "skill_use": {
@@ -274,7 +318,6 @@ export function buildActivityTimeline(events: StreamEvent[]): ActivityTimelineBl
       }
       case "answer_delta":
       case "text":
-      case "tool_delta":
       case "tool_result":
       case "reasoning_signal":
       case "think":

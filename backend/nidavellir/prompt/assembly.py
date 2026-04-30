@@ -5,6 +5,7 @@ from .models import PromptAssemblyResult, PromptSection
 SECTION_ORDER = [
     "system/app instructions",
     "provider/tool instructions",
+    "project instructions",
     "conversation/session context",
     "handoff seed",
     "memory retrieval",

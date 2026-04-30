@@ -42,21 +42,32 @@ function addFile(files: Map<string, CompletionReportFile>, path: string): Comple
   return next;
 }
 
+export function parseDiffFiles(content: string): CompletionReportFile[] {
+  const files = new Map<string, CompletionReportFile>();
+  let current: CompletionReportFile | null = null;
+  for (const line of content.split("\n")) {
+    const fileMatch = line.match(/^\+\+\+\s+b\/(.+)$/) ?? line.match(/^---\s+a\/(.+)$/);
+    if (fileMatch && fileMatch[1] !== "/dev/null") {
+      current = addFile(files, fileMatch[1]);
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
+    current.diffLines.push(line);
+  }
+  return [...files.values()];
+}
+
 function collectPatchStats(events: StreamEvent[]): CompletionReportFile[] {
   const files = new Map<string, CompletionReportFile>();
   for (const event of events) {
     if (event.type !== "patch" && event.type !== "diff") continue;
-    let current: CompletionReportFile | null = null;
-    for (const line of event.content.split("\n")) {
-      const fileMatch = line.match(/^\+\+\+\s+b\/(.+)$/) ?? line.match(/^---\s+a\/(.+)$/);
-      if (fileMatch && fileMatch[1] !== "/dev/null") {
-        current = addFile(files, fileMatch[1]);
-        continue;
-      }
-      if (!current) continue;
-      if (line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
-      if (line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
-      current.diffLines.push(line);
+    for (const file of parseDiffFiles(event.content)) {
+      const current = addFile(files, file.path);
+      current.additions += file.additions;
+      current.deletions += file.deletions;
+      current.diffLines.push(...file.diffLines);
     }
   }
   return [...files.values()];

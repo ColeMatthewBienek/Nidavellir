@@ -32,8 +32,20 @@ describe("activityTimeline", () => {
         label: "Explored 2 files, 1 search",
         items: [
           { label: "Searched for \"AgentActivity\"", detail: "4 matches", status: "success", tone: "search" },
-          { label: "Read MessageList.tsx", detail: "frontend/src/components/chat/MessageList.tsx", status: "success", tone: "read" },
-          { label: "Read agentSocket.ts", detail: "frontend/src/lib/agentSocket.ts", status: "success", tone: "read" },
+          {
+            label: "Read MessageList.tsx",
+            detail: "frontend/src/components/chat/MessageList.tsx",
+            path: "frontend/src/components/chat/MessageList.tsx",
+            status: "success",
+            tone: "read",
+          },
+          {
+            label: "Read agentSocket.ts",
+            detail: "frontend/src/lib/agentSocket.ts",
+            path: "frontend/src/lib/agentSocket.ts",
+            status: "success",
+            tone: "read",
+          },
         ],
       },
     ]);
@@ -70,6 +82,39 @@ describe("activityTimeline", () => {
     });
   });
 
+  it("uses streamed tool args and ignores generic success summaries", () => {
+    const timeline = buildActivityTimeline([
+      { type: "tool_start", id: "stream-search", name: "exec", args: "/bin/bash -lc \"rg -n " },
+      { type: "tool_delta", id: "stream-search", content: "'buildMode|BUILD_MODE' backend\"" },
+      { type: "tool_end", id: "stream-search", status: "success", summary: "success" },
+      { type: "tool_start", id: "stream-read", name: "exec", args: "sed -n " },
+      { type: "tool_delta", id: "stream-read", content: "'1,120p' backend/tests/test_health.py" },
+      { type: "tool_end", id: "stream-read", status: "success", summary: "completed" },
+    ]);
+
+    expect(timeline).toEqual([
+      {
+        type: "summary",
+        label: "Explored 1 file, 1 search",
+        items: [
+          {
+            label: 'Searched for "buildMode|BUILD_MODE"',
+            detail: "rg -n 'buildMode|BUILD_MODE' backend",
+            status: "success",
+            tone: "search",
+          },
+          {
+            label: "Read test_health.py",
+            detail: "backend/tests/test_health.py",
+            path: "backend/tests/test_health.py",
+            status: "success",
+            tone: "read",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("summarizes tests and patches as verification and change activity", () => {
     const timeline = buildActivityTimeline([
       { type: "patch", content: "diff --git a/frontend/src/lib/activityTimeline.ts b/frontend/src/lib/activityTimeline.ts" },
@@ -88,6 +133,42 @@ describe("activityTimeline", () => {
             detail: "5 tests passed",
             status: "success",
             tone: "test",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("turns real patch events into colorizable edited-file activity", () => {
+    const timeline = buildActivityTimeline([
+      {
+        type: "patch",
+        content: [
+          "diff --git a/frontend/src/components/chat/RightSidebar.tsx b/frontend/src/components/chat/RightSidebar.tsx",
+          "--- a/frontend/src/components/chat/RightSidebar.tsx",
+          "+++ b/frontend/src/components/chat/RightSidebar.tsx",
+          "@@ -1,2 +1,3 @@",
+          " import React from 'react';",
+          "-const oldTree = true;",
+          "+const codexTree = true;",
+          "+const commentableDiff = true;",
+        ].join("\n"),
+      },
+    ]);
+
+    expect(timeline).toEqual([
+      {
+        type: "summary",
+        label: "Edited 1 file",
+        items: [
+          {
+            label: "Edited RightSidebar.tsx",
+            detail: "frontend/src/components/chat/RightSidebar.tsx",
+            path: "frontend/src/components/chat/RightSidebar.tsx",
+            additions: 2,
+            deletions: 1,
+            status: "success",
+            tone: "write",
           },
         ],
       },

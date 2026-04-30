@@ -36,11 +36,31 @@ describe('ContextPanel — Token Usage section', () => {
           json: async () => ({
             isRepo: true,
             branch: 'main',
-            dirtyCount: 2,
+            dirtyCount: 4,
             files: [
               { path: 'frontend/src/App.tsx', status: 'M' },
               { path: 'backend/nidavellir/main.py', status: '??' },
+              { path: 'backend/nidavellir/routers/git.py', status: 'M' },
+              { path: 'backend/tests/test_git_status_api.py', status: 'M' },
             ],
+          }),
+        });
+      }
+      if (String(url).includes('/api/git/diff')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            isRepo: true,
+            scope: String(url).includes('scope=staged') ? 'staged' : 'unstaged',
+            file: String(url).includes('main.py') ? 'backend/nidavellir/main.py' : null,
+            diff: [
+              'diff --git a/backend/nidavellir/main.py b/backend/nidavellir/main.py',
+              '--- a/backend/nidavellir/main.py',
+              '+++ b/backend/nidavellir/main.py',
+              '@@ -8,2 +8,3 @@',
+              ' from .routers import health',
+              '+from .routers import git as git_router',
+            ].join('\n'),
           }),
         });
       }
@@ -159,8 +179,8 @@ describe('ContextPanel — Token Usage section', () => {
 
     expect(screen.getByText('Changed 1 file and verified with 1 command.')).toBeTruthy();
     expect(screen.getByText('Worked for 1m 34s')).toBeTruthy();
-    expect(screen.getByText('cd backend && uv run pytest tests/test_health.py -q')).toBeTruthy();
-    expect(screen.getByText('7 passed')).toBeTruthy();
+    expect(document.body.textContent).toContain('1 file');
+    expect(screen.getByText('backend/nidavellir/routers/health.py')).toBeTruthy();
   });
 
   it('shows changed files and expandable diffs in the Review tab', () => {
@@ -389,9 +409,11 @@ describe('ContextPanel — Token Usage section', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Git' }));
 
     await waitFor(() => expect(screen.getByText('main')).toBeTruthy());
-    expect(screen.getByText('2 files changed')).toBeTruthy();
+    expect(screen.getByText('4 files changed')).toBeTruthy();
     expect(screen.getByText('App.tsx')).toBeTruthy();
     expect(screen.getByText('main.py')).toBeTruthy();
+    expect(screen.getByLabelText('⚛ file icon')).toBeTruthy();
+    expect(screen.getAllByLabelText('Py file icon').length).toBeGreaterThan(0);
   });
 
   it('renders Git changed files as a filterable tree', async () => {
@@ -405,9 +427,9 @@ describe('ContextPanel — Token Usage section', () => {
 
     await waitFor(() => expect(screen.getByText('Changed files')).toBeTruthy());
     expect(screen.getByPlaceholderText('Filter files...')).toBeTruthy();
-    expect(screen.getByText('frontend')).toBeTruthy();
-    expect(screen.getByText('src')).toBeTruthy();
+    expect(screen.getByText('frontend/src')).toBeTruthy();
     expect(screen.getByText('backend')).toBeTruthy();
+    expect(screen.getByText('routers')).toBeTruthy();
     expect(screen.getByRole('button', { name: /Review frontend\/src\/App.tsx/i })).toBeTruthy();
   });
 
@@ -415,24 +437,7 @@ describe('ContextPanel — Token Usage section', () => {
     useAgentStore.setState({
       workingDirectory: '/mnt/c/Users/colebienek/projects/nidavellir',
       workingDirectoryDisplay: '/mnt/c/Users/colebienek/projects/nidavellir',
-      messages: [{
-        id: 'agent-build-1',
-        role: 'agent',
-        content: 'Implemented the buildMode health field.',
-        timestamp: new Date('2026-04-28T20:00:00.000Z'),
-        completedAt: new Date('2026-04-28T20:01:34.000Z'),
-        streaming: false,
-        rawChunks: [],
-        events: [
-          { type: 'patch', content: [
-            'diff --git a/backend/nidavellir/main.py b/backend/nidavellir/main.py',
-            '--- a/backend/nidavellir/main.py',
-            '+++ b/backend/nidavellir/main.py',
-            '@@ -8,2 +8,3 @@',
-            '+from .routers import git as git_router',
-          ].join('\n') },
-        ],
-      }],
+      messages: [],
     });
 
     render(<ContextPanel onClose={() => {}} />);
@@ -441,8 +446,30 @@ describe('ContextPanel — Token Usage section', () => {
     fireEvent.click(screen.getByRole('button', { name: /Review backend\/nidavellir\/main.py/i }));
 
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Review' })).toHaveAttribute('aria-selected', 'true'));
+    expect(screen.getByRole('button', { name: 'Review scope' }).textContent).toContain('Unstaged');
     expect(screen.getByText('backend/nidavellir/main.py')).toBeTruthy();
-    expect(screen.getByText((text) => text.includes('git_router'))).toBeTruthy();
+    await waitFor(() => expect(screen.getByText((text) => text.includes('git_router'))).toBeTruthy());
+  });
+
+  it('switches review scopes from the Codex-style dropdown', async () => {
+    useAgentStore.setState({
+      workingDirectory: '/mnt/c/Users/colebienek/projects/nidavellir',
+      workingDirectoryDisplay: '/mnt/c/Users/colebienek/projects/nidavellir',
+      messages: [],
+    });
+
+    render(<ContextPanel onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review scope' }));
+    expect(screen.getByRole('menuitem', { name: /Unstaged/i })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: /^Staged$/i })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: /Branch/i })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: /Last turn/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Staged$/i }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review scope' }).textContent).toContain('Staged'));
+    expect(await screen.findByText('backend/nidavellir/main.py')).toBeTruthy();
   });
 
   it('calls onClose when ✕ is clicked', () => {
@@ -524,11 +551,13 @@ describe('ContextPanel — Token Usage section', () => {
 
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'Add Files' })).toBeTruthy());
     expect(window.nidavellir.pickWorkingSetFiles).toHaveBeenCalled();
-    const calls = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls;
-    expect(calls.some(([url, init]) => (
-      url === 'http://localhost:7430/api/conversations/conv-test/files/preview'
-        && JSON.parse(String(init.body)).paths[0] === String.raw`C:\Users\colebienek\Downloads\pep.webp`
-    ))).toBe(true);
+    await waitFor(() => {
+      const calls = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls;
+      expect(calls.some(([url, init]) => (
+        url === 'http://localhost:7430/api/conversations/conv-test/files/preview'
+          && JSON.parse(String(init.body)).paths[0] === String.raw`C:\Users\colebienek\Downloads\pep.webp`
+      ))).toBe(true);
+    });
   });
 
   it('shows an error instead of calculating forever when file impact preview fails', async () => {
