@@ -15,6 +15,7 @@ from nidavellir.agents.events import frontend_event
 from nidavellir.memory.injector import get_context_prefix
 from nidavellir.prompt.assembly import assemble_prompt
 from nidavellir.prompt.models import PromptAssemblyResult, PromptSection
+from nidavellir.project_instructions.discovery import discover_project_instructions
 from nidavellir.sessions.handoff import build_seed, mode_uses_prior_context, normalize_handoff_mode
 from nidavellir.sessions.snapshot import create_snapshot
 from nidavellir.skills.activation import activate_skills
@@ -746,6 +747,19 @@ def _build_prompt_assembly(
 ) -> PromptAssemblyResult:
     """Build the provider payload through structured sections."""
     sections: list[PromptSection] = []
+    project_instructions = discover_project_instructions(cwd=workdir)
+    if project_instructions.rendered_text:
+        sections.append(PromptSection(
+            name="project instructions",
+            content=project_instructions.rendered_text,
+            source="project_instructions",
+            token_estimate=project_instructions.token_estimate,
+            metadata={
+                "instruction_paths": [item.path for item in project_instructions.instructions],
+                "instruction_scopes": [item.scope for item in project_instructions.instructions],
+            },
+        ))
+
     if memory_context:
         sections.append(PromptSection(
             name="conversation/session context",

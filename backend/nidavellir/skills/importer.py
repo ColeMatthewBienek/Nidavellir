@@ -4,6 +4,7 @@ import re
 import tempfile
 import uuid
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -46,6 +47,10 @@ def _title_from_markdown(text: str, fallback: str) -> str:
 
 def _fail(fmt: str, error: str) -> SkillImportResult:
     return SkillImportResult(ok=False, import_id=str(uuid.uuid4()), detected_format=fmt, errors=[error])
+
+
+def _imported_at() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _resolve_import_path(path_value: str | Path) -> Path:
@@ -102,7 +107,12 @@ def import_skill_from_markdown(markdown: str, *, name: str | None = None, origin
             required_capabilities=SkillCapabilityRequirements(),
             enabled=False,
             status=SkillStatus.VALIDATED,
-            source=SkillSource(format=SkillSourceFormat.MARKDOWN, origin=origin),
+            source=SkillSource(
+                format=SkillSourceFormat.MARKDOWN,
+                origin=origin,
+                source_type="pasted",
+                imported_at=_imported_at(),
+            ),
         )
         return _finish(skill, SkillSourceFormat.MARKDOWN.value)
     except Exception as exc:
@@ -151,7 +161,16 @@ def _import_native(root: Path, yaml_path: Path, skill_md: Path) -> SkillImportRe
         priority=int(metadata.get("priority", 50)),
         enabled=False,
         status=SkillStatus.VALIDATED,
-        source=SkillSource(format=SkillSourceFormat.NATIVE, import_path=str(root)),
+        source=SkillSource(
+            format=SkillSourceFormat.NATIVE,
+            source_type="local_path",
+            import_path=str(root),
+            package_id=str(metadata.get("package_id")) if metadata.get("package_id") else None,
+            package_name=str(metadata.get("package_name")) if metadata.get("package_name") else None,
+            package_version=str(metadata.get("package_version")) if metadata.get("package_version") else None,
+            package_scope=str(metadata.get("package_scope")) if metadata.get("package_scope") else None,
+            imported_at=_imported_at(),
+        ),
     )
     return _finish(skill, "native")
 
@@ -173,7 +192,7 @@ def _import_markdown(path: Path, fmt: SkillSourceFormat, *, fallback_name: str) 
         required_capabilities=SkillCapabilityRequirements(),
         enabled=False,
         status=SkillStatus.VALIDATED,
-        source=SkillSource(format=fmt, import_path=str(path)),
+        source=SkillSource(format=fmt, source_type="local_path", import_path=str(path), imported_at=_imported_at()),
     )
     return _finish(skill, fmt.value)
 

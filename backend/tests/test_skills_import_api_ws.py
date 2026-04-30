@@ -44,11 +44,15 @@ def test_importer_normalizes_native_claude_and_plain_markdown_without_execution(
     assert native_result.ok is True
     assert native_result.detected_format == "native"
     assert native_result.skill.enabled is False
+    assert native_result.skill.source.trust_status == "untrusted"
+    assert native_result.skill.source.imported_at is not None
     assert native_result.skill.status == "validated"
     assert claude_result.detected_format == "claude_skill"
     assert claude_result.skill.activation_mode == "manual"
+    assert claude_result.skill.source.import_path == str(claude / "SKILL.md")
     assert plain_result.detected_format == "markdown"
     assert plain_result.skill.activation_mode == "manual"
+    assert plain_result.skill.source.source_type == "local_path"
 
 
 def test_importer_resolves_windows_drive_paths_to_wsl_paths(tmp_path):
