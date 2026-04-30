@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { WorkingSetTab } from './WorkingSetTab';
 import { useAgentStore, type Message } from '@/store/agentStore';
-import { buildCompletionReport, formatDuration, type CompletionReport, type CompletionReportFile } from '@/lib/completionReport';
+import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionReport, type CompletionReportFile } from '@/lib/completionReport';
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
 type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'git';
+type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
 interface RightSidebarProps {
   onClose: () => void;
@@ -28,6 +29,13 @@ interface GitStatus {
   branch: string | null;
   dirtyCount: number;
   files: GitStatusFile[];
+}
+
+interface GitDiffResponse {
+  isRepo: boolean;
+  scope: ReviewScope;
+  file: string | null;
+  diff: string;
 }
 
 interface GitTreeNode {
@@ -78,6 +86,15 @@ function latestCompletionReport(messages: Message[]): CompletionReport | null {
   return null;
 }
 
+function completionReports(messages: Message[]): CompletionReport[] {
+  const reports: CompletionReport[] = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const report = buildCompletionReport(messages[index]);
+    if (report) reports.push(report);
+  }
+  return reports;
+}
+
 function latestAgentMessage(messages: Message[]): Message | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index].role === 'agent') return messages[index];
@@ -108,6 +125,25 @@ function SidebarSectionTitle({ children }: { children: string }) {
 
 function fileName(path: string): string {
   return path.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? path;
+}
+
+function fileIcon(path: string): { label: string; color: string } {
+  const lower = path.toLowerCase();
+  if (/\.(tsx|jsx)$/.test(lower)) return { label: '⚛', color: '#61dafb' };
+  if (/\.py$/.test(lower)) return { label: 'Py', color: '#74c0fc' };
+  if (/\.(ts|js)$/.test(lower)) return { label: 'TS', color: '#58a6ff' };
+  if (/\.md$/.test(lower)) return { label: 'Md', color: '#a5d6ff' };
+  if (/(^|\/)\.github(\/|$)/.test(lower)) return { label: 'GH', color: '#c9d1d9' };
+  if (/(^|\/)(package-lock\.json|package\.json)$/.test(lower)) return { label: 'npm', color: '#f85149' };
+  if (/\.(json|toml|ya?ml)$/.test(lower)) return { label: '{}', color: '#d29922' };
+  return { label: '□', color: 'var(--t1)' };
+}
+
+function scopeLabel(scope: ReviewScope): string {
+  if (scope === 'last-turn') return 'Last turn';
+  if (scope === 'unstaged') return 'Unstaged';
+  if (scope === 'staged') return 'Staged';
+  return 'Branch';
 }
 
 function buildGitTree(files: GitStatusFile[]): GitTreeNode[] {
@@ -145,12 +181,35 @@ function filterGitFiles(files: GitStatusFile[], filter: string): GitStatusFile[]
   return files.filter((file) => file.path.toLowerCase().includes(query));
 }
 
+function compactDirectoryNode(node: GitTreeNode): GitTreeNode {
+  let current = node;
+  let name = node.name;
+  while (!current.file && current.children.length === 1 && !current.children[0].file) {
+    current = current.children[0];
+    name = `${name}/${current.name}`;
+  }
+  if (current === node) return node;
+  return {
+    ...current,
+    name,
+    path: current.path,
+  };
+}
+
 function toneColor(tone: ActivityTimelineItem['tone']): string {
   if (tone === 'search') return 'var(--blu)';
   if (tone === 'test') return 'var(--grn)';
   if (tone === 'write') return 'var(--yel)';
   if (tone === 'read') return '#8b949e';
   return 'var(--t1)';
+}
+
+function openActivityPath(item: ActivityTimelineItem) {
+  if (!item.path) return;
+  window.dispatchEvent(new CustomEvent('nid:code-ref-open', {
+    detail: { kind: 'code', path: item.path, label: item.path, reviewScope: 'last-turn' },
+  }));
+  window.dispatchEvent(new CustomEvent('nid:workspace-tab', { detail: 'review' }));
 }
 
 function SummaryProgressBlock({ block }: { block: ActivityTimelineBlock }) {
@@ -186,11 +245,29 @@ function SummaryProgressBlock({ block }: { block: ActivityTimelineBlock }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <div style={{ color: 'var(--t1)', fontSize: 12 }}>{block.label}</div>
       {block.items.slice(0, 6).map((item, index) => (
-        <div key={`${block.label}-${item.label}-${index}`} style={{ display: 'grid', gridTemplateColumns: '16px minmax(0, 1fr)', gap: 8, alignItems: 'baseline' }}>
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: toneColor(item.tone), display: 'inline-block' }} />
+        <div key={`${block.label}-${item.label}-${index}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'baseline' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 600 }}>{item.label}</div>
-            {item.detail && (
+            <div style={{ color: 'var(--t1)', fontSize: 12, lineHeight: 1.45 }}>
+              {item.path && item.tone === 'write' ? (
+                <button
+                  type="button"
+                  onClick={() => openActivityPath(item)}
+                  style={{ border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 0, font: 'inherit', textAlign: 'left' }}
+                >
+                  <span>{item.label.replace(/\s+\S+$/, ' ')}</span>
+                  <span style={{ color: 'var(--blu)' }}>{item.detail ?? item.path}</span>
+                </button>
+              ) : (
+                item.label
+              )}
+              {item.additions !== undefined && (
+                <span style={{ marginLeft: 6, fontFamily: 'var(--mono)' }}>
+                  <span style={{ color: 'var(--grn)' }}>+{item.additions}</span>{' '}
+                  <span style={{ color: 'var(--red)' }}>-{item.deletions ?? 0}</span>
+                </span>
+              )}
+            </div>
+            {item.detail && !(item.path && item.tone === 'write') && (
               <div style={{
                 color: 'var(--t1)',
                 fontFamily: 'var(--mono)',
@@ -201,16 +278,18 @@ function SummaryProgressBlock({ block }: { block: ActivityTimelineBlock }) {
               }}>{item.detail}</div>
             )}
           </div>
+          {item.status === 'running' && <span style={{ color: toneColor(item.tone), fontSize: 10 }}>Running</span>}
         </div>
       ))}
     </div>
   );
 }
 
-function SummaryTab({ report, message }: { report: CompletionReport | null; message: Message | null }) {
+function SummaryTab({ reports, message }: { reports: CompletionReport[]; message: Message | null }) {
+  const report = reports[0] ?? null;
   const progressBlocks = useMemo(() => message ? buildActivityTimeline(message.events) : [], [message]);
 
-  if (!report && progressBlocks.length === 0) {
+  if (reports.length === 0 && progressBlocks.length === 0) {
     return (
       <EmptySidebarTab
         title="Last Turn Summary"
@@ -230,51 +309,28 @@ function SummaryTab({ report, message }: { report: CompletionReport | null; mess
     }}>
       <SidebarSectionTitle>Progress</SidebarSectionTitle>
 
-      {report ? (
+      {reports.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '18px minmax(0, 1fr)', gap: 9, alignItems: 'baseline' }}>
-            <span style={{ color: '#a7a7a7' }}>✓</span>
-            <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
-              {report.outcome}
-            </div>
-          </div>
-          {report.changedFiles.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: '18px minmax(0, 1fr)', gap: 9, alignItems: 'baseline' }}>
+          {reports.slice(0, 6).map((item, index) => (
+            <div key={`${item.outcome}-${index}`} style={{ display: 'grid', gridTemplateColumns: '18px minmax(0, 1fr)', gap: 9, alignItems: 'baseline' }}>
               <span style={{ color: '#a7a7a7' }}>✓</span>
-              <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
-                Edited {report.changedFiles.length} {report.changedFiles.length === 1 ? 'file' : 'files'}{' '}
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
-                  <span style={{ color: 'var(--grn)' }}>+{report.totalAdditions}</span>{' '}
-                  <span style={{ color: 'var(--red)' }}>-{report.totalDeletions}</span>
-                </span>
-              </div>
-            </div>
-          )}
-          {report.verifications.map((verification, index) => (
-            <div key={`${verification.command}-${index}`} style={{ display: 'grid', gridTemplateColumns: '18px minmax(0, 1fr)', gap: 9, alignItems: 'baseline' }}>
-              <span style={{ color: verification.status === 'error' ? 'var(--red)' : '#a7a7a7' }}>
-                {verification.status === 'error' ? '×' : '✓'}
-              </span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
-                  {verification.summary}
+                  {item.outcome}
                 </div>
-                <code style={{
-                  display: 'block',
-                  marginTop: 3,
-                  color: 'var(--t1)',
-                  fontFamily: 'var(--mono)',
-                  fontSize: 11,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}>{verification.command}</code>
+                <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 3 }}>
+                  {formatDuration(item.durationMs)}
+                  {item.changedFiles.length > 0 && (
+                    <span style={{ fontFamily: 'var(--mono)', marginLeft: 8 }}>
+                      {item.changedFiles.length} {item.changedFiles.length === 1 ? 'file' : 'files'} ·{' '}
+                      <span style={{ color: 'var(--grn)' }}>+{item.totalAdditions}</span>{' '}
+                      <span style={{ color: 'var(--red)' }}>-{item.totalDeletions}</span>
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           ))}
-          <div style={{ color: 'var(--t1)', fontSize: 11, paddingLeft: 27 }}>
-            {formatDuration(report.durationMs)}
-          </div>
         </div>
       ) : progressBlocks.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
@@ -302,7 +358,7 @@ function SummaryTab({ report, message }: { report: CompletionReport | null; mess
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             {report.changedFiles.map((file) => (
               <div key={file.path} style={{ display: 'grid', gridTemplateColumns: '16px minmax(0, 1fr) auto', gap: 8, alignItems: 'center', color: 'var(--t0)', fontSize: 12 }}>
-                <span style={{ color: 'var(--t1)' }}>▣</span>
+                <span style={{ color: fileIcon(file.path).color, fontSize: 12 }}>{fileIcon(file.path).label}</span>
                 <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>{file.path}</span>
                 <span style={{ fontFamily: 'var(--mono)', color: 'var(--t1)' }}>
                   <span style={{ color: 'var(--grn)' }}>+{file.additions}</span>{' '}
@@ -630,25 +686,153 @@ function ReviewFileRow({
 
 function ReviewTab({
   report,
+  scope,
+  onScopeChange,
   selectedRef,
   comments,
   onAddComment,
 }: {
   report: CompletionReport | null;
+  scope: ReviewScope;
+  onScopeChange: (scope: ReviewScope) => void;
   selectedRef?: CodeRef;
   comments: LocalComment[];
   onAddComment: (comment: Omit<LocalComment, 'id'>) => void;
 }) {
-  if (!report || report.changedFiles.length === 0) {
+  const workingDirectory = useAgentStore((state) => state.workingDirectory);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [gitFiles, setGitFiles] = useState<CompletionReportFile[]>([]);
+  const [gitError, setGitError] = useState<string | null>(null);
+  const [loadingGitDiff, setLoadingGitDiff] = useState(false);
+
+  useEffect(() => {
+    if (scope === 'last-turn') return;
+    if (!workingDirectory) {
+      setGitFiles([]);
+      setGitError('Set a working directory to review git changes.');
+      return;
+    }
+
+    const params = new URLSearchParams({ path: workingDirectory, scope });
+    if (selectedRef?.path && scope === 'unstaged') params.set('file', selectedRef.path);
+    let cancelled = false;
+    setLoadingGitDiff(true);
+    setGitError(null);
+    fetch(`http://localhost:7430/api/git/diff?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`git_diff_${response.status}`);
+        return response.json() as Promise<GitDiffResponse>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setGitFiles(data.isRepo ? parseDiffFiles(data.diff) : []);
+      })
+      .catch((err) => {
+        if (!cancelled) setGitError(err instanceof Error ? err.message : 'git_diff_unavailable');
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingGitDiff(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [scope, workingDirectory, selectedRef?.path]);
+
+  const changedFiles = scope === 'last-turn' ? (report?.changedFiles ?? []) : gitFiles;
+  const totalAdditions = changedFiles.reduce((sum, file) => sum + file.additions, 0);
+  const totalDeletions = changedFiles.reduce((sum, file) => sum + file.deletions, 0);
+
+  const header = (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+      <div style={{ position: 'relative' }}>
+        <button
+          type="button"
+          aria-label="Review scope"
+          onClick={() => setMenuOpen((value) => !value)}
+          style={{
+            border: '1px solid #30363d88',
+            borderRadius: 8,
+            background: '#30363d66',
+            color: 'var(--t0)',
+            fontSize: 12,
+            fontWeight: 650,
+            padding: '6px 10px',
+            cursor: 'pointer',
+          }}
+        >
+          {scopeLabel(scope)}⌄
+        </button>
+        {menuOpen && (
+          <div
+            role="menu"
+            aria-label="Review scope options"
+            style={{
+              position: 'absolute',
+              top: 34,
+              left: 0,
+              zIndex: 20,
+              width: 170,
+              border: '1px solid #30363d88',
+              borderRadius: 9,
+              background: '#2b2b2b',
+              boxShadow: '0 12px 28px #00000066',
+              padding: 6,
+            }}
+          >
+            {(['unstaged', 'staged', 'branch', 'last-turn'] as ReviewScope[]).map((item) => (
+              <button
+                key={item}
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  onScopeChange(item);
+                  setMenuOpen(false);
+                }}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  border: 'none',
+                  borderRadius: 6,
+                  background: item === scope ? '#3a3a3a' : 'transparent',
+                  color: 'var(--t0)',
+                  cursor: 'pointer',
+                  padding: '7px 8px',
+                  fontSize: 12,
+                  textAlign: 'left',
+                }}
+              >
+                <span>{scopeLabel(item)}</span>
+                {item === scope && <span style={{ color: 'var(--t1)' }}>✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {changedFiles.length > 0 && (
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+          <span style={{ color: 'var(--grn)' }}>+{totalAdditions}</span>{' '}
+          <span style={{ color: 'var(--red)' }}>-{totalDeletions}</span>
+        </span>
+      )}
+    </div>
+  );
+
+  if (changedFiles.length === 0) {
     return (
-      <EmptySidebarTab
-        title="Changed Files"
-        description="This surface will show changed files, additions and deletions, expandable diffs, and open-in-editor actions."
-      />
+      <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {header}
+        <EmptySidebarTab
+          title="Changed Files"
+          description={loadingGitDiff ? 'Loading git diff...' : gitError ?? 'No changed files for this review scope.'}
+        />
+      </div>
     );
   }
 
-  const fileCount = report.changedFiles.length;
+  const fileCount = changedFiles.length;
 
   return (
     <div style={{
@@ -659,7 +843,7 @@ function ReviewTab({
       flexDirection: 'column',
       gap: 12,
     }}>
-      <SidebarSectionTitle>Changed Files</SidebarSectionTitle>
+      {header}
       <div style={{
         display: 'flex',
         alignItems: 'baseline',
@@ -669,10 +853,6 @@ function ReviewTab({
         fontSize: 11,
       }}>
         <span>{fileCount} {fileCount === 1 ? 'file' : 'files'} changed</span>
-        <span style={{ fontFamily: 'var(--mono)' }}>
-          <span style={{ color: 'var(--grn)' }}>+{report.totalAdditions}</span>{' '}
-          <span style={{ color: 'var(--red)' }}>-{report.totalDeletions}</span>
-        </span>
       </div>
       <div style={{
         border: '1px solid var(--bd)',
@@ -680,7 +860,7 @@ function ReviewTab({
         background: 'var(--bg0)',
         overflow: 'hidden',
       }}>
-        {report.changedFiles.map((file) => (
+        {changedFiles.map((file) => (
           <ReviewFileRow
             key={file.path}
             file={file}
@@ -698,48 +878,63 @@ function GitTreeRow({
   node,
   depth,
   onReviewFile,
+  selectedPath,
 }: {
   node: GitTreeNode;
   depth: number;
   onReviewFile: (path: string) => void;
+  selectedPath?: string;
 }) {
   const [open, setOpen] = useState(true);
+  const displayNode = node.file ? node : compactDirectoryNode(node);
 
-  if (node.file) {
-    const statusColor = node.file.status === '??' ? 'var(--blu)' : 'var(--yel)';
+  if (displayNode.file) {
+    const icon = fileIcon(displayNode.file.path);
+    const selected = selectedPath === displayNode.file.path;
     return (
       <button
         type="button"
-        aria-label={`Review ${node.file.path}`}
-        onClick={() => onReviewFile(node.file!.path)}
+        aria-label={`Review ${displayNode.file.path}`}
+        onClick={() => onReviewFile(displayNode.file!.path)}
         style={{
           width: '100%',
           display: 'grid',
           gridTemplateColumns: '20px minmax(0, 1fr)',
           gap: 8,
           alignItems: 'center',
-          padding: '5px 8px',
-          paddingLeft: 8 + depth * 17,
-          border: 'none',
-          background: 'transparent',
+          padding: '4px 7px',
+          paddingLeft: 7 + depth * 13,
+          border: '1px solid transparent',
+          borderRadius: 6,
+          background: selected ? '#2a2a2a' : 'transparent',
           color: 'var(--t0)',
           cursor: 'pointer',
           textAlign: 'left',
           fontSize: 12,
         }}
       >
-        <span style={{ color: statusColor, fontFamily: 'var(--mono)', fontSize: 10 }}>{node.file.status}</span>
         <span
-          title={node.file.path}
+          aria-label={`${icon.label} file icon`}
+          style={{
+            color: icon.color,
+            fontFamily: icon.label.length > 1 ? 'var(--mono)' : undefined,
+            fontSize: icon.label.length > 2 ? 9 : 13,
+            textAlign: 'center',
+          }}
+        >
+          {icon.label}
+        </span>
+        <span
+          title={displayNode.file.path}
           style={{
             minWidth: 0,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            fontFamily: 'var(--mono)',
+            fontFamily: 'var(--sans)',
           }}
         >
-          {fileName(node.file.path)}
+          {fileName(displayNode.file.path)}
         </span>
       </button>
     );
@@ -749,16 +944,16 @@ function GitTreeRow({
     <div>
       <button
         type="button"
-        aria-label={`${open ? 'Collapse' : 'Expand'} ${node.path}`}
+        aria-label={`${open ? 'Collapse' : 'Expand'} ${displayNode.path}`}
         onClick={() => setOpen((value) => !value)}
         style={{
           width: '100%',
           display: 'grid',
           gridTemplateColumns: '14px minmax(0, 1fr)',
-          gap: 6,
+          gap: 5,
           alignItems: 'center',
-          padding: '5px 8px',
-          paddingLeft: 8 + depth * 17,
+          padding: '4px 7px',
+          paddingLeft: 7 + depth * 13,
           border: 'none',
           background: 'transparent',
           color: 'var(--t0)',
@@ -769,16 +964,16 @@ function GitTreeRow({
         }}
       >
         <span style={{ color: 'var(--t1)' }}>{open ? '⌄' : '›'}</span>
-        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayNode.name}</span>
       </button>
       {open && (
         <div style={{
-          marginLeft: 8 + depth * 17,
+          marginLeft: 7 + depth * 13,
           borderLeft: depth >= 0 ? '1px solid #30363d88' : 'none',
-          paddingLeft: 4,
+          paddingLeft: 3,
         }}>
-          {node.children.map((child) => (
-            <GitTreeRow key={child.path} node={child} depth={depth + 1} onReviewFile={onReviewFile} />
+          {displayNode.children.map((child) => (
+            <GitTreeRow key={child.path} node={child} depth={depth + 1} onReviewFile={onReviewFile} selectedPath={selectedPath} />
           ))}
         </div>
       )}
@@ -786,7 +981,7 @@ function GitTreeRow({
   );
 }
 
-function GitTab({ onReviewFile }: { onReviewFile: (path: string) => void }) {
+function GitTab({ onReviewFile, selectedPath }: { onReviewFile: (path: string) => void; selectedPath?: string }) {
   const workingDirectory = useAgentStore((state) => state.workingDirectory);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -911,13 +1106,13 @@ function GitTab({ onReviewFile }: { onReviewFile: (path: string) => void }) {
                 border: '1px solid var(--bd)',
                 borderRadius: 7,
                 background: 'var(--bg0)',
-                padding: '7px 0',
+                padding: '5px 4px',
                 overflow: 'hidden',
               }}>
                 {tree.length === 0 ? (
                   <div style={{ color: 'var(--t1)', fontSize: 12, padding: '8px 10px' }}>No changed files match.</div>
                 ) : tree.map((node) => (
-                  <GitTreeRow key={node.path} node={node} depth={0} onReviewFile={onReviewFile} />
+                  <GitTreeRow key={node.path} node={node} depth={0} onReviewFile={onReviewFile} selectedPath={selectedPath} />
                 ))}
               </div>
             </div>
@@ -930,10 +1125,12 @@ function GitTab({ onReviewFile }: { onReviewFile: (path: string) => void }) {
 
 export function RightSidebar({ onClose }: RightSidebarProps) {
   const [activeTab, setActiveTab] = useState<RightSidebarTab>('working-set');
+  const [reviewScope, setReviewScope] = useState<ReviewScope>('last-turn');
   const [selectedReviewRef, setSelectedReviewRef] = useState<CodeRef | undefined>();
   const [comments, setComments] = useState<LocalComment[]>([]);
   const messages = useAgentStore((state) => state.messages);
   const report = latestCompletionReport(messages);
+  const reports = completionReports(messages);
   const latestMessage = latestAgentMessage(messages);
   const addComment = (comment: Omit<LocalComment, 'id'>) => {
     setComments((items) => [...items, { ...comment, id: `${Date.now()}-${items.length}` }]);
@@ -941,13 +1138,23 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
 
   useEffect(() => {
     const onCodeRefOpen = (event: Event) => {
-      const detail = (event as CustomEvent<CodeRef>).detail;
+      const detail = (event as CustomEvent<CodeRef & { reviewScope?: ReviewScope }>).detail;
       if (!detail?.path) return;
       setSelectedReviewRef(detail);
+      if (detail.reviewScope) setReviewScope(detail.reviewScope);
       setActiveTab('review');
     };
+    const onWorkspaceTab = (event: Event) => {
+      const detail = (event as CustomEvent<RightSidebarTab>).detail;
+      if (!TABS.some((tab) => tab.id === detail)) return;
+      setActiveTab(detail);
+    };
     window.addEventListener('nid:code-ref-open', onCodeRefOpen);
-    return () => window.removeEventListener('nid:code-ref-open', onCodeRefOpen);
+    window.addEventListener('nid:workspace-tab', onWorkspaceTab);
+    return () => {
+      window.removeEventListener('nid:code-ref-open', onCodeRefOpen);
+      window.removeEventListener('nid:workspace-tab', onWorkspaceTab);
+    };
   }, []);
 
   return (
@@ -1040,10 +1247,20 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
       </div>
 
       {activeTab === 'working-set' && <WorkingSetTab />}
-      {activeTab === 'summary' && <SummaryTab report={report} message={latestMessage} />}
-      {activeTab === 'review' && <ReviewTab report={report} selectedRef={selectedReviewRef} comments={comments} onAddComment={addComment} />}
-      {activeTab === 'git' && <GitTab onReviewFile={(path) => {
+      {activeTab === 'summary' && <SummaryTab reports={reports} message={latestMessage} />}
+      {activeTab === 'review' && (
+        <ReviewTab
+          report={report}
+          scope={reviewScope}
+          onScopeChange={setReviewScope}
+          selectedRef={selectedReviewRef}
+          comments={comments}
+          onAddComment={addComment}
+        />
+      )}
+      {activeTab === 'git' && <GitTab selectedPath={selectedReviewRef?.path} onReviewFile={(path) => {
         setSelectedReviewRef({ kind: 'code', path, label: path });
+        setReviewScope('unstaged');
         setActiveTab('review');
       }} />}
     </aside>

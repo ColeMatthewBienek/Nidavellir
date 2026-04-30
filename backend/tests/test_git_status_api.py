@@ -51,3 +51,52 @@ async def test_git_status_reports_non_repo_without_error(tmp_path):
     assert body["isRepo"] is False
     assert body["branch"] is None
     assert body["files"] == []
+
+
+@pytest.mark.asyncio
+async def test_git_diff_returns_unstaged_patch_for_file(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+    tracked.write_text("after\n", encoding="utf-8")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.get("/api/git/diff", params={"path": str(repo), "scope": "unstaged", "file": "tracked.txt"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "unstaged"
+    assert body["file"] == "tracked.txt"
+    assert "diff --git a/tracked.txt b/tracked.txt" in body["diff"]
+    assert "-before" in body["diff"]
+    assert "+after" in body["diff"]
+
+
+@pytest.mark.asyncio
+async def test_git_diff_returns_staged_patch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+    tracked.write_text("after\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.get("/api/git/diff", params={"path": str(repo), "scope": "staged"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "staged"
+    assert body["file"] is None
+    assert "+after" in body["diff"]

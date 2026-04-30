@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useAgentStore } from "@/store/agentStore";
@@ -256,6 +257,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         urlTransform={(url) => url}
         components={{
           code({ className: cls, children, ...props }) {

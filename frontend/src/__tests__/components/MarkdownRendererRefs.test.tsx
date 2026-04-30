@@ -66,6 +66,20 @@ describe('live code references', () => {
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/refs/code?'));
   });
 
+  it('renders GFM tables as tables instead of raw pipe text', () => {
+    render(<MarkdownRenderer content={[
+      '| Priority | Action |',
+      '|---|---|',
+      '| High | Update `project_overview.md` |',
+      '| Low | Add architectural constants |',
+    ].join('\n')} />);
+
+    expect(screen.getByRole('table')).toBeTruthy();
+    expect(screen.getByRole('columnheader', { name: 'Priority' })).toBeTruthy();
+    expect(screen.getByRole('cell', { name: /Update/ })).toBeTruthy();
+    expect(screen.queryByText(/\|---\|---\|/)).toBeNull();
+  });
+
   it('opens VS Code with the backend-resolved absolute path, not the relative ref', async () => {
     const openCodeRef = vi.fn().mockResolvedValue(undefined);
     window.nidavellir = { openCodeRef, pickWorkingSetFiles: vi.fn().mockResolvedValue([]) };

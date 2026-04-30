@@ -54,21 +54,69 @@ function statusColor(status: string): string {
   return 'var(--grn)';
 }
 
-function toneColor(tone: ActivityTimelineItem['tone']): string {
-  if (tone === 'search') return 'var(--blu)';
-  if (tone === 'test') return 'var(--grn)';
-  if (tone === 'write') return 'var(--yel)';
-  if (tone === 'read') return '#8b949e';
-  return 'var(--t1)';
+function openActivityPath(item: ActivityTimelineItem) {
+  if (!item.path) return;
+  window.dispatchEvent(new CustomEvent('nid:open-review', {
+    detail: { kind: 'code', path: item.path, label: item.path, reviewScope: 'last-turn' },
+  }));
 }
 
 function TimelineItem({ item }: { item: ActivityTimelineItem }) {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const actionable = Boolean(item.path && item.tone === 'write');
+  const statusText = item.status === 'running' ? 'Running' : '';
+  const hasHiddenDetail = Boolean(item.detail && !actionable);
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '10px minmax(0, 1fr) auto', gap: 8, alignItems: 'baseline' }}>
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: toneColor(item.tone), marginTop: 8, display: 'none' }} />
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'baseline' }}>
       <div style={{ minWidth: 0 }}>
-        <div style={{ color: 'var(--t1)', fontSize: 12, fontWeight: 400 }}>{item.label}</div>
-        {item.detail && (
+        <div style={{ color: 'var(--t1)', fontSize: 12, fontWeight: 400, lineHeight: 1.5 }}>
+          {actionable ? (
+            <button
+              type="button"
+              onClick={() => openActivityPath(item)}
+              style={{
+                border: 'none',
+                background: 'transparent',
+                color: 'inherit',
+                cursor: 'pointer',
+                padding: 0,
+                font: 'inherit',
+                textAlign: 'left',
+              }}
+            >
+              <span>{item.label.replace(/\s+\S+$/, ' ')}</span>
+              <span style={{ color: 'var(--blu)' }}>{item.detail ?? item.path}</span>
+            </button>
+          ) : (
+            item.label
+          )}
+          {item.additions !== undefined && (
+            <span style={{ marginLeft: 6, fontFamily: 'var(--mono)' }}>
+              <span style={{ color: 'var(--grn)' }}>+{item.additions}</span>{' '}
+              <span style={{ color: 'var(--red)' }}>-{item.deletions ?? 0}</span>
+            </span>
+          )}
+          {hasHiddenDetail && (
+            <button
+              type="button"
+              aria-label={`${detailOpen ? 'Hide' : 'Show'} details for ${item.label}`}
+              onClick={() => setDetailOpen((value) => !value)}
+              style={{
+                marginLeft: 7,
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--t1)',
+                cursor: 'pointer',
+                padding: 0,
+                fontSize: 11,
+                fontFamily: 'var(--sans)',
+              }}
+            >
+              {detailOpen ? 'Hide details' : 'Details'}
+            </button>
+          )}
+        </div>
+        {hasHiddenDetail && detailOpen && (
           <div style={{
             color: 'var(--t1)',
             fontSize: 11,
@@ -79,7 +127,7 @@ function TimelineItem({ item }: { item: ActivityTimelineItem }) {
           }}>{item.detail}</div>
         )}
       </div>
-      <span style={{ color: statusColor(item.status), fontSize: 10, fontFamily: 'var(--mono)' }}>{item.status}</span>
+      {statusText && <span style={{ color: statusColor(item.status), fontSize: 10, fontFamily: 'var(--mono)' }}>{statusText}</span>}
     </div>
   );
 }
@@ -140,55 +188,34 @@ function TimelineBlock({ block }: { block: ActivityTimelineBlock }) {
 }
 
 function AgentActivity({ events, streaming, startedAt }: { events: StreamEvent[]; streaming: boolean; startedAt?: Date }) {
-  const [open, setOpen] = useState(false);
   const blocks = buildActivityTimeline(events);
   const elapsedLabel = useElapsedLabel(startedAt, streaming);
-  const showLog = open || blocks.length > 0;
 
   return (
-    <div style={{ marginTop: 12, borderTop: blocks.length > 0 ? 'none' : '1px solid var(--bd)', paddingTop: blocks.length > 0 ? 2 : 9 }}>
+    <div style={{ marginTop: 8, paddingTop: 2 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--t1)', fontSize: 12, marginBottom: 8 }}>
         {streaming && <WorkingIndicator />}
         <span>{elapsedLabel}</span>
       </div>
-      <button
-        type="button"
-        aria-label={open ? 'Collapse agent activity' : 'Expand agent activity'}
-        onClick={() => setOpen((v) => !v)}
+      <div
+        role="log"
+        aria-label="Agent activity"
         style={{
-          display: 'flex', alignItems: 'center', gap: 7,
-          border: 'none', background: 'transparent', color: 'var(--t1)',
-          fontSize: 11, cursor: 'pointer', padding: 0,
+          marginTop: 14,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+          paddingRight: 4,
         }}
       >
-        <span style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>›</span>
-        <span>{open ? 'Collapse' : 'Expand'}</span>
-        {blocks.length > 0 && <span style={{ color: '#484f58' }}>{blocks.length}</span>}
-      </button>
-
-      {showLog && (
-        <div
-          role="log"
-          aria-label="Agent activity"
-          style={{
-            marginTop: blocks.length > 0 ? 12 : 14,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 14,
-            maxHeight: open ? 520 : 'none',
-            overflowY: open ? 'auto' : 'visible',
-            paddingRight: 4,
-          }}
-        >
-          {blocks.length === 0 ? (
-            <div style={{ color: 'var(--t1)', fontSize: 12, fontFamily: 'var(--mono)' }}>
-              Waiting for provider activity
-            </div>
-          ) : blocks.map((block, index) => (
-            <TimelineBlock key={`${block.type}-${index}`} block={block} />
-          ))}
-        </div>
-      )}
+        {blocks.length === 0 ? (
+          <div style={{ color: 'var(--t1)', fontSize: 12 }}>
+            Thinking
+          </div>
+        ) : blocks.map((block, index) => (
+          <TimelineBlock key={`${block.type}-${index}`} block={block} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -362,17 +389,26 @@ function CompletionReportCard({ report }: { report: CompletionReport }) {
   );
 }
 
-function ThinkingBubble({ events = [], startedAt }: { events?: StreamEvent[]; startedAt?: Date }) {
+function RunningAgentTurn({ events = [], startedAt }: { events?: StreamEvent[]; startedAt?: Date }) {
   return (
-    <div style={{ padding: '10px 20px', display: 'flex', gap: 10, marginBottom: 16 }}>
+    <div style={{
+      width: 'min(920px, 100%)',
+      margin: '0 auto 22px',
+      padding: '14px 20px',
+      display: 'flex',
+      gap: 10,
+      alignItems: 'flex-start',
+    }}>
       <div style={{
-        width: 26, height: 26, borderRadius: '50%', background: 'var(--grnd)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 10, fontWeight: 700, color: '#fff', flexShrink: 0,
-      }}>N</div>
-      <div style={{ paddingTop: 5 }}>
-        <div style={{ fontSize: 11, color: 'var(--t1)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span>Nidavellir · working</span>
+        width: 'min(760px, 100%)',
+        maxWidth: 'min(760px, 100%)',
+        fontSize: 13,
+        color: 'var(--t0)',
+        lineHeight: 1.6,
+      }}>
+        <div style={{ fontSize: 11, color: 'var(--t1)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>Nidavellir</span>
+          <span style={{ color: 'var(--grn)', fontSize: 9 }}>working</span>
           <button
             type="button"
             aria-label="Stop agent"
@@ -424,9 +460,10 @@ function MessageBubble({ message }: { message: Message }) {
     ? message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '';
 
-  // Pre-first-chunk: empty streaming agent message → ThinkingBubble
-  if (!isUser && message.content === '' && message.streaming && message.events.length === 0) {
-    return <ThinkingBubble events={message.events} startedAt={message.timestamp} />;
+  // While the turn is running, the transcript shows Codex-style live activity.
+  // The final answer replaces this live work log when the provider completes.
+  if (!isUser && message.streaming) {
+    return <RunningAgentTurn events={message.events} startedAt={message.timestamp} />;
   }
 
   // parts only needed for user bubble (plain text, no markdown parsing)
@@ -469,30 +506,6 @@ function MessageBubble({ message }: { message: Message }) {
         }}>
         {isUser ? 'You' : 'Nidavellir'}
         {isUser && timestamp ? ` · ${timestamp}` : ''}
-        {message.streaming && (
-          <>
-            <span style={{
-                marginLeft: 6, color: 'var(--grn)', fontSize: 9,
-              }}>working</span>
-            <button
-              type="button"
-              aria-label="Stop agent"
-              onClick={() => sendCancel()}
-              style={{
-                marginLeft: 8,
-                border: '1px solid #f8514955',
-                borderRadius: 4,
-                background: '#f8514914',
-                color: '#ff7b72',
-                fontSize: 10,
-                padding: '1px 6px',
-                cursor: 'pointer',
-              }}
-            >
-              Stop
-            </button>
-          </>
-        )}
       </div>
 
         {/* Bubble wrapper */}
@@ -524,9 +537,6 @@ function MessageBubble({ message }: { message: Message }) {
                   <span style={{ color: 'var(--grn)', animation: 'nidBlink 1s step-start infinite' }}>▋</span>
                 )}
               </>
-            )}
-            {!isUser && (message.streaming || message.events.length > 0) && (
-              <AgentActivity events={message.events} streaming={message.streaming} startedAt={message.timestamp} />
             )}
             {completionReport && <CompletionReportCard report={completionReport} />}
           </div>

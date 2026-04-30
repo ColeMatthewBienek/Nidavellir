@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query
 
 
@@ -12,6 +14,25 @@ router = APIRouter(prefix="/api/git", tags=["git"])
 def _run_git_status(path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "status", "--short", "--branch"],
+        cwd=path,
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+
+
+def _run_git_diff(path: Path, scope: str, file: str | None) -> subprocess.CompletedProcess[str]:
+    args = ["git", "diff"]
+    if scope == "staged":
+        args.append("--cached")
+    elif scope == "branch":
+        args.extend(["HEAD"])
+    elif scope != "unstaged":
+        raise ValueError("unsupported_scope")
+    if file:
+        args.extend(["--", file])
+    return subprocess.run(
+        args,
         cwd=path,
         text=True,
         capture_output=True,
@@ -75,4 +96,42 @@ async def git_status(path: str = Query(..., min_length=1)):
         "branch": branch,
         "dirtyCount": len(files),
         "files": files,
+    }
+
+
+@router.get("/diff")
+async def git_diff(
+    path: str = Query(..., min_length=1),
+    scope: Literal["unstaged", "staged", "branch"] = "unstaged",
+    file: str | None = Query(default=None),
+):
+    workspace = Path(path).expanduser().resolve()
+    if not workspace.exists():
+        raise HTTPException(status_code=400, detail="directory_not_found")
+    if not workspace.is_dir():
+        raise HTTPException(status_code=400, detail="not_a_directory")
+
+    try:
+        result = _run_git_diff(workspace, scope, file)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="git_diff_timeout") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.lower()
+        if "not a git repository" in stderr:
+            return {
+                "isRepo": False,
+                "scope": scope,
+                "file": file,
+                "diff": "",
+            }
+        raise HTTPException(status_code=500, detail="git_diff_failed")
+
+    return {
+        "isRepo": True,
+        "scope": scope,
+        "file": file,
+        "diff": result.stdout,
     }

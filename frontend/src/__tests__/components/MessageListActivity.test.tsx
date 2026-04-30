@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MessageList } from '../../components/chat/MessageList';
 import { useAgentStore } from '../../store/agentStore';
@@ -17,7 +17,8 @@ describe('MessageList activity feed', () => {
     render(<MessageList />);
 
     expect(screen.getAllByLabelText('Agent is working')).toHaveLength(1);
-    expect(screen.getByRole('button', { name: 'Expand agent activity' })).toBeTruthy();
+    expect(screen.getByRole('log', { name: 'Agent activity' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /agent activity/i })).toBeNull();
     expect(screen.getByText(/Working for/)).toBeTruthy();
   });
 
@@ -28,7 +29,7 @@ describe('MessageList activity feed', () => {
     expect(screen.getByRole('button', { name: 'Stop agent' })).toBeTruthy();
   });
 
-  it('opens a flowing activity log from the disclosure arrow', () => {
+  it('shows a flowing activity log inline while the turn is running', () => {
     useAgentStore.getState().addMessage('agent', '');
     useAgentStore.getState().appendStreamEvents([
       { type: 'progress', content: 'I’m checking the frontend activity rendering path.' },
@@ -40,7 +41,6 @@ describe('MessageList activity feed', () => {
     ]);
 
     render(<MessageList />);
-    fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
 
     expect(screen.getByText('I’m checking the frontend activity rendering path.')).toBeTruthy();
     expect(screen.getByText('Explored 1 file')).toBeTruthy();
@@ -100,15 +100,14 @@ describe('MessageList activity feed', () => {
 
     render(<MessageList />);
 
-    expect(screen.getByText('I found the chat screen.')).toBeTruthy();
+    expect(screen.queryByText('I found the chat screen.')).toBeNull();
     expect(screen.queryByText(/exec \/bin\/bash/)).toBeNull();
     expect(screen.getByText('Explored 1 search')).toBeTruthy();
-    expect(screen.getByText('succeeded in 351ms: ./frontend/src/screens/ChatScreen.tsx')).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
+    expect(screen.queryByText('succeeded in 351ms: ./frontend/src/screens/ChatScreen.tsx')).toBeNull();
 
     expect(screen.getByText('Explored 1 search')).toBeTruthy();
     expect(screen.getByText(/Searched/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Show details for Searched/i }));
     expect(screen.getByText('succeeded in 351ms: ./frontend/src/screens/ChatScreen.tsx')).toBeTruthy();
   });
 
@@ -119,13 +118,14 @@ describe('MessageList activity feed', () => {
     ]);
 
     render(<MessageList />);
-    fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
 
-    expect(screen.getByRole('button', { name: 'Collapse agent activity' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /agent activity/i })).toBeNull();
     expect(screen.getByText('Ran 1 command')).toBeTruthy();
     expect(screen.getByText('Ran exec')).toBeTruthy();
+    expect(screen.queryByText('/bin/bash -lc pwd')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Show details for Ran exec/i }));
     expect(screen.getByText('/bin/bash -lc pwd')).toBeTruthy();
-    expect(screen.getByText('running')).toBeTruthy();
+    expect(screen.getByText('Running')).toBeTruthy();
   });
 
   it('groups streaming tool deltas into one elegant tool card', () => {
@@ -139,9 +139,10 @@ describe('MessageList activity feed', () => {
     ]);
 
     render(<MessageList />);
-    fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
 
-    expect(screen.getByText('Ran Bash')).toBeTruthy();
+    expect(screen.getByText('Searched for TokenUsage')).toBeTruthy();
+    expect(screen.queryByText('12 matches')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Show details for Searched for TokenUsage/i }));
     expect(screen.getByText('12 matches')).toBeTruthy();
     expect(screen.queryByText('Output')).toBeNull();
     expect(screen.queryByText('"rg -n')).toBeNull();
@@ -156,9 +157,8 @@ describe('MessageList activity feed', () => {
     ]);
 
     render(<MessageList />);
-    fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
 
-    expect(screen.getByText('Waiting for provider activity')).toBeTruthy();
+    expect(screen.getByText('Thinking')).toBeTruthy();
     expect(screen.queryByText(/line one/)).toBeNull();
     expect(screen.queryByText(/line two/)).toBeNull();
   });
@@ -175,14 +175,37 @@ describe('MessageList activity feed', () => {
     ]);
 
     render(<MessageList />);
-    fireEvent.click(screen.getByRole('button', { name: 'Expand agent activity' }));
 
     expect(screen.queryByText(/Starting codex/)).toBeNull();
     expect(screen.queryByText(/Provider process started/)).toBeNull();
     expect(screen.queryByText(/Prompt sent/)).toBeNull();
     expect(screen.queryByText(/turn started/)).toBeNull();
     expect(screen.queryByText(/still working/)).toBeNull();
-    expect(screen.getByText('Waiting for provider activity')).toBeTruthy();
+    expect(screen.getByText('Thinking')).toBeTruthy();
+  });
+
+  it('replaces running activity with the final answer and summary when the turn completes', () => {
+    useAgentStore.getState().addMessage('agent', 'Implemented the process change.');
+    useAgentStore.getState().appendStreamEvents([
+      { type: 'progress', content: 'I’m checking the frontend activity rendering path.' },
+      { type: 'answer_delta', content: 'Implemented the process change.' },
+      { type: 'patch', content: [
+        'diff --git a/frontend/src/lib/agentSocket.ts b/frontend/src/lib/agentSocket.ts',
+        '--- a/frontend/src/lib/agentSocket.ts',
+        '+++ b/frontend/src/lib/agentSocket.ts',
+        '@@',
+        '-        s.clearMessages();',
+        '+        s.finalizeLastAgentMessage();',
+      ].join('\n') },
+    ]);
+    useAgentStore.getState().finalizeLastAgentMessage();
+
+    render(<MessageList />);
+
+    expect(screen.getByText('Implemented the process change.')).toBeTruthy();
+    expect(screen.getByLabelText('Task completion report')).toBeTruthy();
+    expect(screen.queryByRole('log', { name: 'Agent activity' })).toBeNull();
+    expect(screen.queryByText('I’m checking the frontend activity rendering path.')).toBeNull();
   });
 
   it('renders a completion report for finished build tasks', () => {
@@ -266,5 +289,34 @@ describe('MessageList activity feed', () => {
 
     expect(screen.getByText(/s\.clearMessages/)).toBeTruthy();
     expect(screen.getByText(/s\.finalizeLastAgentMessage/)).toBeTruthy();
+  });
+
+  it('renders edited files as Codex-style colorized activity links', () => {
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.getState().appendStreamEvents([
+      { type: 'patch', content: [
+        'diff --git a/frontend/src/components/chat/RightSidebar.tsx b/frontend/src/components/chat/RightSidebar.tsx',
+        '--- a/frontend/src/components/chat/RightSidebar.tsx',
+        '+++ b/frontend/src/components/chat/RightSidebar.tsx',
+        '@@ -1,2 +1,3 @@',
+        '-const staleTree = true;',
+        '+const codexTree = true;',
+      ].join('\n') },
+    ]);
+
+    render(<MessageList />);
+
+    expect(screen.getByText('Edited 1 file')).toBeTruthy();
+    expect(screen.getByText('Edited')).toBeTruthy();
+    const fileLink = screen.getByRole('button', { name: /Edited frontend\/src\/components\/chat\/RightSidebar\.tsx/i });
+    expect(fileLink).toBeTruthy();
+    expect(screen.getByText('+1')).toBeTruthy();
+    expect(screen.getByText('-1')).toBeTruthy();
+
+    fireEvent.click(fileLink);
+
+    expect(dispatchSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'nid:open-review' }));
+    dispatchSpy.mockRestore();
   });
 });

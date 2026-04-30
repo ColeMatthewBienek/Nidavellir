@@ -120,6 +120,129 @@ class ActivityAgent(CLIAgent):
         yield {"type": "tool_end", "id": "tool-1", "status": "success", "summary": "ok"}
 
 
+class SteeringStore:
+    def __init__(self) -> None:
+        self.queued: list[tuple[str, str]] = []
+
+    def queue_steering_comment(self, conversation_id: str, content: str) -> list[str]:
+        self.queued.append((conversation_id, content))
+        return [item for _, item in self.queued]
+
+
+class LiveSteeringAgent:
+    def __init__(self, accepted: bool = True, raises: bool = False) -> None:
+        self.accepted = accepted
+        self.raises = raises
+        self.notes: list[str] = []
+
+    async def steer(self, text: str) -> bool:
+        self.notes.append(text)
+        if self.raises:
+            raise RuntimeError("transport rejected steering")
+        return self.accepted
+
+
+@pytest.mark.asyncio
+async def test_apply_steering_sends_live_when_provider_transport_supports_it(monkeypatch):
+    agent = LiveSteeringAgent(accepted=True)
+    record = ws_router.TurnRecord("turn-live", "conv-live")
+    record.live_agent = agent
+    app = SimpleNamespace(state=SimpleNamespace())
+    ws = FakeWS()
+    store = SteeringStore()
+    monkeypatch.setattr(
+        ws_router._agent_registry,
+        "PROVIDER_REGISTRY",
+        {
+            "test": SimpleNamespace(
+                supports_live_steering=True,
+            )
+        },
+    )
+
+    status = await ws_router._apply_steering(
+        ws=ws,
+        app=app,
+        store=store,
+        provider_id="test",
+        record=record,
+        content="Please keep the review pane open.",
+    )
+
+    assert status == "accepted"
+    assert agent.notes == ["Please keep the review pane open."]
+    assert store.queued == []
+    assert record.steering_comments == ["Please keep the review pane open."]
+    assert record.frames == [
+        {
+            "type": "activity",
+            "event": {"type": "steering_signal", "content": "Please keep the review pane open."},
+            "turn_id": "turn-live",
+        }
+    ]
+    assert ws.sent == [
+        {"type": "steer_ack", "status": "accepted", "turn_id": "turn-live"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_steering_queues_when_live_transport_declines(monkeypatch):
+    agent = LiveSteeringAgent(accepted=False)
+    record = ws_router.TurnRecord("turn-queued", "conv-queued")
+    record.live_agent = agent
+    app = SimpleNamespace(state=SimpleNamespace())
+    ws = FakeWS()
+    store = SteeringStore()
+    monkeypatch.setattr(
+        ws_router._agent_registry,
+        "PROVIDER_REGISTRY",
+        {
+            "test": SimpleNamespace(
+                supports_live_steering=True,
+            )
+        },
+    )
+
+    status = await ws_router._apply_steering(
+        ws=ws,
+        app=app,
+        store=store,
+        provider_id="test",
+        record=record,
+        content="Use a smaller diff.",
+    )
+
+    assert status == "queued"
+    assert agent.notes == ["Use a smaller diff."]
+    assert store.queued == [("conv-queued", "Use a smaller diff.")]
+    assert ws.sent == [
+        {"type": "steer_ack", "status": "queued", "turn_id": "turn-queued"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_steering_reports_gone_without_active_running_turn():
+    app = SimpleNamespace(state=SimpleNamespace())
+    ws = FakeWS()
+    store = SteeringStore()
+
+    status = await ws_router._apply_steering(
+        ws=ws,
+        app=app,
+        store=store,
+        provider_id="test",
+        record=None,
+        content="Too late.",
+        turn_id="turn-missing",
+    )
+
+    assert status == "gone"
+    assert store.queued == []
+    assert ws.sent == [
+        {"type": "steer_ack", "status": "gone", "turn_id": "turn-missing"}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_handle_message_cancellation_kills_agent_and_emits_cancelled(monkeypatch, tmp_path):
     agent = HangingAgent(slot_id=0, workdir=tmp_path)

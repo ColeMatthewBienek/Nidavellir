@@ -143,6 +143,36 @@ describe("appendStreamEvents", () => {
       { type: "answer_delta", content: "That string is coming from an external library." },
     ]);
   });
+
+  it("collapses duplicated answer sections inside a single provider snapshot", () => {
+    useAgentStore.getState().addMessage("agent", "");
+
+    const section = [
+      "Here's my honest assessment:",
+      "Memory Implementation Review",
+      "Overall: Solid foundation, a few gaps worth addressing.",
+      "",
+      "Priority fixes",
+      "| Priority | Action |",
+      "|---|---|",
+      "| High | Update project_overview.md |",
+    ].join("\n");
+
+    useAgentStore.getState().appendStreamEvents([
+      {
+        type: "answer_delta",
+        content: `Let me read the memory index.\n${section}\n${section}`,
+      },
+    ]);
+
+    const msg = useAgentStore.getState().messages[0];
+    const content = msg.events
+      .filter((event) => event.type === "answer_delta")
+      .map((event) => event.content)
+      .join("");
+    expect(content.match(/Memory Implementation Review/g)).toHaveLength(1);
+    expect(content.match(/\| Priority \| Action \|/g)).toHaveLength(1);
+  });
 });
 
 describe("finalizeLastAgentMessage", () => {

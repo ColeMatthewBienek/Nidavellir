@@ -8,6 +8,7 @@ import { AgentSelector } from '../components/chat/AgentSelector';
 import { useAgentStore } from '../store/agentStore';
 import { sendCancel, sendMessage, sendRedirectSteer, sendSteer } from '../lib/agentSocket';
 import type { ProviderInfo } from '../lib/types';
+import { buildCompletionReport } from '../lib/completionReport';
 
 type PendingAttachmentKind = 'text' | 'image' | 'unsupported';
 type PendingAttachment = {
@@ -96,16 +97,19 @@ function parseSkillCommand(value: string): { isSkill: boolean; slug: string | nu
 function steeringCapabilities(providers: ProviderInfo[], selectedModel: string) {
   const providerId = selectedModel.split(':')[0] || 'claude';
   const provider = providers.find((item) => item.id === providerId);
+  const supportsLive = provider?.supports_live_steering ?? false;
   return {
+    supportsLive,
     supportsQueued: provider?.supports_queued_steering ?? true,
     supportsRedirect: provider?.supports_redirect_steering ?? true,
-    label: provider?.steering_label || (provider?.supports_live_steering ? 'Steer' : 'Queue note'),
+    label: provider?.steering_label || (supportsLive ? 'Steer' : 'Queue note'),
   };
 }
 
 export function ChatScreen() {
   const addMessage    = useAgentStore((s) => s.addMessage);
   const clearMessages = useAgentStore((s) => s.clearMessages);
+  const messages      = useAgentStore((s) => s.messages);
   const isStreaming   = useAgentStore((s) => s.isStreaming);
   const conversations = useAgentStore((s) => s.conversations);
   const activeConversationId = useAgentStore((s) => s.activeConversationId);
@@ -169,11 +173,18 @@ export function ChatScreen() {
   ], [slashSkills]);
   const slashMatch    = input.match(/^(\/\S*)$/);
   const slashQuery    = slashMatch ? slashMatch[1].toLowerCase() : null;
-  const showSlash     = !!slashQuery;
+  const showSlash     = !isStreaming && !!slashQuery;
   const slashFiltered = showSlash ? slashCommands.filter((c) => c.cmd.startsWith(slashQuery!)) : [];
   const cwdCommand = parseCwdCommand(input);
   const skillCommand = parseSkillCommand(input);
   const steering = steeringCapabilities(providers, selectedModel);
+  const latestReport = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const report = buildCompletionReport(messages[index]);
+      if (report?.changedFiles.length) return report;
+    }
+    return null;
+  }, [messages]);
   const slashMenuActive = showSlash && slashFiltered.length > 0;
   const hasValidAttachments = pendingAttachments.some((file) => file.kind !== 'unsupported');
   const canSubmit = isStreaming
@@ -199,8 +210,20 @@ export function ChatScreen() {
       window.dispatchEvent(new CustomEvent('nid:navigate', { detail: 'chat' }));
       requestAnimationFrame(() => inputRef.current?.focus());
     };
+    const openReview = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      setCtxOpen(true);
+      if (detail?.path) {
+        window.dispatchEvent(new CustomEvent('nid:code-ref-open', { detail }));
+      }
+      window.dispatchEvent(new CustomEvent('nid:workspace-tab', { detail: 'review' }));
+    };
     window.addEventListener('nid:invoke-skill', invokeSkill);
-    return () => window.removeEventListener('nid:invoke-skill', invokeSkill);
+    window.addEventListener('nid:open-review', openReview);
+    return () => {
+      window.removeEventListener('nid:invoke-skill', invokeSkill);
+      window.removeEventListener('nid:open-review', openReview);
+    };
   }, []);
 
   const resizeInput = (value: string) => {
@@ -692,6 +715,51 @@ export function ChatScreen() {
         {/* Input */}
         <div style={{ padding: '14px 20px', borderTop: '1px solid var(--bd)', background: 'var(--bg1)', flexShrink: 0 }}>
           <div style={{ position: 'relative', width: 'min(920px, 100%)', margin: '0 auto' }}>
+            {latestReport && (
+              <div
+                data-testid="review-changes-strip"
+                style={{
+                  width: 'min(440px, calc(100% - 40px))',
+                  margin: '0 0 -1px 0',
+                  border: '1px solid var(--bd)',
+                  borderBottom: 'none',
+                  borderRadius: '8px 8px 0 0',
+                  background: '#30363d66',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  padding: '7px 12px',
+                  fontSize: 12,
+                  color: 'var(--t0)',
+                }}
+              >
+                <span style={{ color: 'var(--t1)' }}>
+                  {latestReport.changedFiles.length} {latestReport.changedFiles.length === 1 ? 'file' : 'files'} changed{' '}
+                  <span style={{ color: 'var(--grn)', fontFamily: 'var(--mono)' }}>+{latestReport.totalAdditions}</span>{' '}
+                  <span style={{ color: 'var(--red)', fontFamily: 'var(--mono)' }}>-{latestReport.totalDeletions}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCtxOpen(true);
+                    window.dispatchEvent(new CustomEvent('nid:workspace-tab', { detail: 'review' }));
+                  }}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'var(--t0)',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    padding: 0,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Review changes ↗
+                </button>
+              </div>
+            )}
             {showSlash && slashFiltered.length > 0 && (
               <SlashMenu
                 query={slashQuery!}
@@ -824,6 +892,11 @@ export function ChatScreen() {
             <span>↵ send</span>
             <span>shift+↵ newline</span>
             <span style={{ color: showSlash ? 'var(--blu)' : '#8b949e77' }}>/ commands</span>
+            {isStreaming && (
+              <span style={{ color: steering.supportsLive ? 'var(--grn)' : '#8b949e99' }}>
+                {steering.supportsLive ? 'live steering' : 'queued steering'}
+              </span>
+            )}
           </div>
         </div>
       </div>

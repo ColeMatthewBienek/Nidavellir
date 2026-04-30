@@ -86,6 +86,59 @@ async def _attach_turn_subscriber(record: TurnRecord, ws: WebSocket) -> None:
         await ws.send_json(frame)
 
 
+async def _apply_steering(
+    *,
+    ws: WebSocket,
+    app: Any,
+    store: Any,
+    provider_id: str,
+    record: TurnRecord | None,
+    content: str,
+    turn_id: str | None = None,
+) -> str:
+    """Apply a mid-turn steering note through the best available transport.
+
+    Interactive providers may accept the note live through CLIAgent.steer().
+    One-shot providers persist the note so the next turn prompt can include it.
+    """
+    if not record or record.status != "running":
+        await ws.send_json({
+            "type": "steer_ack",
+            "status": "gone",
+            "turn_id": turn_id,
+        })
+        return "gone"
+
+    record.steering_comments.append(content)
+    manifest = _agent_registry.PROVIDER_REGISTRY.get(provider_id)
+    live_sent = False
+    if manifest and manifest.supports_live_steering and record.live_agent is not None:
+        try:
+            live_sent = bool(await record.live_agent.steer(content))
+        except Exception:
+            _log.exception("live_steering_failed", extra={
+                "provider": provider_id,
+                "turn_id": record.turn_id,
+                "conversation_id": record.conversation_id,
+            })
+            live_sent = False
+
+    if not live_sent and store is not None and record.conversation_id and hasattr(store, "queue_steering_comment"):
+        store.queue_steering_comment(record.conversation_id, content)
+
+    await TurnBroadcaster(app, record).send_json({
+        "type": "activity",
+        "event": {"type": "steering_signal", "content": content},
+    })
+    status = "accepted" if live_sent else "queued"
+    await ws.send_json({
+        "type": "steer_ack",
+        "status": status,
+        "turn_id": record.turn_id,
+    })
+    return status
+
+
 async def _retire_turn_later(app: Any, turn_id: str, delay_seconds: int = 300) -> None:
     await asyncio.sleep(delay_seconds)
     _turn_registry(app).pop(turn_id, None)
@@ -1253,32 +1306,15 @@ async def chat_websocket(ws: WebSocket) -> None:
                     continue
                 turn_id = data.get("turn_id") or current_turn_id
                 record = _turn_registry(ws.app).get(turn_id) if turn_id else None
-                if not record or record.status != "running":
-                    await ws.send_json({
-                        "type": "steer_ack",
-                        "status": "gone",
-                        "turn_id": turn_id,
-                    })
-                    continue
-                record.steering_comments.append(content)
-                manifest = _agent_registry.PROVIDER_REGISTRY.get(provider_id)
-                live_sent = False
-                if manifest and manifest.supports_live_steering and record.live_agent is not None:
-                    try:
-                        live_sent = bool(await record.live_agent.steer(content))
-                    except Exception:
-                        live_sent = False
-                if not live_sent and store is not None and record.conversation_id and hasattr(store, "queue_steering_comment"):
-                    store.queue_steering_comment(record.conversation_id, content)
-                await TurnBroadcaster(ws.app, record).send_json({
-                    "type": "activity",
-                    "event": {"type": "steering_signal", "content": content},
-                })
-                await ws.send_json({
-                    "type": "steer_ack",
-                    "status": "accepted" if live_sent else "queued",
-                    "turn_id": record.turn_id,
-                })
+                await _apply_steering(
+                    ws=ws,
+                    app=ws.app,
+                    store=store,
+                    provider_id=provider_id,
+                    record=record,
+                    content=content,
+                    turn_id=turn_id,
+                )
 
             elif msg_type == "redirect":
                 content = (data.get("content") or "").strip()
