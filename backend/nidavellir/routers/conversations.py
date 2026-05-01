@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
@@ -107,6 +108,50 @@ def _file_item(row: dict) -> dict:
     }
 
 
+def _conversation_audit_bundle(conversation_id: str, request: Request) -> dict:
+    store = _store(request)
+    conv = store.get_conversation(conversation_id)
+    if not conv or conv.get("archived"):
+        raise HTTPException(404, "conversation_not_found")
+
+    command_store = getattr(request.app.state, "command_store", None)
+    permission_audit_store = getattr(request.app.state, "permission_audit_store", None)
+    session_id = conv.get("active_session_id") or conversation_id
+
+    return {
+        "schema_version": "conversation_audit_bundle.v1",
+        "exported_at": datetime.now(UTC).isoformat(),
+        "conversation": {
+            "id": conv["id"],
+            "title": conv.get("title") or "New Conversation",
+            "workflow": conv.get("workflow"),
+            "status": conv.get("status"),
+            "parent_id": conv.get("parent_id"),
+            "continuity_mode": conv.get("continuity_mode"),
+            "active_session_id": session_id,
+            "active_provider": conv.get("active_provider") or conv.get("provider_id"),
+            "active_model": conv.get("active_model") or conv.get("model_id"),
+            "working_directory": conv.get("working_directory") or effective_default_working_directory(),
+            "working_directory_display": conv.get("working_directory_display") or conv.get("working_directory"),
+            "created_at": conv.get("created_at"),
+            "updated_at": conv.get("updated_at"),
+        },
+        "messages": [_message(row) for row in store.get_conversation_messages(conversation_id)],
+        "working_set_files": [_file_item(row) for row in store.list_conversation_files(conversation_id, active_only=False)],
+        "command_runs": command_store.list_runs(conversation_id=conversation_id, limit=500) if command_store else [],
+        "permission_audit_events": (
+            permission_audit_store.list_events(limit=500, conversation_id=conversation_id)
+            if permission_audit_store else []
+        ),
+        "memory_activity": store.export_activity_events(
+            hours=0,
+            workflow=conv.get("workflow") or "chat",
+            session_id=session_id,
+            include_snapshots=True,
+        ),
+    }
+
+
 @router.get("")
 def list_conversations(request: Request):
     return [_list_item(row) for row in _store(request).list_conversation_summaries()]
@@ -156,6 +201,18 @@ def get_conversation(conversation_id: str, request: Request):
         "messages": [_message(row) for row in store.get_conversation_messages(conversation_id)],
         "selectedFiles": [],
     }
+
+
+@router.get("/{conversation_id}/audit-bundle")
+def export_conversation_audit_bundle(conversation_id: str, request: Request):
+    bundle = _conversation_audit_bundle(conversation_id, request)
+    payload = json.dumps(bundle, indent=2, sort_keys=True)
+    filename = f"nidavellir-conversation-{conversation_id}-audit.json"
+    return Response(
+        payload,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{conversation_id}/workspace")

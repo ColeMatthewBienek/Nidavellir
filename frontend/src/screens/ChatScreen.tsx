@@ -83,6 +83,10 @@ function parseCwdCommand(value: string): { isCwd: boolean; path: string | null }
   return { isCwd: true, path: raw };
 }
 
+function exportConversationAuditBundle(conversationId: string) {
+  window.location.href = `http://localhost:7430/api/conversations/${conversationId}/audit-bundle`;
+}
+
 function parseSkillCommand(value: string): { isSkill: boolean; slug: string | null; prompt: string | null } {
   const trimmed = value.trim();
   if (!trimmed.startsWith('/skill')) return { isSkill: false, slug: null, prompt: null };
@@ -555,6 +559,16 @@ export function ChatScreen() {
                   style={menuItemStyle}
                 >
                   {conversation.pinned ? 'Unpin Conversation' : 'Pin Conversation'}
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenuId(null);
+                    exportConversationAuditBundle(conversation.id);
+                  }}
+                  style={menuItemStyle}
+                >
+                  Export Audit Bundle
                 </button>
                 <button
                   role="menuitem"

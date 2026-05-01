@@ -84,12 +84,20 @@ class PermissionAuditStore:
             )
         return event_id
 
-    def list_events(self, limit: int = 100) -> list[dict]:
+    def list_events(self, limit: int = 100, conversation_id: str | None = None) -> list[dict]:
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM permission_audit_events ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if conversation_id:
+                rows = conn.execute(
+                    """SELECT * FROM permission_audit_events
+                       WHERE conversation_id = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (conversation_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM permission_audit_events ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
         events = []
         for row in rows:
             item = dict(row)
