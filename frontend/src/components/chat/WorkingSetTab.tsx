@@ -20,11 +20,17 @@ export function WorkingSetTab() {
   const contextUsage = useAgentStore((s) => s.contextUsage);
   const files = useAgentStore((s) => s.workingSetFiles);
   const refreshWorkingSetFiles = useAgentStore((s) => s.refreshWorkingSetFiles);
+  const refreshContextUsage = useAgentStore((s) => s.refreshContextUsage);
   const removeWorkingSetFile = useAgentStore((s) => s.removeWorkingSetFile);
+  const resourceRevision = useAgentStore((s) => s.resourceRevision);
 
   useEffect(() => {
     refreshWorkingSetFiles().catch(() => {});
   }, [refreshWorkingSetFiles]);
+
+  useEffect(() => {
+    refreshContextUsage().catch(() => {});
+  }, [refreshContextUsage, resourceRevision]);
 
   const model = contextUsage?.model ?? 'Claude Sonnet';
   const currentTokens = contextUsage?.currentTokens ?? 12847;

@@ -5,7 +5,7 @@ import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionR
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
-type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'git';
+type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'git';
 type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
 interface RightSidebarProps {
@@ -17,6 +17,7 @@ const TABS: Array<{ id: RightSidebarTab; label: string }> = [
   { id: 'summary', label: 'Summary' },
   { id: 'review', label: 'Review' },
   { id: 'instructions', label: 'Instructions' },
+  { id: 'commands', label: 'Commands' },
   { id: 'git', label: 'Git' },
 ];
 
@@ -101,6 +102,21 @@ interface PermissionEvaluationResult {
   outside_workspace: boolean;
   matched_rule?: string | null;
   requires_user_choice: boolean;
+}
+
+interface CommandRun {
+  id: string;
+  conversation_id?: string | null;
+  command: string;
+  cwd: string;
+  exit_code?: number | null;
+  stdout: string;
+  stderr: string;
+  timed_out: boolean;
+  include_in_chat: boolean;
+  added_to_working_set: boolean;
+  duration_ms: number;
+  created_at: string;
 }
 
 interface CommentDraft {
@@ -1272,6 +1288,8 @@ function PermissionGate({
 function ProjectInstructionsTab() {
   const workingDirectory = useAgentStore((state) => state.workingDirectory);
   const selectedProvider = useAgentStore((state) => state.selectedProvider);
+  const resourceRevision = useAgentStore((state) => state.resourceRevision);
+  const markResourcesChanged = useAgentStore((state) => state.markResourcesChanged);
   const [data, setData] = useState<ProjectInstructionResponse | null>(null);
   const [selectedName, setSelectedName] = useState<string>('NIDAVELLIR.md');
   const [draft, setDraft] = useState('');
@@ -1311,7 +1329,7 @@ function ProjectInstructionsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workingDirectory, selectedProvider]);
+  }, [workingDirectory, selectedProvider, resourceRevision]);
 
   useEffect(() => {
     if (selectedFile) setDraft(selectedFile.content);
@@ -1345,6 +1363,7 @@ function ProjectInstructionsTab() {
         setData(body);
         const current = body.editableFiles.find((file) => file.name === selectedFile.name);
         if (current) setDraft(current.content);
+        markResourcesChanged('Project instructions reloaded');
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'project_instruction_save_failed'))
       .finally(() => setSaving(false));
@@ -1555,6 +1574,225 @@ function ProjectInstructionsTab() {
   );
 }
 
+function CommandRunCard({ run }: { run: CommandRun }) {
+  const [open, setOpen] = useState(false);
+  const ok = run.exit_code === 0 && !run.timed_out;
+  const output = [run.stdout, run.stderr].filter(Boolean).join(run.stdout && run.stderr ? '\n' : '');
+  return (
+    <div style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', overflow: 'hidden' }}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        style={{
+          width: '100%',
+          border: 'none',
+          background: 'transparent',
+          color: 'var(--t0)',
+          cursor: 'pointer',
+          padding: '8px 10px',
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) auto',
+          gap: 8,
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ minWidth: 0 }}>
+          <span style={{ display: 'block', fontFamily: 'var(--mono)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {run.command}
+          </span>
+          <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 3 }}>
+            {run.duration_ms}ms · {run.cwd}
+          </span>
+        </span>
+        <span style={{ color: ok ? 'var(--grn)' : 'var(--red)', fontSize: 11, alignSelf: 'center' }}>
+          {run.timed_out ? 'Timed out' : `Exit ${run.exit_code ?? '-'}`}
+        </span>
+      </button>
+      {open && (
+        <pre style={{
+          margin: 0,
+          maxHeight: 240,
+          overflow: 'auto',
+          borderTop: '1px solid #30363d55',
+          background: '#0d1117',
+          color: 'var(--t1)',
+          padding: 10,
+          fontFamily: 'var(--mono)',
+          fontSize: 11,
+          lineHeight: 1.45,
+          whiteSpace: 'pre-wrap',
+        }}>{output || '(no output)'}</pre>
+      )}
+    </div>
+  );
+}
+
+function CommandsTab() {
+  const workingDirectory = useAgentStore((state) => state.workingDirectory);
+  const activeConversationId = useAgentStore((state) => state.activeConversationId);
+  const markResourcesChanged = useAgentStore((state) => state.markResourcesChanged);
+  const [command, setCommand] = useState('');
+  const [runs, setRuns] = useState<CommandRun[]>([]);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingPermission, setPendingPermission] = useState<PermissionEvaluationResult | null>(null);
+  const [pendingCommand, setPendingCommand] = useState<string | null>(null);
+
+  const loadRuns = () => {
+    const params = new URLSearchParams();
+    if (activeConversationId) params.set('conversationId', activeConversationId);
+    fetch(`http://localhost:7430/api/commands/runs?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`commands_history_${response.status}`);
+        return response.json() as Promise<CommandRun[]>;
+      })
+      .then(setRuns)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadRuns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
+
+  const runCommand = (permissionOverride?: 'allow_once') => {
+    if (!workingDirectory) {
+      setError('working_directory_required');
+      return;
+    }
+    const commandToRun = (pendingCommand ?? command).trim();
+    if (!commandToRun) {
+      setError('command_required');
+      return;
+    }
+    setRunning(true);
+    setError(null);
+    if (!permissionOverride) setPendingPermission(null);
+    fetch('http://localhost:7430/api/commands/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        command: commandToRun,
+        cwd: workingDirectory,
+        conversationId: activeConversationId,
+        permissionOverride,
+      }),
+    })
+      .then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = body?.detail;
+          if (detail?.code === 'permission_required' && detail.permission) {
+            setPendingPermission(detail.permission as PermissionEvaluationResult);
+            setPendingCommand(commandToRun);
+            return null;
+          }
+          throw new Error(typeof detail === 'string' ? detail : detail?.code ?? `command_run_${response.status}`);
+        }
+        return body as CommandRun;
+      })
+      .then((run) => {
+        if (!run) return;
+        setPendingPermission(null);
+        setPendingCommand(null);
+        setRuns((items) => [run, ...items.filter((item) => item.id !== run.id)]);
+        setCommand('');
+        markResourcesChanged('Command run captured');
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'command_run_failed'))
+      .finally(() => setRunning(false));
+  };
+
+  if (!workingDirectory) {
+    return (
+      <EmptySidebarTab
+        title="Commands"
+        description="Set a working directory to run commands for this conversation."
+      />
+    );
+  }
+
+  return (
+    <div style={{
+      flex: 1,
+      overflowY: 'auto',
+      padding: 14,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <SidebarSectionTitle>Run Command</SidebarSectionTitle>
+      <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {workingDirectory}
+      </div>
+      <textarea
+        aria-label="Command"
+        placeholder="npm test"
+        value={command}
+        onChange={(event) => setCommand(event.target.value)}
+        spellCheck={false}
+        style={{
+          width: '100%',
+          minHeight: 76,
+          resize: 'vertical',
+          border: '1px solid var(--bd)',
+          borderRadius: 7,
+          background: 'var(--bg0)',
+          color: 'var(--t0)',
+          padding: 10,
+          fontFamily: 'var(--mono)',
+          fontSize: 12,
+          lineHeight: 1.45,
+          outline: 'none',
+        }}
+      />
+
+      {pendingPermission && (
+        <PermissionGate
+          permission={pendingPermission}
+          busy={running}
+          onDeny={() => {
+            setPendingPermission(null);
+            setPendingCommand(null);
+          }}
+          onAllowOnce={() => runCommand('allow_once')}
+        />
+      )}
+
+      {error && <div style={{ color: 'var(--red)', fontSize: 12 }}>{error}</div>}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button
+          type="button"
+          onClick={() => runCommand()}
+          disabled={running || !command.trim()}
+          style={{
+            border: '1px solid var(--bd)',
+            borderRadius: 6,
+            background: command.trim() ? '#23863633' : 'transparent',
+            color: command.trim() ? 'var(--t0)' : 'var(--t1)',
+            cursor: running || !command.trim() ? 'not-allowed' : 'pointer',
+            padding: '6px 11px',
+            fontSize: 12,
+            fontWeight: 650,
+          }}
+        >
+          {running ? 'Running...' : 'Run'}
+        </button>
+      </div>
+
+      <SidebarSectionTitle>Recent Runs</SidebarSectionTitle>
+      {runs.length === 0 ? (
+        <div style={{ color: 'var(--t1)', fontSize: 12 }}>No command runs yet.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {runs.slice(0, 10).map((run) => <CommandRunCard key={run.id} run={run} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RightSidebar({ onClose }: RightSidebarProps) {
   const [activeTab, setActiveTab] = useState<RightSidebarTab>('working-set');
   const [reviewScope, setReviewScope] = useState<ReviewScope>('last-turn');
@@ -1642,7 +1880,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
         aria-label="Right sidebar sections"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+          gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
           gap: 4,
           padding: 8,
           borderBottom: '1px solid var(--bd)',
@@ -1691,6 +1929,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
         />
       )}
       {activeTab === 'instructions' && <ProjectInstructionsTab />}
+      {activeTab === 'commands' && <CommandsTab />}
       {activeTab === 'git' && <GitTab selectedPath={selectedReviewRef?.path} onReviewFile={(path) => {
         setSelectedReviewRef({ kind: 'code', path, label: path });
         setReviewScope('unstaged');

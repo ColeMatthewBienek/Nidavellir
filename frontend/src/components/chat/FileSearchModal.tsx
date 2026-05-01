@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAgentStore } from '@/store/agentStore';
 
-export interface FilePreviewItem {
+interface FilePreviewItem {
   path: string;
   fileName: string;
   fileKind: 'text' | 'image' | 'unsupported';

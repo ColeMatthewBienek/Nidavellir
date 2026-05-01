@@ -87,6 +87,7 @@ export class ClaudeStreamParser implements ProviderStreamParser {
     return events;
   }
 
+  // fallow-ignore-next-line unused-class-member
   reset(): void {
     this._buffer = "";
     this._toolSeq = 0;

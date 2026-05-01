@@ -10,7 +10,7 @@ export interface ProviderTheme {
   shortName:    string;
 }
 
-export const PROVIDER_THEME: Record<string, ProviderTheme> = {
+const PROVIDER_THEME: Record<string, ProviderTheme> = {
   claude: {
     color:       "#d97706",
     colorClass:  "text-amber-500",

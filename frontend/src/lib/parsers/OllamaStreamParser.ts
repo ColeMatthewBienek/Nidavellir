@@ -74,6 +74,7 @@ export class OllamaStreamParser implements ProviderStreamParser {
     return events;
   }
 
+  // fallow-ignore-next-line unused-class-member
   reset(): void {
     this._buffer      = "";
     this._inThink     = false;

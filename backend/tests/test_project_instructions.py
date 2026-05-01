@@ -173,7 +173,7 @@ async def test_project_instruction_write_supports_allow_once_permission_override
                 requires_user_choice=True,
             )
 
-    app.state.permission_evaluator = AskingEvaluator()
+    monkeypatch.setattr(app.state, "permission_evaluator", AskingEvaluator())
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         blocked = await c.put("/api/project-instructions", json={
@@ -197,3 +197,34 @@ async def test_project_instruction_write_supports_allow_once_permission_override
         decisions = [event["decision"] for event in audit.json()]
         assert "allow_once" in decisions
         assert "ask" in decisions
+
+
+@pytest.mark.asyncio
+async def test_context_usage_counts_active_project_instructions(tmp_path: Path):
+    _setup_app(tmp_path)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    instruction_text = "Use this project instruction context. " * 20
+    (workspace / "CLAUDE.md").write_text(instruction_text, encoding="utf-8")
+    app.state.memory_store.create_conversation(
+        "conv-instructions",
+        model_id="claude-sonnet-4-6",
+        provider_id="anthropic",
+        working_directory=str(workspace),
+        working_directory_display=str(workspace),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        usage = await c.get(
+            "/api/context/usage",
+            params={
+                "conversation_id": "conv-instructions",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+            },
+        )
+
+    assert usage.status_code == 200
+    body = usage.json()
+    assert body["projectInstructionTokens"] > 0
+    assert body["currentTokens"] >= body["projectInstructionTokens"]
