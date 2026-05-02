@@ -396,6 +396,60 @@ describe("chunk handling — raw storage", () => {
     expect(useAgentStore.getState().isStreaming).toBe(false);
   });
 
+  it("routes resource events into resource reload state", () => {
+    const ws = setupOpenSocket();
+    const refreshWorkingSetFiles = vi.fn().mockResolvedValue(undefined);
+    const resourceEvents: unknown[] = [];
+    window.addEventListener("nid:resource-event", (event) => {
+      resourceEvents.push((event as CustomEvent).detail);
+    });
+    useAgentStore.setState({
+      activeConversationId: "conv-resource",
+      conversationId: "conv-resource",
+      resourceRevision: 0,
+      toastMessage: "",
+      refreshWorkingSetFiles,
+    });
+
+    ws.simulateMessage({
+      type: "resource_event",
+      event: {
+        kind: "working_set",
+        action: "files_added",
+        conversation_id: "conv-resource",
+        message: "Working set updated",
+      },
+    });
+
+    expect(resourceEvents).toHaveLength(1);
+    expect(useAgentStore.getState().resourceRevision).toBe(1);
+    expect(useAgentStore.getState().toastMessage).toBe("Working set updated");
+    expect(refreshWorkingSetFiles).toHaveBeenCalledOnce();
+  });
+
+  it("ignores resource reload state from another active conversation", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({
+      activeConversationId: "conv-active",
+      conversationId: "conv-active",
+      resourceRevision: 0,
+      toastMessage: "",
+    });
+
+    ws.simulateMessage({
+      type: "resource_event",
+      event: {
+        kind: "working_set",
+        action: "files_added",
+        conversation_id: "conv-other",
+        message: "Working set updated",
+      },
+    });
+
+    expect(useAgentStore.getState().resourceRevision).toBe(0);
+    expect(useAgentStore.getState().toastMessage).toBe("");
+  });
+
   it("flushes parser events when the response finishes", () => {
     useAgentStore.setState({ selectedProvider: "claude", selectedModel: "claude:claude-sonnet-4-6" });
     const ws = setupOpenSocket();

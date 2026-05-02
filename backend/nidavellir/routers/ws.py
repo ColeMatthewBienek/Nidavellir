@@ -17,6 +17,7 @@ from nidavellir.memory.injector import get_context_prefix
 from nidavellir.prompt.assembly import assemble_prompt
 from nidavellir.prompt.models import PromptAssemblyResult, PromptSection
 from nidavellir.project_instructions.discovery import discover_project_instructions
+from nidavellir.resources.events import subscribe_resource_events, unsubscribe_resource_events
 from nidavellir.sessions.handoff import build_seed, mode_uses_prior_context, normalize_handoff_mode
 from nidavellir.sessions.snapshot import create_snapshot
 from nidavellir.skills.activation import activate_skills
@@ -1097,6 +1098,7 @@ async def handle_message_with_identity(
 async def chat_websocket(ws: WebSocket) -> None:
     await ws.accept()
     subscribe_command_events(ws.app, ws)
+    subscribe_resource_events(ws.app, ws)
 
     provider_id:     str       = DEFAULT_PROVIDER
     model_id:        str       = DEFAULT_MODEL
@@ -1413,3 +1415,4 @@ async def chat_websocket(ws: WebSocket) -> None:
         pass
     finally:
         unsubscribe_command_events(ws.app, ws)
+        unsubscribe_resource_events(ws.app, ws)

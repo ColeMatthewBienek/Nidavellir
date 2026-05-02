@@ -227,6 +227,18 @@ describe('ContextPanel — Token Usage section', () => {
     window.removeEventListener('nid:audit-export-open', listener);
   });
 
+  it('manually reloads workspace resources from the sidebar header', () => {
+    const refreshWorkingSetFiles = vi.fn().mockResolvedValue(undefined);
+    useAgentStore.setState({ resourceRevision: 0, refreshWorkingSetFiles });
+    render(<ContextPanel onClose={() => {}} />);
+    refreshWorkingSetFiles.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reload workspace resources' }));
+
+    expect(useAgentStore.getState().resourceRevision).toBeGreaterThan(0);
+    expect(refreshWorkingSetFiles).toHaveBeenCalledOnce();
+  });
+
   it('shows Summary and Review placeholders without losing Working Set state', () => {
     render(<ContextPanel onClose={() => {}} />);
 
@@ -263,7 +275,7 @@ describe('ContextPanel — Token Usage section', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
 
     expect(screen.queryByRole('textbox', { name: 'Edit NIDAVELLIR.md' })).toBeNull();
-    expect(screen.getByRole('heading', { name: 'Runtime Rules' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Runtime Rules' })).toBeTruthy();
     expect(screen.getByText('Keep provider files global.')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('tab', { name: 'Edit Markdown' }));
