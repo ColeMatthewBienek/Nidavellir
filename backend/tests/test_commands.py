@@ -47,6 +47,26 @@ async def test_command_runner_captures_stdout_and_history(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_command_runner_streams_start_output_and_finish_events(tmp_path: Path):
+    events = []
+
+    async def collect(event: dict):
+        events.append(event)
+
+    result = await CommandRunner().run(
+        command="printf streamed",
+        cwd=str(tmp_path),
+        on_event=collect,
+    )
+
+    assert result["stdout"] == "streamed"
+    assert events[0]["type"] == "started"
+    assert {"type": "output", "stream": "stdout", "content": "streamed"} in events
+    assert events[-1]["type"] == "finished"
+    assert events[-1]["exit_code"] == 0
+
+
+@pytest.mark.asyncio
 async def test_command_runner_captures_stderr_and_nonzero_exit(tmp_path: Path):
     setup_app(tmp_path)
 

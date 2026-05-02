@@ -12,6 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 import nidavellir.agents.registry as _agent_registry
 from nidavellir.agents.events import frontend_event
+from nidavellir.commands.events import subscribe_command_events, unsubscribe_command_events
 from nidavellir.memory.injector import get_context_prefix
 from nidavellir.prompt.assembly import assemble_prompt
 from nidavellir.prompt.models import PromptAssemblyResult, PromptSection
@@ -1049,6 +1050,7 @@ async def handle_message_with_identity(
 @router.websocket("/api/ws")
 async def chat_websocket(ws: WebSocket) -> None:
     await ws.accept()
+    subscribe_command_events(ws.app, ws)
 
     provider_id:     str       = DEFAULT_PROVIDER
     model_id:        str       = DEFAULT_MODEL
@@ -1363,3 +1365,5 @@ async def chat_websocket(ws: WebSocket) -> None:
             if record:
                 record.subscribers.discard(ws)
         pass
+    finally:
+        unsubscribe_command_events(ws.app, ws)

@@ -250,11 +250,19 @@ export function ChatScreen() {
       }
       window.dispatchEvent(new CustomEvent('nid:workspace-tab', { detail: 'review' }));
     };
+    const useCommandOutput = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string }>).detail;
+      if (!detail?.content) return;
+      setInput(detail.content);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
     window.addEventListener('nid:invoke-skill', invokeSkill);
     window.addEventListener('nid:open-review', openReview);
+    window.addEventListener('nid:command-output-to-chat', useCommandOutput);
     return () => {
       window.removeEventListener('nid:invoke-skill', invokeSkill);
       window.removeEventListener('nid:open-review', openReview);
+      window.removeEventListener('nid:command-output-to-chat', useCommandOutput);
     };
   }, []);
 

@@ -122,6 +122,19 @@ interface CommandRun {
   created_at: string;
 }
 
+interface CommandRunEvent {
+  type: 'started' | 'output' | 'finished';
+  run_id: string;
+  conversation_id?: string | null;
+  command: string;
+  cwd: string;
+  stream?: 'stdout' | 'stderr';
+  content?: string;
+  exit_code?: number | null;
+  timed_out?: boolean;
+  duration_ms?: number;
+}
+
 interface CommentDraft {
   path: string;
   line: number;
@@ -1642,8 +1655,19 @@ function ProjectInstructionsTab() {
 
 function CommandRunCard({ run }: { run: CommandRun }) {
   const [open, setOpen] = useState(false);
+  const running = run.exit_code === null && !run.timed_out;
   const ok = run.exit_code === 0 && !run.timed_out;
   const output = [run.stdout, run.stderr].filter(Boolean).join(run.stdout && run.stderr ? '\n' : '');
+  const sendOutputToChat = () => {
+    const content = [
+      `Use this command output from \`${run.command}\`:`,
+      '',
+      '```',
+      output || '(no output)',
+      '```',
+    ].join('\n');
+    window.dispatchEvent(new CustomEvent('nid:command-output-to-chat', { detail: { content } }));
+  };
   return (
     <div style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', overflow: 'hidden' }}>
       <button
@@ -1670,24 +1694,44 @@ function CommandRunCard({ run }: { run: CommandRun }) {
             {run.duration_ms}ms · {run.cwd}
           </span>
         </span>
-        <span style={{ color: ok ? 'var(--grn)' : 'var(--red)', fontSize: 11, alignSelf: 'center' }}>
-          {run.timed_out ? 'Timed out' : `Exit ${run.exit_code ?? '-'}`}
+        <span style={{ color: running ? 'var(--blu)' : ok ? 'var(--grn)' : 'var(--red)', fontSize: 11, alignSelf: 'center' }}>
+          {running ? 'Running' : run.timed_out ? 'Timed out' : `Exit ${run.exit_code ?? '-'}`}
         </span>
       </button>
       {open && (
-        <pre style={{
-          margin: 0,
-          maxHeight: 240,
-          overflow: 'auto',
-          borderTop: '1px solid #30363d55',
-          background: '#0d1117',
-          color: 'var(--t1)',
-          padding: 10,
-          fontFamily: 'var(--mono)',
-          fontSize: 11,
-          lineHeight: 1.45,
-          whiteSpace: 'pre-wrap',
-        }}>{output || '(no output)'}</pre>
+        <>
+          <pre style={{
+            margin: 0,
+            maxHeight: 240,
+            overflow: 'auto',
+            borderTop: '1px solid #30363d55',
+            background: '#0d1117',
+            color: 'var(--t1)',
+            padding: 10,
+            fontFamily: 'var(--mono)',
+            fontSize: 11,
+            lineHeight: 1.45,
+            whiteSpace: 'pre-wrap',
+          }}>{output || '(no output)'}</pre>
+          <div style={{ borderTop: '1px solid #30363d55', padding: 8, display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              onClick={sendOutputToChat}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: 'var(--bg2)',
+                color: 'var(--t0)',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 650,
+                padding: '5px 8px',
+              }}
+            >
+              Send output to chat
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -1719,6 +1763,48 @@ function CommandsTab() {
   useEffect(() => {
     loadRuns();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    const handleCommandEvent = (event: Event) => {
+      const detail = (event as CustomEvent<CommandRunEvent>).detail;
+      if (!detail?.run_id) return;
+      if (detail.conversation_id && activeConversationId && detail.conversation_id !== activeConversationId) return;
+      if (detail.type === 'started') {
+        setRuns((items) => [
+          {
+            id: detail.run_id,
+            conversation_id: detail.conversation_id,
+            command: detail.command,
+            cwd: detail.cwd,
+            exit_code: null,
+            stdout: '',
+            stderr: '',
+            timed_out: false,
+            include_in_chat: false,
+            added_to_working_set: false,
+            duration_ms: 0,
+            created_at: new Date().toISOString(),
+          },
+          ...items.filter((item) => item.id !== detail.run_id),
+        ]);
+      } else if (detail.type === 'output') {
+        setRuns((items) => items.map((item) => {
+          if (item.id !== detail.run_id) return item;
+          if (detail.stream === 'stderr') return { ...item, stderr: item.stderr + (detail.content ?? '') };
+          return { ...item, stdout: item.stdout + (detail.content ?? '') };
+        }));
+      } else if (detail.type === 'finished') {
+        setRuns((items) => items.map((item) => item.id === detail.run_id ? {
+          ...item,
+          exit_code: detail.exit_code ?? null,
+          timed_out: Boolean(detail.timed_out),
+          duration_ms: detail.duration_ms ?? item.duration_ms,
+        } : item));
+      }
+    };
+    window.addEventListener('nid:command-event', handleCommandEvent);
+    return () => window.removeEventListener('nid:command-event', handleCommandEvent);
   }, [activeConversationId]);
 
   const runCommand = (permissionOverride?: 'allow_once') => {

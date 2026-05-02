@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from nidavellir.commands.events import broadcast_command_event
 from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
@@ -53,6 +55,7 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
     if not command:
         raise HTTPException(status_code=400, detail="command_required")
     cwd = _resolve_cwd(body.cwd)
+    run_id = str(uuid.uuid4())
     decision = evaluate_and_audit(
         request,
         PermissionEvaluationRequest(
@@ -92,8 +95,23 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
             "permission": decision.model_dump(mode="json"),
         })
 
-    result = await _runner(request).run(command=command, cwd=str(cwd), timeout_seconds=body.timeoutSeconds)
+    async def emit(event: dict) -> None:
+        await broadcast_command_event(request.app, {
+            **event,
+            "run_id": run_id,
+            "conversation_id": body.conversationId,
+            "command": command,
+            "cwd": str(cwd),
+        })
+
+    result = await _runner(request).run(
+        command=command,
+        cwd=str(cwd),
+        timeout_seconds=body.timeoutSeconds,
+        on_event=emit,
+    )
     return _store(request).create_run(
+        run_id=run_id,
         conversation_id=body.conversationId,
         command=command,
         cwd=str(cwd),

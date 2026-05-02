@@ -52,6 +52,7 @@ class CommandRunStore:
     def create_run(
         self,
         *,
+        run_id: str | None = None,
         conversation_id: str | None,
         command: str,
         cwd: str,
@@ -63,7 +64,7 @@ class CommandRunStore:
         added_to_working_set: bool,
         duration_ms: int,
     ) -> dict:
-        run_id = str(uuid.uuid4())
+        run_id = run_id or str(uuid.uuid4())
         created_at = _now()
         with self._conn() as conn:
             conn.execute(
