@@ -106,6 +106,35 @@ async def test_skills_api_list_enable_import_compile_preview_and_compatibility(t
         assert slash.status_code == 200
         assert slash.json()["showInSlash"] is True
 
+        edited = await c.patch(f"/api/skills/{skill_id}", json={
+            "name": "Review Helper Edited",
+            "slug": "review-helper-edited",
+            "instructions": "Review the code with edited instructions.",
+            "scope": "project",
+            "activationMode": "automatic",
+            "triggers": [{"type": "keyword", "value": "review-edited", "weight": 1}],
+        })
+        assert edited.status_code == 200
+        assert edited.json()["name"] == "Review Helper Edited"
+        assert edited.json()["slug"] == "review-helper-edited"
+        assert edited.json()["scope"] == "project"
+        assert edited.json()["activationMode"] == "automatic"
+        assert edited.json()["triggers"][0]["value"] == "review-edited"
+        assert edited.json()["instructions"]["core"] == "Review the code with edited instructions."
+        assert edited.json()["version"] == 2
+
+        deleted = await c.delete(f"/api/skills/{skill_id}")
+        assert deleted.status_code == 200
+        assert deleted.json()["deletedSkillId"] == skill_id
+
+        missing = await c.get(f"/api/skills/{skill_id}")
+        assert missing.status_code == 404
+
+        reimported = await c.post("/api/skills/import/local", json={"path": str(md)})
+        assert reimported.status_code == 200
+        skill_id = reimported.json()["skill"]["id"]
+        await c.post(f"/api/skills/{skill_id}/enabled", json={"enabled": True})
+
         compat = await c.get(f"/api/skills/{skill_id}/compatibility?provider=codex&model=gpt-5.5")
         assert compat.status_code == 200
         assert compat.json()["provider"] == "codex"
@@ -113,13 +142,44 @@ async def test_skills_api_list_enable_import_compile_preview_and_compatibility(t
         preview = await c.post("/api/skills/compile-preview", json={
             "provider": "codex",
             "model": "gpt-5.5",
-            "user_message": "use the Review Helper skill to review this",
+            "user_message": "use the Review Helper Edited skill to review-edited this",
         })
         assert preview.status_code == 200
         assert "## Activated Skills" in preview.json()["prompt_fragment"]
 
         activations = await c.get("/api/skills/activations")
         assert activations.status_code == 200
+
+        flagged = await c.post("/api/skills/import/markdown", json={
+            "name": "Flagged Skill",
+            "markdown": "# Flagged Skill\n\nUse flags.",
+            "slug": "flagged-skill",
+            "scope": "project",
+            "activationMode": "automatic",
+            "triggers": [{"type": "keyword", "value": "flagged", "weight": 1}],
+            "enabled": True,
+            "showInSlash": True,
+        })
+        assert flagged.status_code == 200
+        flagged_skill = flagged.json()["skill"]
+        assert flagged_skill["slug"] == "flagged-skill"
+        assert flagged_skill["scope"] == "project"
+        assert flagged_skill["activationMode"] == "automatic"
+        assert flagged_skill["enabled"] is True
+        assert flagged_skill["showInSlash"] is True
+
+        validation = await c.post("/api/skills/validate/markdown", json={
+            "name": "Validation Only",
+            "markdown": "# Validation Only\n\nValidate but do not store.",
+            "slug": "validation-only",
+            "enabled": True,
+            "showInSlash": True,
+        })
+        assert validation.status_code == 200
+        assert validation.json()["ok"] is True
+        assert validation.json()["skill"]["slug"] == "validation-only"
+        listed_after_validation = await c.get("/api/skills/validation-only")
+        assert listed_after_validation.status_code == 404
 
 
 @pytest.mark.asyncio

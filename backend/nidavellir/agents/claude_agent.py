@@ -96,8 +96,11 @@ class ClaudeAgent(CLIAgent):
                 )
                 for out in async_items:
                     if isinstance(out, str):
+                        delta, last_text_snapshot = self._dedupe_text_chunk(last_text_snapshot, out)
+                        if not delta:
+                            continue
                         emitted_text = True
-                        last_text_snapshot += out
+                        out = delta
                     yield out
                 continue
 
@@ -111,11 +114,7 @@ class ClaudeAgent(CLIAgent):
                     if content_type == "text":
                         text = content.get("text")
                         if isinstance(text, str) and text:
-                            if text.startswith(last_text_snapshot):
-                                delta = text[len(last_text_snapshot):]
-                            else:
-                                delta = text
-                            last_text_snapshot = text
+                            delta, last_text_snapshot = self._dedupe_text_chunk(last_text_snapshot, text)
                             if delta:
                                 emitted_text = True
                                 yield delta
@@ -254,6 +253,30 @@ class ClaudeAgent(CLIAgent):
             return outputs
 
         return outputs
+
+    def _dedupe_text_chunk(self, current: str, incoming: str) -> tuple[str, str]:
+        if not incoming:
+            return "", current
+        if not current:
+            return incoming, incoming
+        if current.endswith(incoming):
+            return "", current
+        if incoming.strip() == current.strip():
+            return "", current
+        if incoming.startswith(current):
+            return incoming[len(current):], incoming
+
+        stripped = incoming.lstrip()
+        if stripped.startswith(current):
+            return stripped[len(current):], current + stripped[len(current):]
+
+        max_overlap = min(len(current), len(incoming))
+        for size in range(max_overlap, 0, -1):
+            if current.endswith(incoming[:size]):
+                delta = incoming[size:]
+                return delta, current + delta
+
+        return incoming, current + incoming
 
     def _stringify_args(self, args: object) -> str:
         if args is None:

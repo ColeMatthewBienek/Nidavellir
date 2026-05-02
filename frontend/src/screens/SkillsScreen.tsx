@@ -8,6 +8,8 @@ const API = 'http://localhost:7430';
 type SkillStatus = 'draft' | 'validated' | 'failed_import';
 type UiStatus = 'enabled' | 'disabled' | 'needsreview' | 'importfailed';
 type FilterStatus = 'all' | 'enabled' | 'disabled' | 'review';
+type SkillScope = 'global' | 'project' | 'repo' | 'conversation' | 'agent_role';
+type SkillActivationMode = 'automatic' | 'manual' | 'explicit_only';
 
 interface SkillTrigger {
   type: string;
@@ -45,6 +47,15 @@ interface SkillInventoryItem {
   createdAt?: string | null;
   updatedAt?: string | null;
 }
+
+type SkillUpdate = {
+  name: string;
+  slug: string;
+  instructions: string;
+  scope: SkillScope;
+  activationMode: SkillActivationMode;
+  triggers: SkillTrigger[];
+};
 
 interface CompilePreview {
   prompt_fragment: string;
@@ -85,6 +96,10 @@ const FILTERS: Array<{ key: FilterStatus; label: string }> = [
   { key: 'review', label: 'Needs Review' },
 ];
 
+const SCOPE_OPTIONS: SkillScope[] = ['global', 'project'];
+const ACTIVATION_OPTIONS: SkillActivationMode[] = ['manual', 'automatic', 'explicit_only'];
+const TRIGGER_TYPES = ['keyword', 'intent', 'explicit_user_request', 'file_pattern', 'repo', 'agent_role', 'conversation_context'];
+
 function uiStatus(skill: SkillInventoryItem): UiStatus {
   if (skill.status === 'failed_import') return 'importfailed';
   if (skill.enabled) return 'enabled';
@@ -98,14 +113,80 @@ function statusForFilter(filter: FilterStatus): UiStatus | null {
   return null;
 }
 
-function compactId(skill: SkillInventoryItem): string {
-  return skill.id.length > 12 ? skill.id.slice(0, 8) : skill.id;
-}
-
 function capabilityList(skill: SkillInventoryItem): string[] {
   return Object.entries(skill.requiredCapabilities ?? {})
     .filter(([, enabled]) => enabled)
     .map(([key]) => key.replace(/_/g, '-'));
+}
+
+function titleCase(value: string): string {
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function activationLabel(value: string): string {
+  if (value === 'explicit_only') return 'Explicit only';
+  return titleCase(value);
+}
+
+function scopeLabel(value: string): string {
+  return titleCase(value);
+}
+
+function truncateSummary(value: string, maxLength = 140): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength - 1).trimEnd()}...`;
+}
+
+function stripMarkdownForSummary(value: string): string {
+  return value
+    .replace(/^---[\s\S]*?---\s*/m, '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/^>\s+/gm, '')
+    .replace(/[_~]/g, '');
+}
+
+function frontmatterDescription(value: string): string | null {
+  const match = value.match(/^---\s*[\r\n]+([\s\S]*?)[\r\n]+---/);
+  if (!match) return null;
+  const description = match[1].match(/^description:\s*['"]?(.+?)['"]?\s*$/im);
+  return description?.[1]?.trim() || null;
+}
+
+function skillSummary(skill: SkillInventoryItem): string {
+  const explicit = skill.description?.trim();
+  if (explicit) return truncateSummary(explicit);
+
+  const core = skill.instructions.core ?? '';
+  const frontmatter = frontmatterDescription(core);
+  if (frontmatter) return truncateSummary(frontmatter);
+
+  const firstUsefulLine = stripMarkdownForSummary(core)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith('name:') && !line.startsWith('version:'));
+
+  return firstUsefulLine ? truncateSummary(firstUsefulLine) : 'No summary available.';
+}
+
+function compactList(values: string[], limit = 3): string[] {
+  if (values.length <= limit) return values;
+  return [...values.slice(0, limit), `+${values.length - limit}`];
+}
+
+function normalizeSlug(value: string): string {
+  return value
+    .trim()
+    .replace(/^\/+/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 async function fetchSkills(): Promise<SkillInventoryItem[]> {
@@ -159,6 +240,13 @@ function SkillCard({
 }) {
   const status = uiStatus(skill);
   const capabilities = capabilityList(skill);
+  const triggers = compactList(skill.triggers.map((trigger) => `${titleCase(trigger.type)}: ${trigger.value}`), 2);
+  const metadata = compactList([
+    activationLabel(skill.activationMode),
+    scopeLabel(skill.scope),
+    titleCase(skill.source.format),
+    ...capabilities,
+  ], 4);
   return (
     <button
       type="button"
@@ -170,11 +258,11 @@ function SkillCard({
         background: 'var(--bg1)',
         border: `1px solid ${selected ? 'var(--grn)' : 'var(--bd)'}`,
         borderRadius: 6,
-        padding: 14,
+        padding: 12,
         cursor: 'pointer',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{
@@ -185,30 +273,32 @@ function SkillCard({
               padding: '2px 8px',
               borderRadius: 4,
             }}>
-              {compactId(skill)}
+              /{skill.slug}
             </span>
             <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--t0)' }}>{skill.name}</span>
           </div>
-          <p style={{ fontSize: 11, color: 'var(--t1)', margin: 0, lineHeight: 1.6 }}>{skill.description || skill.instructions.core}</p>
+          <p style={{
+            fontSize: 11,
+            color: 'var(--t1)',
+            margin: 0,
+            lineHeight: 1.45,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}>
+            {skillSummary(skill)}
+          </p>
         </div>
         <StatusBadge status={status} />
       </div>
 
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-        {skill.triggers.length ? skill.triggers.map((trigger) => (
-          <Tag key={`${trigger.type}-${trigger.value}`}>{trigger.type}: {trigger.value}</Tag>
-        )) : <Tag>{skill.activationMode}</Tag>}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+        {triggers.length ? triggers.map((trigger) => <Tag key={trigger}>{trigger}</Tag>) : <Tag>No triggers</Tag>}
       </div>
 
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-        <Tag>{skill.source.format}</Tag>
-        {capabilities.length ? capabilities.map((capability) => <Tag key={capability}>{capability}</Tag>) : <Tag>no special capability</Tag>}
-      </div>
-
-      <div style={{ fontSize: 10, color: 'var(--t1)', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <span>Version: {skill.version}</span>
-        <span>Priority: {skill.priority}</span>
-        <span>Scope: {skill.scope}</span>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {metadata.map((item) => <Tag key={item}>{item}</Tag>)}
       </div>
     </button>
   );
@@ -230,19 +320,93 @@ function DetailDrawer({
   onClose,
   onToggleEnabled,
   onToggleSlash,
+  onUpdateSkill,
+  onDeleteSkill,
   onInvoke,
 }: {
   skill: SkillInventoryItem;
   onClose: () => void;
   onToggleEnabled: (skill: SkillInventoryItem) => void;
   onToggleSlash: (skill: SkillInventoryItem) => void;
+  onUpdateSkill: (skill: SkillInventoryItem, updates: SkillUpdate) => Promise<void>;
+  onDeleteSkill: (skill: SkillInventoryItem) => Promise<void>;
   onInvoke: (skill: SkillInventoryItem) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(skill.name);
+  const [slugDraft, setSlugDraft] = useState(skill.slug);
+  const [scopeDraft, setScopeDraft] = useState<SkillScope>(skill.scope as SkillScope);
+  const [activationDraft, setActivationDraft] = useState<SkillActivationMode>(skill.activationMode as SkillActivationMode);
+  const [triggersDraft, setTriggersDraft] = useState<SkillTrigger[]>(skill.triggers);
+  const [instructionDraft, setInstructionDraft] = useState(skill.instructions.core);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEditing(false);
+    setNameDraft(skill.name);
+    setSlugDraft(skill.slug);
+    setScopeDraft(skill.scope as SkillScope);
+    setActivationDraft(skill.activationMode as SkillActivationMode);
+    setTriggersDraft(skill.triggers);
+    setInstructionDraft(skill.instructions.core);
+    setSaveError(null);
+  }, [skill.id]);
+
+  useEffect(() => {
+    if (!editing) {
+      setNameDraft(skill.name);
+      setSlugDraft(skill.slug);
+      setScopeDraft(skill.scope as SkillScope);
+      setActivationDraft(skill.activationMode as SkillActivationMode);
+      setTriggersDraft(skill.triggers);
+      setInstructionDraft(skill.instructions.core);
+    }
+  }, [editing, skill.name, skill.slug, skill.scope, skill.activationMode, skill.triggers, skill.instructions.core]);
+
+  const normalizedSlug = normalizeSlug(slugDraft);
+  const cleanTriggers = triggersDraft
+    .map((trigger) => ({ ...trigger, value: trigger.value.trim() }))
+    .filter((trigger) => trigger.value);
+  const changed =
+    nameDraft.trim() !== skill.name ||
+    normalizedSlug !== skill.slug ||
+    scopeDraft !== skill.scope ||
+    activationDraft !== skill.activationMode ||
+    instructionDraft.trim() !== skill.instructions.core ||
+    JSON.stringify(cleanTriggers) !== JSON.stringify(skill.triggers);
+  const canSave = Boolean(changed && nameDraft.trim() && normalizedSlug && instructionDraft.trim() && !saving);
+
+  const save = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onUpdateSkill(skill, {
+        name: nameDraft.trim(),
+        slug: normalizedSlug,
+        instructions: instructionDraft.trim(),
+        scope: scopeDraft,
+        activationMode: activationDraft,
+        triggers: cleanTriggers,
+      });
+      setEditing(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to update skill');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <aside
       aria-label="Skill details"
       style={{
-        width: 340,
+        width: editing ? 720 : 420,
+        minWidth: 340,
+        maxWidth: '72vw',
+        resize: 'horizontal',
+        overflow: 'auto',
         borderLeft: '1px solid var(--bd)',
         background: 'var(--bg1)',
         flexShrink: 0,
@@ -261,24 +425,223 @@ function DetailDrawer({
         <DrawerSection title="Overview">
           <div style={{ fontSize: 10, color: 'var(--t1)', lineHeight: 1.8 }}>
             <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Status:</span> {STATUS_LABELS[uiStatus(skill)]}</div>
-            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Source:</span> {skill.source.format}</div>
-            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Activation:</span> {skill.activationMode}</div>
+            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Slash command:</span> /{skill.slug}</div>
+            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Source:</span> {titleCase(skill.source.format)}</div>
+            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Activation:</span> {activationLabel(skill.activationMode)}</div>
             <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Slash menu:</span> {skill.showInSlash ? 'shown' : 'hidden'}</div>
-            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Scope:</span> {skill.scope}</div>
+            <div><span style={{ color: 'var(--t0)', fontWeight: 600 }}>Scope:</span> {scopeLabel(skill.scope)}</div>
           </div>
         </DrawerSection>
 
-        <DrawerSection title="Instructions">
-          <div style={{ fontSize: 11, color: 'var(--t0)', lineHeight: 1.6, minWidth: 0, overflow: 'hidden' }}>
-            <MarkdownRenderer content={skill.instructions.core} />
-          </div>
+        <DrawerSection title={editing ? 'Edit Skill' : 'Instructions'}>
+          {editing ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 5, color: 'var(--t1)', fontSize: 10 }}>
+                Skill name
+                <input
+                  aria-label="Skill name"
+                  value={nameDraft}
+                  onChange={(event) => setNameDraft(event.target.value)}
+                  style={{
+                    padding: '8px 10px',
+                    background: 'var(--bg0)',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    color: 'var(--t0)',
+                    fontSize: 12,
+                  }}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 5, color: 'var(--t1)', fontSize: 10 }}>
+                Slash command
+                <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg0)', border: '1px solid var(--bd)', borderRadius: 5, overflow: 'hidden' }}>
+                  <span style={{ paddingLeft: 10, color: 'var(--blu)', fontFamily: 'var(--mono)', fontSize: 12 }}>/</span>
+                  <input
+                    aria-label="Slash command"
+                    value={slugDraft}
+                    onChange={(event) => setSlugDraft(event.target.value.replace(/^\/+/, ''))}
+                    style={{
+                      flex: 1,
+                      padding: '8px 10px 8px 2px',
+                      background: 'transparent',
+                      border: 'none',
+                      color: 'var(--t0)',
+                      fontFamily: 'var(--mono)',
+                      fontSize: 12,
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 5, color: 'var(--t1)', fontSize: 10 }}>
+                  Scope
+                  <select
+                    aria-label="Skill scope"
+                    value={scopeDraft}
+                    onChange={(event) => setScopeDraft(event.target.value as SkillScope)}
+                    style={{
+                      padding: '8px 10px',
+                      background: 'var(--bg0)',
+                      border: '1px solid var(--bd)',
+                      borderRadius: 5,
+                      color: 'var(--t0)',
+                      fontSize: 12,
+                    }}
+                  >
+                    {SCOPE_OPTIONS.map((scope) => (
+                      <option key={scope} value={scope}>{scopeLabel(scope)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 5, color: 'var(--t1)', fontSize: 10 }}>
+                  Activation
+                  <select
+                    aria-label="Activation mode"
+                    value={activationDraft}
+                    onChange={(event) => setActivationDraft(event.target.value as SkillActivationMode)}
+                    style={{
+                      padding: '8px 10px',
+                      background: 'var(--bg0)',
+                      border: '1px solid var(--bd)',
+                      borderRadius: 5,
+                      color: 'var(--t0)',
+                      fontSize: 12,
+                    }}
+                  >
+                    {ACTIVATION_OPTIONS.map((mode) => (
+                      <option key={mode} value={mode}>{activationLabel(mode)}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ color: 'var(--t1)', fontSize: 10 }}>Triggers</div>
+                {triggersDraft.map((trigger, index) => (
+                  <div key={`${index}-${trigger.type}`} style={{ display: 'grid', gridTemplateColumns: '108px 1fr 28px', gap: 6 }}>
+                    <select
+                      aria-label="Trigger type"
+                      value={trigger.type}
+                      onChange={(event) => {
+                        const next = [...triggersDraft];
+                        next[index] = { ...trigger, type: event.target.value };
+                        setTriggersDraft(next);
+                      }}
+                      style={{ padding: '7px 8px', background: 'var(--bg0)', border: '1px solid var(--bd)', borderRadius: 5, color: 'var(--t0)', fontSize: 11 }}
+                    >
+                      {TRIGGER_TYPES.map((type) => (
+                        <option key={type} value={type}>{titleCase(type)}</option>
+                      ))}
+                    </select>
+                    <input
+                      aria-label="Trigger value"
+                      value={trigger.value}
+                      onChange={(event) => {
+                        const next = [...triggersDraft];
+                        next[index] = { ...trigger, value: event.target.value };
+                        setTriggersDraft(next);
+                      }}
+                      style={{ padding: '7px 8px', background: 'var(--bg0)', border: '1px solid var(--bd)', borderRadius: 5, color: 'var(--t0)', fontSize: 11 }}
+                    />
+                    <button
+                      type="button"
+                      aria-label="Remove trigger"
+                      onClick={() => setTriggersDraft((current) => current.filter((_, triggerIndex) => triggerIndex !== index))}
+                      style={{ border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg2)', color: 'var(--t1)', cursor: 'pointer' }}
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setTriggersDraft((current) => [...current, { type: 'keyword', value: '', weight: 1 }])}
+                  style={{
+                    padding: '7px 10px',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: 'var(--bg2)',
+                    color: 'var(--t0)',
+                    cursor: 'pointer',
+                    fontSize: 11,
+                    fontWeight: 700,
+                  }}
+                >
+                  Add Trigger
+                </button>
+              </div>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 5, color: 'var(--t1)', fontSize: 10 }}>
+                Skill text
+                <textarea
+                  aria-label="Skill text"
+                  value={instructionDraft}
+                  onChange={(event) => setInstructionDraft(event.target.value)}
+                  rows={12}
+                  style={{
+                    padding: '8px 10px',
+                    background: 'var(--bg0)',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    color: 'var(--t0)',
+                    fontFamily: 'var(--mono)',
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    resize: 'vertical',
+                  }}
+                />
+              </label>
+              {saveError && <div style={{ color: 'var(--red)', fontSize: 11 }}>{saveError}</div>}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setEditing(false)}
+                  disabled={saving}
+                  style={{
+                    flex: 1,
+                    padding: '8px 10px',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: 'var(--bg2)',
+                    color: 'var(--t0)',
+                    cursor: saving ? 'not-allowed' : 'pointer',
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={save}
+                  disabled={!canSave}
+                  style={{
+                    flex: 1,
+                    padding: '8px 10px',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: canSave ? '#3fb95016' : 'var(--bg2)',
+                    color: canSave ? 'var(--grn)' : 'var(--t1)',
+                    cursor: canSave ? 'pointer' : 'not-allowed',
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: 'var(--t0)', lineHeight: 1.6, minWidth: 0, overflow: 'hidden' }}>
+              <MarkdownRenderer content={skill.instructions.core} />
+            </div>
+          )}
         </DrawerSection>
 
         <DrawerSection title="Triggers">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             {skill.triggers.length ? skill.triggers.map((trigger) => (
-              <Tag key={`${trigger.type}-${trigger.value}`}>{trigger.type}: {trigger.value}</Tag>
-            )) : <Tag>manual activation</Tag>}
+              <Tag key={`${trigger.type}-${trigger.value}`}>{titleCase(trigger.type)}: {trigger.value}</Tag>
+            )) : <Tag>No configured triggers</Tag>}
           </div>
         </DrawerSection>
 
@@ -308,6 +671,43 @@ function DetailDrawer({
           />
           Show in / menu
         </label>
+
+        <button
+          type="button"
+          onClick={() => setEditing((value) => !value)}
+          style={{
+            padding: '8px 10px',
+            border: '1px solid var(--bd)',
+            borderRadius: 5,
+            background: editing ? '#1f6feb18' : 'var(--bg2)',
+            color: editing ? 'var(--blu)' : 'var(--t0)',
+            cursor: 'pointer',
+            fontSize: 12,
+            fontWeight: 700,
+          }}
+        >
+          {editing ? 'Editing Skill' : 'Edit Skill'}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            const ok = window.confirm(`Delete skill "${skill.name}" (/${skill.slug})? This cannot be undone.`);
+            if (ok) onDeleteSkill(skill).catch(() => setSaveError('Failed to delete skill'));
+          }}
+          style={{
+            padding: '8px 10px',
+            border: '1px solid #f8514944',
+            borderRadius: 5,
+            background: '#f8514915',
+            color: 'var(--red)',
+            cursor: 'pointer',
+            fontSize: 12,
+            fontWeight: 700,
+          }}
+        >
+          Delete Skill
+        </button>
 
         <button
           type="button"
@@ -580,6 +980,7 @@ export function SkillsScreen() {
     const updated = await response.json();
     setSkills((current) => current.map((item) => item.id === updated.id ? updated : item));
     setSelectedSkill(updated);
+    window.dispatchEvent(new CustomEvent('nid:skills-changed'));
   };
 
   const toggleSlash = async (skill: SkillInventoryItem) => {
@@ -591,6 +992,30 @@ export function SkillsScreen() {
     const updated = await response.json();
     setSkills((current) => current.map((item) => item.id === updated.id ? updated : item));
     setSelectedSkill(updated);
+    window.dispatchEvent(new CustomEvent('nid:skills-changed'));
+  };
+
+  const updateSkill = async (skill: SkillInventoryItem, updates: SkillUpdate) => {
+    const response = await fetch(`${API}/api/skills/${skill.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (!response.ok) throw new Error(`skill_update_${response.status}`);
+    const updated = await response.json();
+    setSkills((current) => current.map((item) => item.id === updated.id ? updated : item));
+    setSelectedSkill(updated);
+    window.dispatchEvent(new CustomEvent('nid:skills-changed'));
+  };
+
+  const deleteSkill = async (skill: SkillInventoryItem) => {
+    const response = await fetch(`${API}/api/skills/${skill.id}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new Error(`skill_delete_${response.status}`);
+    setSkills((current) => current.filter((item) => item.id !== skill.id));
+    setSelectedSkill(null);
+    window.dispatchEvent(new CustomEvent('nid:skills-changed'));
   };
 
   const runCompilePreview = async () => {
@@ -688,6 +1113,8 @@ export function SkillsScreen() {
             onClose={() => setSelectedSkill(null)}
             onToggleEnabled={toggleEnabled}
             onToggleSlash={toggleSlash}
+            onUpdateSkill={updateSkill}
+            onDeleteSkill={deleteSkill}
             onInvoke={invokeSkill}
           />
         )}
@@ -700,6 +1127,7 @@ export function SkillsScreen() {
           } else {
             loadSkills();
           }
+          window.dispatchEvent(new CustomEvent('nid:skills-changed'));
         }}
       />
     </div>

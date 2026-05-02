@@ -21,6 +21,12 @@ const NATIVE_DEPENDENCIES = [
     packageName: ESBUILD_NATIVE_PACKAGES[`${process.platform}-${process.arch}`],
     sourcePackageName: "esbuild",
   },
+  {
+    baseDir: path.join(process.cwd(), "node_modules", "vitest", "node_modules"),
+    expectedFile: "bin/esbuild",
+    packageName: ESBUILD_NATIVE_PACKAGES[`${process.platform}-${process.arch}`],
+    sourcePackageName: "esbuild",
+  },
 ].filter((dependency) => dependency.packageName);
 
 function resolvePackage(name) {
@@ -31,28 +37,36 @@ function resolvePackage(name) {
   }
 }
 
-function packageExists(name, expectedFile) {
-  const manifestPath = path.join(packageDirectory(name), "package.json");
+function packageExists(name, expectedFile, baseDir = path.join(process.cwd(), "node_modules")) {
+  const manifestPath = path.join(packageDirectory(name, baseDir), "package.json");
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    return fs.existsSync(path.join(packageDirectory(name), expectedFile ?? manifest.main ?? ""));
+    return fs.existsSync(path.join(packageDirectory(name, baseDir), expectedFile ?? manifest.main ?? ""));
   } catch {
     return false;
   }
 }
 
-function packageVersion(name) {
+function packageVersion(name, baseDir = path.join(process.cwd(), "node_modules")) {
+  try {
+    const manifestPath = path.join(packageDirectory(name, baseDir), "package.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (manifest.version) return manifest.version;
+  } catch {
+  }
   try {
     const lockfilePath = path.join(process.cwd(), "package-lock.json");
     const lockfile = JSON.parse(fs.readFileSync(lockfilePath, "utf8"));
-    return lockfile.packages?.[`node_modules/${name}`]?.version ?? null;
+    const relativeBase = path.relative(process.cwd(), baseDir).replace(/\\/g, "/");
+    const packagePath = path.posix.join(relativeBase, ...name.split("/"));
+    return lockfile.packages?.[packagePath]?.version ?? null;
   } catch {
     return null;
   }
 }
 
-function packageDirectory(name) {
-  return path.join(process.cwd(), "node_modules", ...name.split("/"));
+function packageDirectory(name, baseDir = path.join(process.cwd(), "node_modules")) {
+  return path.join(baseDir, ...name.split("/"));
 }
 
 function run(command, args, options = {}) {
@@ -109,8 +123,8 @@ function copyDirectory(source, target) {
   }
 }
 
-function installPackageFromTarball(name, version) {
-  const targetDir = packageDirectory(name);
+function installPackageFromTarball(name, version, baseDir = path.join(process.cwd(), "node_modules")) {
+  const targetDir = packageDirectory(name, baseDir);
   const targetParent = path.dirname(targetDir);
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "native-deps-"));
   const extractDir = path.join(tempDir, "extract");
@@ -157,12 +171,16 @@ function installPackageFromTarball(name, version) {
   }
 }
 
-for (const { expectedFile, packageName, sourcePackageName } of NATIVE_DEPENDENCIES) {
-  if (packageExists(packageName, expectedFile) || resolvePackage(packageName)) {
+for (const { baseDir = path.join(process.cwd(), "node_modules"), expectedFile, packageName, sourcePackageName } of NATIVE_DEPENDENCIES) {
+  if (!fs.existsSync(baseDir)) {
     continue;
   }
 
-  const version = packageVersion(sourcePackageName);
+  if (packageExists(packageName, expectedFile, baseDir)) {
+    continue;
+  }
+
+  const version = packageVersion(sourcePackageName, baseDir);
   if (!version) {
     console.error(`[native-deps] ${sourcePackageName} is not present in package-lock.json; run npm install in frontend.`);
     process.exit(1);
@@ -170,14 +188,14 @@ for (const { expectedFile, packageName, sourcePackageName } of NATIVE_DEPENDENCI
 
   console.warn(`[native-deps] Missing ${packageName}; repairing npm optional dependency install.`);
   try {
-    installPackageFromTarball(packageName, version);
+    installPackageFromTarball(packageName, version, baseDir);
   } catch (error) {
     console.error(`[native-deps] Failed to install ${packageName}@${version}.`);
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
   }
 
-  if (!packageExists(packageName, expectedFile)) {
+  if (!packageExists(packageName, expectedFile, baseDir)) {
     console.error(`[native-deps] Installed ${packageName}@${version}, but the native package files are still missing.`);
     process.exit(1);
   }

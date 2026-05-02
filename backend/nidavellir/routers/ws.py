@@ -800,7 +800,12 @@ def _build_prompt_assembly(
 ) -> PromptAssemblyResult:
     """Build the provider payload through structured sections."""
     sections: list[PromptSection] = []
-    project_instructions = discover_project_instructions(cwd=workdir, provider=provider_id)
+    from nidavellir.project_instructions.discovery import default_global_instruction_files
+    project_instructions = discover_project_instructions(
+        cwd=workdir,
+        provider=provider_id,
+        global_instruction_files=default_global_instruction_files(),
+    )
     if project_instructions.rendered_text:
         sections.append(PromptSection(
             name="project instructions",

@@ -25,11 +25,26 @@ const skills = [
     id: 'draft-import',
     slug: 'draft-import',
     name: 'Draft Import',
-    description: 'Imported and waiting for review.',
+    description: '',
     scope: 'global',
     activationMode: 'manual',
     triggers: [],
-    instructions: { core: 'Draft body.', constraints: [], steps: [], examples: [], anti_patterns: [] },
+    instructions: {
+      core: `---
+description: Imported and waiting for review.
+---
+
+# Draft Import
+
+This paragraph should never be fully dumped into the compact inventory card because the full instruction body belongs in the drawer only.
+
+- Review the import
+- Decide whether to enable it`,
+      constraints: [],
+      steps: [],
+      examples: [],
+      anti_patterns: [],
+    },
     requiredCapabilities: { file_read: false, file_write: false, shell: false, browser: false, vision: false, code_execution: false, network: false, long_context: false },
     priority: 50,
     enabled: false,
@@ -53,6 +68,22 @@ describe('SkillsScreen skill inventory', () => {
       }
       if (url.endsWith('/api/skills/review-helper/slash')) {
         return Response.json({ ...skills[0], showInSlash: true });
+      }
+      if (url.endsWith('/api/skills/review-helper') && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body));
+        return Response.json({
+          ...skills[0],
+          name: body.name,
+          slug: body.slug,
+          scope: body.scope,
+          activationMode: body.activationMode,
+          triggers: body.triggers,
+          instructions: { ...skills[0].instructions, core: body.instructions },
+          version: 2,
+        });
+      }
+      if (url.endsWith('/api/skills/review-helper') && init?.method === 'DELETE') {
+        return Response.json({ ok: true, deletedSkillId: 'review-helper' });
       }
       if (url.endsWith('/api/skills/import/local')) {
         return Response.json({
@@ -104,6 +135,8 @@ describe('SkillsScreen skill inventory', () => {
     expect(screen.getByText('Enabled (1)')).toBeTruthy();
     expect(screen.getByText('Needs Review (1)')).toBeTruthy();
     expect(screen.getByText('Review Helper')).toBeTruthy();
+    expect(screen.getByText('Imported and waiting for review.')).toBeTruthy();
+    expect(screen.queryByText(/This paragraph should never be fully dumped/)).toBeNull();
   });
 
   it('filters to needs review from API data', async () => {
@@ -123,7 +156,7 @@ describe('SkillsScreen skill inventory', () => {
 
     const drawer = screen.getByLabelText('Skill details');
     expect(within(drawer).getByText('Overview')).toBeTruthy();
-    expect(within(drawer).getByText('claude_skill')).toBeTruthy();
+    expect(within(drawer).getByText('Claude Skill')).toBeTruthy();
 
     fireEvent.click(within(drawer).getByRole('button', { name: 'Enable Skill' }));
 
@@ -146,6 +179,53 @@ describe('SkillsScreen skill inventory', () => {
     expect(within(drawer).getByText('Cite files')).toBeTruthy();
     expect(within(drawer).getAllByText((_, node) => node?.textContent === 'npm test').length).toBeGreaterThan(0);
     expect(within(drawer).queryByText(/## Workflow/)).toBeNull();
+  });
+
+  it('edits skill routing, activation, scope, triggers, and instruction text', async () => {
+    render(<SkillsScreen />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Review Helper/i }));
+    const drawer = screen.getByLabelText('Skill details');
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Edit Skill' }));
+
+    fireEvent.change(within(drawer).getByLabelText('Skill name'), {
+      target: { value: 'Review Helper Edited' },
+    });
+    fireEvent.change(within(drawer).getByLabelText('Slash command'), {
+      target: { value: 'review-helper-edited' },
+    });
+    fireEvent.change(within(drawer).getByLabelText('Skill scope'), {
+      target: { value: 'project' },
+    });
+    fireEvent.change(within(drawer).getByLabelText('Activation mode'), {
+      target: { value: 'automatic' },
+    });
+    fireEvent.change(within(drawer).getByLabelText('Trigger value'), {
+      target: { value: 'review now' },
+    });
+    fireEvent.change(within(drawer).getByLabelText('Skill text'), {
+      target: { value: '## Edited Workflow\n\nReview with the new rules.' },
+    });
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Save Changes' }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:7430/api/skills/review-helper',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({
+            name: 'Review Helper Edited',
+            slug: 'review-helper-edited',
+            instructions: '## Edited Workflow\n\nReview with the new rules.',
+            scope: 'project',
+            activationMode: 'automatic',
+            triggers: [{ type: 'keyword', value: 'review now', weight: 1 }],
+          }),
+        }),
+      );
+    });
+    expect(await within(drawer).findByText('Review Helper Edited')).toBeTruthy();
+    expect(within(drawer).getByRole('heading', { name: 'Edited Workflow' })).toBeTruthy();
   });
 
   it('offers an invoke action for enabled skills', async () => {
@@ -186,6 +266,27 @@ describe('SkillsScreen skill inventory', () => {
       );
     });
     expect(within(drawer).getByLabelText('Show in / menu')).toBeChecked();
+  });
+
+  it('deletes a skill after confirmation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const changed = vi.fn();
+    window.addEventListener('nid:skills-changed', changed);
+    render(<SkillsScreen />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Review Helper/i }));
+    const drawer = screen.getByLabelText('Skill details');
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Delete Skill' }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:7430/api/skills/review-helper',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
+    expect(screen.queryByLabelText('Skill details')).toBeNull();
+    expect(changed).toHaveBeenCalled();
+    window.removeEventListener('nid:skills-changed', changed);
   });
 
   it('imports from a local path and renders import warnings', async () => {

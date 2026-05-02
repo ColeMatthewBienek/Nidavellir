@@ -95,4 +95,19 @@ describe('ChatScreen Codex-style layout', () => {
     expect(screen.queryByText('● Working')).toBeNull();
     expect(screen.getByRole('button', { name: 'Toggle working set' })).toBeTruthy();
   });
+
+  it('opens audit bundle export options from the conversation menu', () => {
+    render(<ChatScreen />);
+
+    fireEvent.click(screen.getByTestId('conversation-menu-conv-1'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export Audit Bundle' }));
+
+    expect(screen.getByRole('dialog', { name: 'Export audit bundle' })).toBeTruthy();
+    expect(screen.getByLabelText(/Include command output/)).not.toBeChecked();
+    expect(screen.getByLabelText(/Include memory snapshots/)).not.toBeChecked();
+
+    fireEvent.click(screen.getByLabelText(/Include command output/));
+
+    expect(screen.getByLabelText(/Include command output/)).toBeChecked();
+  });
 });

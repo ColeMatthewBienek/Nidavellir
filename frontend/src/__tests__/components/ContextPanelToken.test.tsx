@@ -222,6 +222,22 @@ describe('ContextPanel — Token Usage section', () => {
     expect(screen.getByRole('textbox', { name: 'Edit NIDAVELLIR.md' })).toBeTruthy();
   });
 
+  it('toggles project instructions between markdown edit and preview', async () => {
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Instructions' }));
+    const editor = await screen.findByRole('textbox', { name: 'Edit NIDAVELLIR.md' });
+    fireEvent.change(editor, { target: { value: '## Runtime Rules\n\n- Keep provider files global.' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+
+    expect(screen.queryByRole('textbox', { name: 'Edit NIDAVELLIR.md' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Runtime Rules' })).toBeTruthy();
+    expect(screen.getByText('Keep provider files global.')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Edit Markdown' }));
+    expect(screen.getByRole('textbox', { name: 'Edit NIDAVELLIR.md' })).toBeTruthy();
+  });
+
   it('shows a permission gate before allowing a guarded instruction write', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
       if (String(url).includes('/api/permissions/evaluate')) {

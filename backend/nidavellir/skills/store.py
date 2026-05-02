@@ -183,6 +183,14 @@ class SkillStore:
             rows = conn.execute("SELECT * FROM skills ORDER BY updated_at DESC, name ASC").fetchall()
         return [self._row_to_skill(row) for row in rows]
 
+    def delete_skill(self, skill_id: str) -> bool:
+        with self._conn() as conn:
+            conn.execute("UPDATE skill_imports SET imported_skill_id = NULL WHERE imported_skill_id = ?", (skill_id,))
+            conn.execute("DELETE FROM skill_activations WHERE skill_id = ?", (skill_id,))
+            conn.execute("DELETE FROM skill_versions WHERE skill_id = ?", (skill_id,))
+            cursor = conn.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+            return cursor.rowcount > 0
+
     def set_enabled(self, skill_id: str, enabled: bool) -> NidavellirSkill:
         with self._conn() as conn:
             conn.execute(
@@ -204,6 +212,75 @@ class SkillStore:
         if skill is None:
             raise KeyError(skill_id)
         return skill
+
+    def update_skill_details(
+        self,
+        skill_id: str,
+        *,
+        name: str,
+        core_instructions: str,
+        slug: str | None = None,
+        scope: str | None = None,
+        activation_mode: str | None = None,
+        triggers: list[dict] | None = None,
+    ) -> NidavellirSkill:
+        skill = self.get_skill(skill_id)
+        if skill is None:
+            raise KeyError(skill_id)
+
+        updated_at = _now()
+        data = skill.model_dump(mode="json")
+        data.update({
+            "name": name,
+            "slug": slug if slug is not None else skill.slug,
+            "scope": scope if scope is not None else skill.scope.value,
+            "activation_mode": activation_mode if activation_mode is not None else skill.activation_mode.value,
+            "triggers": triggers if triggers is not None else data["triggers"],
+            "version": skill.version + 1,
+            "updated_at": updated_at,
+        })
+        data["instructions"]["core"] = core_instructions
+        updated = NidavellirSkill.model_validate(data)
+        data = updated.model_dump(mode="json")
+
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE skills
+                      SET name = ?,
+                          slug = ?,
+                          scope = ?,
+                          activation_mode = ?,
+                          trigger_json = ?,
+                          instruction_json = ?,
+                          version = ?,
+                          updated_at = ?
+                    WHERE id = ?""",
+                (
+                    updated.name,
+                    updated.slug,
+                    updated.scope.value,
+                    updated.activation_mode.value,
+                    _json(data["triggers"]),
+                    _json(data["instructions"]),
+                    updated.version,
+                    updated_at,
+                    skill_id,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO skill_versions
+                   (id, skill_id, version, skill_json, change_reason, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()),
+                    updated.id,
+                    updated.version,
+                    updated.model_dump_json(),
+                    "edit skill name/instructions",
+                    updated_at,
+                ),
+            )
+        return updated
 
     def log_import(self, *, source_path: str | None, repository_url: str | None, detected_format: str, status: str, error: str | None = None, imported_skill_id: str | None = None) -> str:
         import_id = str(uuid.uuid4())

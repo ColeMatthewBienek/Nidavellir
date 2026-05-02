@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { WorkingSetTab } from './WorkingSetTab';
+import { MarkdownRenderer } from './MarkdownRenderer';
 import { useAgentStore, type Message } from '@/store/agentStore';
 import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionReport, type CompletionReportFile } from '@/lib/completionReport';
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
 type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'git';
+type InstructionViewMode = 'edit' | 'preview';
 type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
 interface RightSidebarProps {
@@ -79,6 +81,7 @@ interface EditableInstructionFile {
   content: string;
   sizeBytes: number;
   modifiedAt?: number | null;
+  scope?: 'global' | 'project';
 }
 
 interface ProjectInstructionResponse {
@@ -1191,10 +1194,11 @@ function GitTab({ onReviewFile, selectedPath }: { onReviewFile: (path: string) =
 }
 
 function instructionRoleLabel(file: EditableInstructionFile, provider: string): string {
-  if (file.name === 'NIDAVELLIR.md') return 'Shared';
-  if (file.name === 'PROJECT.md') return 'Project';
-  if (file.name === 'AGENTS.md') return provider === 'codex' ? 'Codex active' : 'Codex';
-  if (file.name === 'CLAUDE.md') return provider === 'claude' || provider === 'anthropic' ? 'Claude active' : 'Claude';
+  const scope = file.scope === 'global' ? 'global' : 'project';
+  if (file.name === 'NIDAVELLIR.md') return 'Nidavellir runtime';
+  if (file.name === 'PROJECT.md') return 'Project scoped';
+  if (file.name === 'AGENTS.md') return provider === 'codex' ? `Codex ${scope} active` : `Codex ${scope}`;
+  if (file.name === 'CLAUDE.md') return provider === 'claude' || provider === 'anthropic' ? `Claude ${scope} active` : `Claude ${scope}`;
   return 'Instruction';
 }
 
@@ -1297,6 +1301,7 @@ function ProjectInstructionsTab() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingPermission, setPendingPermission] = useState<PermissionEvaluationResult | null>(null);
+  const [viewMode, setViewMode] = useState<InstructionViewMode>('edit');
 
   const selectedFile = data?.editableFiles.find((file) => file.name === selectedName) ?? data?.editableFiles[0] ?? null;
 
@@ -1345,6 +1350,7 @@ function ProjectInstructionsTab() {
       body: JSON.stringify({
         workspace: workingDirectory,
         filename: selectedFile.name,
+        path: selectedFile.path,
         content: draft,
         provider: selectedProvider || 'claude',
         permissionOverride,
@@ -1502,26 +1508,86 @@ function ProjectInstructionsTab() {
                 </span>
               </div>
 
-              <textarea
-                aria-label={`Edit ${selectedFile.name}`}
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                spellCheck={false}
+              <div
+                role="tablist"
+                aria-label="Instruction view mode"
                 style={{
-                  width: '100%',
-                  minHeight: 230,
-                  resize: 'vertical',
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
                   border: '1px solid var(--bd)',
                   borderRadius: 7,
+                  overflow: 'hidden',
                   background: 'var(--bg0)',
-                  color: 'var(--t0)',
-                  padding: 10,
-                  fontFamily: 'var(--mono)',
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                  outline: 'none',
                 }}
-              />
+              >
+                {(['edit', 'preview'] as InstructionViewMode[]).map((mode) => {
+                  const active = viewMode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setViewMode(mode)}
+                      style={{
+                        border: 'none',
+                        borderLeft: mode === 'preview' ? '1px solid var(--bd)' : 'none',
+                        background: active ? '#1f6feb22' : 'transparent',
+                        color: active ? 'var(--t0)' : 'var(--t1)',
+                        cursor: 'pointer',
+                        padding: '6px 8px',
+                        fontSize: 12,
+                        fontWeight: active ? 700 : 500,
+                      }}
+                    >
+                      {mode === 'edit' ? 'Edit Markdown' : 'Preview'}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {viewMode === 'edit' ? (
+                <textarea
+                  aria-label={`Edit ${selectedFile.name}`}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  spellCheck={false}
+                  style={{
+                    width: '100%',
+                    minHeight: 230,
+                    resize: 'vertical',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 7,
+                    background: 'var(--bg0)',
+                    color: 'var(--t0)',
+                    padding: 10,
+                    fontFamily: 'var(--mono)',
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    outline: 'none',
+                  }}
+                />
+              ) : (
+                <div
+                  aria-label={`Preview ${selectedFile.name}`}
+                  style={{
+                    minHeight: 230,
+                    maxHeight: 420,
+                    overflow: 'auto',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 7,
+                    background: 'var(--bg0)',
+                    color: 'var(--t0)',
+                    padding: 12,
+                  }}
+                >
+                  {draft.trim() ? (
+                    <MarkdownRenderer content={draft} />
+                  ) : (
+                    <div style={{ color: 'var(--t1)', fontSize: 12 }}>No markdown content to preview.</div>
+                  )}
+                </div>
+              )}
 
               {pendingPermission && (
                 <PermissionGate
