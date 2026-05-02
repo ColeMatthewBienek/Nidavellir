@@ -30,6 +30,32 @@ class CommandAttachmentRequest(BaseModel):
     includeInChat: bool = True
 
 
+def _preset_exists(cwd: Path, marker: str) -> bool:
+    return (cwd / marker).exists()
+
+
+def _default_presets(cwd: Path) -> list[dict]:
+    presets: list[dict] = []
+    if _preset_exists(cwd, "frontend/package.json"):
+        presets.extend([
+            {"id": "frontend-typecheck", "label": "FE typecheck", "command": "cd frontend && npm run typecheck"},
+            {"id": "frontend-test", "label": "FE tests", "command": "cd frontend && npm run test -- --run"},
+            {"id": "frontend-build", "label": "FE build", "command": "cd frontend && npm run build"},
+        ])
+    elif _preset_exists(cwd, "package.json"):
+        presets.extend([
+            {"id": "npm-test", "label": "npm test", "command": "npm test"},
+            {"id": "npm-build", "label": "npm build", "command": "npm run build"},
+        ])
+    if _preset_exists(cwd, "backend/pyproject.toml"):
+        presets.append({"id": "backend-tests", "label": "BE tests", "command": "cd backend && uv run python -m pytest"})
+    elif _preset_exists(cwd, "pyproject.toml"):
+        presets.append({"id": "pytest", "label": "pytest", "command": "uv run python -m pytest"})
+    if _preset_exists(cwd, "fallow.json") or _preset_exists(cwd, "frontend/package.json") or _preset_exists(cwd, "package.json"):
+        presets.append({"id": "fallow-dead-code", "label": "Fallow", "command": "npx fallow dead-code --format json --quiet"})
+    return presets
+
+
 def _store(request: Request) -> CommandRunStore:
     store = getattr(request.app.state, "command_store", None)
     if store is None:
@@ -141,6 +167,11 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
 @router.get("/runs")
 def list_command_runs(request: Request, conversationId: str | None = None, limit: int = 50) -> list[dict]:
     return _store(request).list_runs(conversation_id=conversationId, limit=limit)
+
+
+@router.get("/presets")
+def list_command_presets(cwd: str | None = None) -> list[dict]:
+    return _default_presets(_resolve_cwd(cwd))
 
 
 @router.post("/runs/{run_id}/chat-attachment")

@@ -62,6 +62,14 @@ describe('ContextPanel — Token Usage section', () => {
           }),
         });
       }
+      if (String(url).includes('/api/commands/presets')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            { id: 'typecheck', label: 'FE typecheck', command: 'cd frontend && npm run typecheck' },
+          ],
+        });
+      }
       if (String(url).includes('/api/commands/runs')) {
         return Promise.resolve({
           ok: true,
@@ -390,6 +398,30 @@ describe('ContextPanel — Token Usage section', () => {
     expect(screen.getByText('ok')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Attach to next turn' }));
     expect(await screen.findByRole('button', { name: 'Attached to next turn' })).toBeTruthy();
+  });
+
+  it('uses command presets, filters output, and reruns history items', async () => {
+    const fetchMock = vi.mocked(fetch);
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Commands' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'FE typecheck' }));
+    expect(screen.getByRole('textbox', { name: 'Command' })).toHaveValue('cd frontend && npm run typecheck');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    expect(await screen.findByText('cd frontend && npm run typecheck')).toBeTruthy();
+    fireEvent.click(screen.getByText('cd frontend && npm run typecheck'));
+
+    fireEvent.change(screen.getByRole('textbox', { name: /Filter output/ }), { target: { value: 'missing' } });
+    expect(screen.getByText('(no matches)')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rerun' }));
+    await waitFor(() => {
+      const runCalls = fetchMock.mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/commands/run') && options?.method === 'POST'
+      );
+      expect(runCalls.length).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it('shows a permission gate for risky command runs', async () => {
