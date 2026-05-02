@@ -7,10 +7,11 @@ import uuid
 from datetime import UTC, datetime
 from hashlib import sha256
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from nidavellir.project_instructions.discovery import discover_project_instructions
+from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
 from nidavellir.routers.permissions import evaluate_and_audit
@@ -376,7 +377,7 @@ def export_conversation_audit_bundle(
 
 
 @router.post("/{conversation_id}/workspace")
-def set_conversation_workspace(conversation_id: str, body: ConversationWorkspaceRequest, request: Request):
+def set_conversation_workspace(conversation_id: str, body: ConversationWorkspaceRequest, request: Request, background_tasks: BackgroundTasks):
     store = _store(request)
     conv = store.get_conversation(conversation_id)
     if not conv or conv.get("archived"):
@@ -398,6 +399,13 @@ def set_conversation_workspace(conversation_id: str, body: ConversationWorkspace
             "working_directory_display": normalized.display,
         },
     )
+    background_tasks.add_task(broadcast_resource_event, request.app, {
+        "kind": "workspace",
+        "action": "updated",
+        "conversation_id": conversation_id,
+        "working_directory": updated.get("working_directory"),
+        "message": "Workspace changed",
+    })
     return {
         "conversationId": updated["id"],
         "workingDirectory": updated.get("working_directory"),
@@ -445,7 +453,7 @@ def preview_conversation_files(conversation_id: str, body: ConversationFilesRequ
 
 
 @router.post("/{conversation_id}/files")
-def add_conversation_files(conversation_id: str, body: ConversationFilesRequest, request: Request):
+def add_conversation_files(conversation_id: str, body: ConversationFilesRequest, request: Request, background_tasks: BackgroundTasks):
     store = _store(request)
     conv = store.get_conversation(conversation_id)
     if not conv or conv.get("archived"):
@@ -469,6 +477,14 @@ def add_conversation_files(conversation_id: str, body: ConversationFilesRequest,
                 "permission": decision.model_dump(mode="json"),
             })
     result = store.add_conversation_files(conversation_id, body.paths, provider=body.provider, model=body.model)
+    if result["added"]:
+        background_tasks.add_task(broadcast_resource_event, request.app, {
+            "kind": "working_set",
+            "action": "files_added",
+            "conversation_id": conversation_id,
+            "count": len(result["added"]),
+            "message": "Working set updated",
+        })
     return {
         "added": [_file_item(row) for row in result["added"]],
         "skipped": result["skipped"],
@@ -478,7 +494,7 @@ def add_conversation_files(conversation_id: str, body: ConversationFilesRequest,
 
 
 @router.post("/{conversation_id}/files/blob")
-def add_conversation_blob_files(conversation_id: str, body: ConversationBlobFilesRequest, request: Request):
+def add_conversation_blob_files(conversation_id: str, body: ConversationBlobFilesRequest, request: Request, background_tasks: BackgroundTasks):
     store = _store(request)
     conv = store.get_conversation(conversation_id)
     if not conv or conv.get("archived"):
@@ -503,6 +519,14 @@ def add_conversation_blob_files(conversation_id: str, body: ConversationBlobFile
         model=body.model,
         source=body.source,
     )
+    if result["added"]:
+        background_tasks.add_task(broadcast_resource_event, request.app, {
+            "kind": "working_set",
+            "action": "files_added",
+            "conversation_id": conversation_id,
+            "count": len(result["added"]),
+            "message": "Working set updated",
+        })
     return {
         "added": [_file_item(row) for row in result["added"]],
         "skipped": result["skipped"],
@@ -512,13 +536,20 @@ def add_conversation_blob_files(conversation_id: str, body: ConversationBlobFile
 
 
 @router.delete("/{conversation_id}/files/{file_id}")
-def delete_conversation_file(conversation_id: str, file_id: str, request: Request):
+def delete_conversation_file(conversation_id: str, file_id: str, request: Request, background_tasks: BackgroundTasks):
     store = _store(request)
     conv = store.get_conversation(conversation_id)
     if not conv or conv.get("archived"):
         raise HTTPException(404, "conversation_not_found")
     if not store.delete_conversation_file(conversation_id, file_id):
         raise HTTPException(404, "file_not_found")
+    background_tasks.add_task(broadcast_resource_event, request.app, {
+        "kind": "working_set",
+        "action": "file_removed",
+        "conversation_id": conversation_id,
+        "file_id": file_id,
+        "message": "Working set updated",
+    })
     return {
         "ok": True,
         "contextAfter": store._context_usage_from_tokens(

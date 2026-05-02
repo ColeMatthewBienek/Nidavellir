@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from nidavellir.skills.activation import activate_skills
@@ -13,6 +13,7 @@ from nidavellir.skills.compilers.generic import GenericSkillCompiler
 from nidavellir.skills.importer import import_skill_from_markdown, import_skill_from_path
 from nidavellir.skills.models import SkillTaskContext
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
+from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import evaluate_and_audit
 from nidavellir.workspace import effective_default_working_directory
 
@@ -105,6 +106,17 @@ def _apply_import_options(skill, body: ImportMarkdownRequest):
     return skill.__class__.model_validate(data)
 
 
+def _skill_event(skill, action: str, message: str) -> dict:
+    return {
+        "kind": "skills",
+        "action": action,
+        "skill_id": skill.id,
+        "slug": skill.slug,
+        "scope": skill.scope.value,
+        "message": message,
+    }
+
+
 @router.get("/api/skills")
 def list_skills(request: Request) -> list[dict]:
     return [skill_summary(skill) for skill in _store(request).list_skills()]
@@ -124,7 +136,7 @@ def get_skill(skill_id: str, request: Request) -> dict:
 
 
 @router.post("/api/skills/{skill_id}/enabled")
-def set_skill_enabled(skill_id: str, body: EnableSkillRequest, request: Request) -> dict:
+def set_skill_enabled(skill_id: str, body: EnableSkillRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     store = _store(request)
     skill = store.get_skill(skill_id)
     if skill is None:
@@ -149,33 +161,49 @@ def set_skill_enabled(skill_id: str, body: EnableSkillRequest, request: Request)
                 "permission": decision.model_dump(mode="json"),
             })
     try:
-        return skill_summary(store.set_enabled(skill_id, body.enabled))
+        updated = store.set_enabled(skill_id, body.enabled)
+        background_tasks.add_task(
+            broadcast_resource_event,
+            request.app,
+            _skill_event(updated, "enabled" if body.enabled else "disabled", "Skill inventory updated"),
+        )
+        return skill_summary(updated)
     except KeyError:
         raise HTTPException(status_code=404, detail="skill_not_found") from None
 
 
 @router.post("/api/skills/{skill_id}/slash")
-def set_skill_show_in_slash(skill_id: str, body: ShowInSlashRequest, request: Request) -> dict:
+def set_skill_show_in_slash(skill_id: str, body: ShowInSlashRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     try:
-        return skill_summary(_store(request).set_show_in_slash(skill_id, body.showInSlash))
+        updated = _store(request).set_show_in_slash(skill_id, body.showInSlash)
+        background_tasks.add_task(
+            broadcast_resource_event,
+            request.app,
+            _skill_event(updated, "slash_updated", "Skill slash menu updated"),
+        )
+        return skill_summary(updated)
     except KeyError:
         raise HTTPException(status_code=404, detail="skill_not_found") from None
 
 
 @router.patch("/api/skills/{skill_id}")
-def update_skill_text(skill_id: str, body: UpdateSkillTextRequest, request: Request) -> dict:
+def update_skill_text(skill_id: str, body: UpdateSkillTextRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     try:
-        return skill_summary(
-            _store(request).update_skill_details(
-                skill_id,
-                name=body.name,
-                slug=body.slug,
-                core_instructions=body.instructions,
-                scope=body.scope,
-                activation_mode=body.activationMode,
-                triggers=body.triggers,
-            )
+        updated = _store(request).update_skill_details(
+            skill_id,
+            name=body.name,
+            slug=body.slug,
+            core_instructions=body.instructions,
+            scope=body.scope,
+            activation_mode=body.activationMode,
+            triggers=body.triggers,
         )
+        background_tasks.add_task(
+            broadcast_resource_event,
+            request.app,
+            _skill_event(updated, "updated", "Skill inventory updated"),
+        )
+        return skill_summary(updated)
     except sqlite3.IntegrityError as exc:
         if "skills.slug" in str(exc) or "UNIQUE constraint failed" in str(exc):
             raise HTTPException(status_code=409, detail="skill_slug_already_exists") from exc
@@ -187,14 +215,20 @@ def update_skill_text(skill_id: str, body: UpdateSkillTextRequest, request: Requ
 
 
 @router.delete("/api/skills/{skill_id}")
-def delete_skill(skill_id: str, request: Request) -> dict:
+def delete_skill(skill_id: str, request: Request, background_tasks: BackgroundTasks) -> dict:
     if not _store(request).delete_skill(skill_id):
         raise HTTPException(status_code=404, detail="skill_not_found")
+    background_tasks.add_task(broadcast_resource_event, request.app, {
+        "kind": "skills",
+        "action": "deleted",
+        "skill_id": skill_id,
+        "message": "Skill inventory updated",
+    })
     return {"ok": True, "deletedSkillId": skill_id}
 
 
 @router.post("/api/skills/import/local")
-def import_local_skill(body: ImportLocalRequest, request: Request) -> dict:
+def import_local_skill(body: ImportLocalRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     store = _store(request)
     decision = evaluate_and_audit(
         request,
@@ -228,6 +262,12 @@ def import_local_skill(body: ImportLocalRequest, request: Request) -> dict:
         error="; ".join(result.errors) if result.errors else None,
         imported_skill_id=skill.id if skill and result.ok else None,
     )
+    if skill and result.ok:
+        background_tasks.add_task(
+            broadcast_resource_event,
+            request.app,
+            _skill_event(skill, "imported", "Skill inventory updated"),
+        )
     return {
         "ok": result.ok,
         "importId": result.import_id,
@@ -239,7 +279,7 @@ def import_local_skill(body: ImportLocalRequest, request: Request) -> dict:
 
 
 @router.post("/api/skills/import/markdown")
-def import_markdown_skill(body: ImportMarkdownRequest, request: Request) -> dict:
+def import_markdown_skill(body: ImportMarkdownRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     store = _store(request)
     result = import_skill_from_markdown(body.markdown, name=body.name)
     skill = None
@@ -259,6 +299,12 @@ def import_markdown_skill(body: ImportMarkdownRequest, request: Request) -> dict
         error="; ".join(result.errors) if result.errors else None,
         imported_skill_id=skill.id if skill and result.ok else None,
     )
+    if skill and result.ok:
+        background_tasks.add_task(
+            broadcast_resource_event,
+            request.app,
+            _skill_event(skill, "imported", "Skill inventory updated"),
+        )
     return {
         "ok": result.ok,
         "importId": result.import_id,
@@ -290,7 +336,7 @@ def validate_markdown_skill(body: ImportMarkdownRequest) -> dict:
 
 
 @router.post("/api/skills/import/upload")
-async def import_upload_skill(request: Request) -> dict:
+async def import_upload_skill(request: Request, background_tasks: BackgroundTasks) -> dict:
     form = await request.form()
     upload = form.get("file")
     if upload is None or not hasattr(upload, "filename") or not hasattr(upload, "read"):
@@ -299,7 +345,7 @@ async def import_upload_skill(request: Request) -> dict:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await upload.read())
         tmp_path = tmp.name
-    return import_local_skill(ImportLocalRequest(path=tmp_path), request)
+    return import_local_skill(ImportLocalRequest(path=tmp_path), request, background_tasks)
 
 
 @router.get("/api/skills/{skill_id}/compatibility")

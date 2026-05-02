@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nidavellir.agents.base import CLIAgent
+from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers import ws as ws_router
 
 
@@ -34,6 +35,23 @@ def test_turn_broadcaster_buffers_frames_and_marks_completion():
         {"type": "done", "turn_id": "turn-1"},
     ]
     assert subscriber.sent == record.frames
+
+
+def test_resource_event_broadcasts_revisioned_resource_frame():
+    app = SimpleNamespace(state=SimpleNamespace())
+    subscriber = FakeWS()
+    app.state.resource_event_subscribers = {subscriber}
+
+    asyncio.run(broadcast_resource_event(app, {
+        "kind": "skills",
+        "action": "updated",
+        "message": "Skill inventory updated",
+    }))
+
+    assert app.state.resource_event_revision == 1
+    assert subscriber.sent[0]["type"] == "resource_event"
+    assert subscriber.sent[0]["event"]["revision"] == 1
+    assert subscriber.sent[0]["event"]["kind"] == "skills"
 
 
 def test_turn_record_buffers_steering_activity_frames():

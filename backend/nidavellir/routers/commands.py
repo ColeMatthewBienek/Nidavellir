@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from nidavellir.commands.events import broadcast_command_event
 from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
+from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 
@@ -114,7 +115,7 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
         timeout_seconds=body.timeoutSeconds,
         on_event=emit,
     )
-    return _store(request).create_run(
+    run = _store(request).create_run(
         run_id=run_id,
         conversation_id=body.conversationId,
         command=command,
@@ -127,6 +128,14 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
         added_to_working_set=body.addToWorkingSet,
         duration_ms=result["duration_ms"],
     )
+    await broadcast_resource_event(request.app, {
+        "kind": "commands",
+        "action": "captured",
+        "conversation_id": body.conversationId,
+        "run_id": run_id,
+        "message": "Command run captured",
+    })
+    return run
 
 
 @router.get("/runs")
@@ -135,8 +144,15 @@ def list_command_runs(request: Request, conversationId: str | None = None, limit
 
 
 @router.post("/runs/{run_id}/chat-attachment")
-def set_command_chat_attachment(run_id: str, body: CommandAttachmentRequest, request: Request) -> dict:
+async def set_command_chat_attachment(run_id: str, body: CommandAttachmentRequest, request: Request) -> dict:
     run = _store(request).set_include_in_chat(run_id, body.includeInChat)
     if run is None:
         raise HTTPException(status_code=404, detail="command_run_not_found")
+    await broadcast_resource_event(request.app, {
+        "kind": "command_attachments",
+        "action": "attached" if body.includeInChat else "detached",
+        "conversation_id": run.get("conversation_id"),
+        "run_id": run_id,
+        "message": "Command attachment updated",
+    })
     return run

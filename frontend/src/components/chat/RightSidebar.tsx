@@ -1822,7 +1822,7 @@ function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onTo
 function CommandsTab() {
   const workingDirectory = useAgentStore((state) => state.workingDirectory);
   const activeConversationId = useAgentStore((state) => state.activeConversationId);
-  const markResourcesChanged = useAgentStore((state) => state.markResourcesChanged);
+  const resourceRevision = useAgentStore((state) => state.resourceRevision);
   const [command, setCommand] = useState('');
   const [runs, setRuns] = useState<CommandRun[]>([]);
   const [running, setRunning] = useState(false);
@@ -1845,7 +1845,7 @@ function CommandsTab() {
   useEffect(() => {
     loadRuns();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConversationId]);
+  }, [activeConversationId, resourceRevision]);
 
   useEffect(() => {
     const handleCommandEvent = (event: Event) => {
@@ -1931,7 +1931,6 @@ function CommandsTab() {
         setPendingCommand(null);
         setRuns((items) => [run, ...items.filter((item) => item.id !== run.id)]);
         setCommand('');
-        markResourcesChanged('Command run captured');
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'command_run_failed'))
       .finally(() => setRunning(false));
@@ -1949,7 +1948,6 @@ function CommandsTab() {
       })
       .then((updated) => {
         setRuns((items) => items.map((item) => item.id === updated.id ? updated : item));
-        markResourcesChanged(updated.include_in_chat ? 'Command output attached to next turn' : 'Command output detached');
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'command_attachment_failed'));
   };
@@ -2055,6 +2053,8 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
   const report = latestCompletionReport(messages);
   const reports = completionReports(messages);
   const latestMessage = latestAgentMessage(messages);
+  const refreshWorkingSetFiles = useAgentStore((state) => state.refreshWorkingSetFiles);
+  const markResourcesChanged = useAgentStore((state) => state.markResourcesChanged);
   const addComment = (comment: Omit<LocalComment, 'id'>) => {
     setComments((items) => [...items, { ...comment, id: `${Date.now()}-${items.length}` }]);
   };
@@ -2110,22 +2110,44 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
         }}>
           Workspace
         </span>
-        <button
-          type="button"
-          aria-label="Close right sidebar"
-          onClick={onClose}
-          style={{
-            cursor: 'pointer',
-            color: 'var(--t1)',
-            fontSize: 13,
-            lineHeight: 1,
-            border: 'none',
-            background: 'transparent',
-            padding: 2,
-          }}
-        >
-          ✕
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button
+            type="button"
+            aria-label="Reload workspace resources"
+            onClick={() => {
+              markResourcesChanged('Workspace resources reloaded');
+              refreshWorkingSetFiles().catch(() => {});
+              window.dispatchEvent(new CustomEvent('nid:skills-changed'));
+            }}
+            style={{
+              cursor: 'pointer',
+              color: 'var(--t1)',
+              fontSize: 12,
+              lineHeight: 1,
+              border: 'none',
+              background: 'transparent',
+              padding: 2,
+            }}
+          >
+            ↻
+          </button>
+          <button
+            type="button"
+            aria-label="Close right sidebar"
+            onClick={onClose}
+            style={{
+              cursor: 'pointer',
+              color: 'var(--t1)',
+              fontSize: 13,
+              lineHeight: 1,
+              border: 'none',
+              background: 'transparent',
+              padding: 2,
+            }}
+          >
+            ✕
+          </button>
+        </div>
       </div>
 
       <div

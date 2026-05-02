@@ -318,6 +318,31 @@ function connect(): void {
         break;
       }
 
+      case "resource_event": {
+        const resourceEvent = data.event as {
+          kind?: string;
+          action?: string;
+          conversation_id?: string | null;
+          message?: string;
+        } | undefined;
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("nid:resource-event", { detail: resourceEvent }));
+        }
+        const activeConversation = useAgentStore.getState().activeConversationId;
+        if (resourceEvent?.conversation_id && activeConversation && resourceEvent.conversation_id !== activeConversation) {
+          break;
+        }
+        const message = resourceEvent?.message || "Resources reloaded";
+        s.markResourcesChanged(message);
+        if (resourceEvent?.kind === "working_set" || resourceEvent?.kind === "workspace") {
+          s.refreshWorkingSetFiles().catch(() => {});
+        }
+        if (resourceEvent?.kind === "skills" && typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("nid:skills-changed"));
+        }
+        break;
+      }
+
       case "done":
         {
           const events = _parser?.flush() ?? [];

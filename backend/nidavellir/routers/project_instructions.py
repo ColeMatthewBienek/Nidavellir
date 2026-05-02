@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
@@ -11,6 +11,7 @@ from nidavellir.project_instructions.discovery import (
     default_global_instruction_files,
     discover_project_instructions,
 )
+from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 
@@ -112,7 +113,7 @@ def get_project_instructions(request: Request, workspace: str | None = None, pro
 
 
 @router.put("")
-def write_project_instruction(body: ProjectInstructionWriteRequest, request: Request) -> dict:
+def write_project_instruction(body: ProjectInstructionWriteRequest, request: Request, background_tasks: BackgroundTasks) -> dict:
     workspace_path = _resolve_workspace(body.workspace)
     target = _instruction_target_path(workspace_path, body.filename, body.path)
     decision = evaluate_and_audit(
@@ -151,4 +152,13 @@ def write_project_instruction(body: ProjectInstructionWriteRequest, request: Req
                 "permission": decision.model_dump(mode="json"),
             })
     target.write_text(body.content, encoding="utf-8")
+    background_tasks.add_task(broadcast_resource_event, request.app, {
+        "kind": "project_instructions",
+        "action": "updated",
+        "workspace": str(workspace_path),
+        "path": str(target),
+        "filename": body.filename,
+        "provider": body.provider,
+        "message": "Project instructions updated",
+    })
     return get_project_instructions(request, workspace=str(workspace_path), provider=body.provider)
