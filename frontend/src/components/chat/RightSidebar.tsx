@@ -142,6 +142,22 @@ interface CommandPreset {
   command: string;
 }
 
+interface AuditBundleManifest {
+  conversation_id: string;
+  session_id: string;
+  provider?: string | null;
+  model?: string | null;
+  working_directory?: string | null;
+  counts: Record<string, number>;
+  redaction: Record<string, string>;
+  warnings: string[];
+}
+
+interface AuditBundleManifestResponse {
+  schema_version: string;
+  manifest: AuditBundleManifest;
+}
+
 interface CommentDraft {
   path: string;
   line: number;
@@ -172,6 +188,43 @@ function AuditTab() {
   const activeConversationId = useAgentStore((state) => state.activeConversationId);
   const messages = useAgentStore((state) => state.messages);
   const workingSetFiles = useAgentStore((state) => state.workingSetFiles);
+  const resourceRevision = useAgentStore((state) => state.resourceRevision);
+  const [manifest, setManifest] = useState<AuditBundleManifest | null>(null);
+  const [manifestError, setManifestError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeConversationId) {
+      setManifest(null);
+      return;
+    }
+    fetch(`http://localhost:7430/api/conversations/${activeConversationId}/audit-bundle/manifest`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`audit_manifest_${response.status}`);
+        return response.json() as Promise<AuditBundleManifestResponse>;
+      })
+      .then((body) => {
+        setManifest(body.manifest);
+        setManifestError(null);
+      })
+      .catch((err) => {
+        setManifest(null);
+        setManifestError(err instanceof Error ? err.message : 'audit_manifest_failed');
+      });
+  }, [activeConversationId, resourceRevision]);
+
+  const counts = manifest?.counts;
+  const redaction = manifest?.redaction;
+  const countCards: Array<[string, number]> = counts ? [
+    ['Messages', counts.messages],
+    ['Commands', counts.command_runs],
+    ['Permissions', counts.permission_audit_events],
+    ['Memory', counts.memory_activity],
+    ['Instructions', counts.project_instructions],
+    ['Skills', counts.skills],
+  ] : [
+    ['Messages', messages.length],
+    ['Working Set', workingSetFiles.length],
+  ];
 
   return (
     <div style={{
@@ -191,15 +244,32 @@ function AuditTab() {
         gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
         gap: 8,
       }}>
-        <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)' }}>
-          <div style={{ color: 'var(--t1)', fontSize: 10, textTransform: 'uppercase', fontWeight: 700 }}>Messages</div>
-          <div style={{ color: 'var(--t0)', fontSize: 18, fontWeight: 750, marginTop: 3 }}>{messages.length}</div>
-        </div>
-        <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)' }}>
-          <div style={{ color: 'var(--t1)', fontSize: 10, textTransform: 'uppercase', fontWeight: 700 }}>Working Set</div>
-          <div style={{ color: 'var(--t0)', fontSize: 18, fontWeight: 750, marginTop: 3 }}>{workingSetFiles.length}</div>
-        </div>
+        {countCards.map(([label, value]) => (
+          <div key={label} style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)' }}>
+            <div style={{ color: 'var(--t1)', fontSize: 10, textTransform: 'uppercase', fontWeight: 700 }}>{label}</div>
+            <div style={{ color: 'var(--t0)', fontSize: 18, fontWeight: 750, marginTop: 3 }}>{value}</div>
+          </div>
+        ))}
       </div>
+      {manifest && (
+        <div style={{
+          border: '1px solid var(--bd)',
+          borderRadius: 7,
+          padding: 10,
+          background: 'var(--bg0)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          <div style={{ color: 'var(--t1)', fontSize: 10, textTransform: 'uppercase', fontWeight: 700 }}>Bundle Manifest</div>
+          <div style={{ color: 'var(--t0)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {manifest.provider ?? 'provider'} / {manifest.model ?? 'model'}
+          </div>
+          <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {manifest.working_directory}
+          </div>
+        </div>
+      )}
       <div style={{
         border: '1px solid var(--bd)',
         borderRadius: 7,
@@ -209,8 +279,26 @@ function AuditTab() {
         lineHeight: 1.5,
         background: 'var(--bg0)',
       }}>
-        Command output, memory snapshots, instruction file contents, and skill instruction text are redacted by default. The export dialog lets you opt into each sensitive section.
+        Command output is {redaction?.command_output ?? 'omitted'}, memory snapshots are {redaction?.memory_snapshots ?? 'omitted'}, instruction contents are {redaction?.project_instruction_contents ?? 'omitted'}, and skill instructions are {redaction?.skill_instructions ?? 'omitted'} by default. The export dialog lets you opt into each sensitive section.
       </div>
+      {manifestError && (
+        <div style={{ color: 'var(--red)', fontSize: 12 }}>
+          {manifestError}
+        </div>
+      )}
+      {manifest?.warnings?.length ? (
+        <div style={{
+          border: '1px solid #f8514933',
+          borderRadius: 7,
+          padding: 10,
+          color: 'var(--red)',
+          background: '#f8514911',
+          fontSize: 11,
+          lineHeight: 1.5,
+        }}>
+          {manifest.warnings.join(' ')}
+        </div>
+      ) : null}
       <button
         type="button"
         disabled={!activeConversationId}

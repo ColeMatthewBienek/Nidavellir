@@ -166,6 +166,57 @@ async def test_conversation_audit_bundle_exports_session_artifacts(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_conversation_audit_bundle_manifest_previews_counts(tmp_path: Path):
+    memory_store, command_store, permission_store = setup_app(tmp_path)
+    memory_store.create_conversation(
+        "conv-preview",
+        active_session_id="sess-preview",
+        provider_id="codex",
+        model_id="gpt-5.5",
+        working_directory=str(tmp_path),
+    )
+    memory_store.append_message("conv-preview", "msg-preview", "user", "Preview the export")
+    command_store.create_run(
+        conversation_id="conv-preview",
+        command="npm test",
+        cwd=str(tmp_path),
+        exit_code=0,
+        stdout="ok",
+        stderr="",
+        timed_out=False,
+        include_in_chat=False,
+        added_to_working_set=False,
+        duration_ms=11,
+    )
+    permission_store.log(
+        PermissionEvaluationRequest(
+            action="shell_command",
+            command="npm test",
+            actor="user",
+            conversation_id="conv-preview",
+            workspace=str(tmp_path),
+        ),
+        PermissionEvaluationResult(
+            action="shell_command",
+            decision=PermissionDecision.ALLOW,
+            reason="test",
+        ),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.get("/api/conversations/conv-preview/audit-bundle/manifest")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["schema_version"] == "conversation_audit_bundle.v1"
+    assert body["manifest"]["conversation_id"] == "conv-preview"
+    assert body["manifest"]["counts"]["messages"] == 1
+    assert body["manifest"]["counts"]["command_runs"] == 1
+    assert body["manifest"]["counts"]["permission_audit_events"] == 1
+    assert body["manifest"]["redaction"]["command_output"] == "omitted"
+
+
+@pytest.mark.asyncio
 async def test_conversation_audit_bundle_can_include_redacted_prompt_surfaces(tmp_path: Path):
     memory_store, command_store, _permission_store = setup_app(tmp_path)
     (tmp_path / "PROJECT.md").write_text("Project-only audit context", encoding="utf-8")

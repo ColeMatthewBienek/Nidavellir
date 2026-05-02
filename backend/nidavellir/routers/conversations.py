@@ -376,6 +376,15 @@ def export_conversation_audit_bundle(
     )
 
 
+@router.get("/{conversation_id}/audit-bundle/manifest")
+def get_conversation_audit_bundle_manifest(conversation_id: str, request: Request):
+    bundle = _conversation_audit_bundle(conversation_id, request)
+    return {
+        "schema_version": bundle["schema_version"],
+        "manifest": bundle["manifest"],
+    }
+
+
 @router.post("/{conversation_id}/workspace")
 def set_conversation_workspace(conversation_id: str, body: ConversationWorkspaceRequest, request: Request, background_tasks: BackgroundTasks):
     store = _store(request)

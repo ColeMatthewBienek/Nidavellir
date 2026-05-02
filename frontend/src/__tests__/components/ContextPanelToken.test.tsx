@@ -96,6 +96,41 @@ describe('ContextPanel — Token Usage section', () => {
           }),
         });
       }
+      if (String(url).includes('/api/conversations/conv-test/audit-bundle/manifest')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            schema_version: 'conversation_audit_bundle.v1',
+            manifest: {
+              conversation_id: 'conv-test',
+              session_id: 'sess-test',
+              provider: 'claude',
+              model: 'claude-sonnet-4-6',
+              working_directory: '/repo',
+              counts: {
+                messages: 2,
+                working_set_files: 1,
+                command_runs: 1,
+                permission_audit_events: 1,
+                memory_activity: 1,
+                project_instructions: 2,
+                suppressed_project_instructions: 1,
+                skills: 3,
+                skill_activations: 1,
+              },
+              redaction: {
+                messages: 'included',
+                working_set_file_contents: 'omitted',
+                command_output: 'omitted',
+                memory_snapshots: 'omitted',
+                project_instruction_contents: 'omitted',
+                skill_instructions: 'omitted',
+              },
+              warnings: [],
+            },
+          }),
+        });
+      }
       if (String(url).includes('/api/permissions/evaluate')) {
         return Promise.resolve({
           ok: true,
@@ -233,6 +268,19 @@ describe('ContextPanel — Token Usage section', () => {
 
     expect(listener).toHaveBeenCalledOnce();
     window.removeEventListener('nid:audit-export-open', listener);
+  });
+
+  it('previews audit bundle manifest counts and redaction defaults', async () => {
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Audit' }));
+
+    expect(await screen.findByText('Bundle Manifest')).toBeTruthy();
+    expect(screen.getAllByText('Commands').length).toBeGreaterThan(0);
+    expect(screen.getByText('Permissions')).toBeTruthy();
+    expect(screen.getAllByText('Instructions').length).toBeGreaterThan(0);
+    expect(screen.getByText('claude / claude-sonnet-4-6')).toBeTruthy();
+    expect(screen.getByText(/Command output is omitted/)).toBeTruthy();
   });
 
   it('manually reloads workspace resources from the sidebar header', () => {
