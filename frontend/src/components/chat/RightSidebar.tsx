@@ -6,7 +6,7 @@ import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionR
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
-type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'git';
+type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'audit' | 'git';
 type InstructionViewMode = 'edit' | 'preview';
 type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
@@ -20,6 +20,7 @@ const TABS: Array<{ id: RightSidebarTab; label: string }> = [
   { id: 'review', label: 'Review' },
   { id: 'instructions', label: 'Instructions' },
   { id: 'commands', label: 'Commands' },
+  { id: 'audit', label: 'Audit' },
   { id: 'git', label: 'Git' },
 ];
 
@@ -157,6 +158,70 @@ function EmptySidebarTab({ title, description }: { title: string; description: s
       <div style={{ fontSize: 12, color: 'var(--t0)', lineHeight: 1.55 }}>
         {description}
       </div>
+    </div>
+  );
+}
+
+function AuditTab() {
+  const activeConversationId = useAgentStore((state) => state.activeConversationId);
+  const messages = useAgentStore((state) => state.messages);
+  const workingSetFiles = useAgentStore((state) => state.workingSetFiles);
+
+  return (
+    <div style={{
+      flex: 1,
+      overflowY: 'auto',
+      padding: 14,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <SidebarSectionTitle>Audit Bundle</SidebarSectionTitle>
+      <div style={{ fontSize: 12, color: 'var(--t0)', lineHeight: 1.55 }}>
+        Export this conversation as a reviewable evidence bundle with a manifest, messages, working-set metadata, permission decisions, command records, instruction diagnostics, and skill inventory metadata.
+      </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+        gap: 8,
+      }}>
+        <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)' }}>
+          <div style={{ color: 'var(--t1)', fontSize: 10, textTransform: 'uppercase', fontWeight: 700 }}>Messages</div>
+          <div style={{ color: 'var(--t0)', fontSize: 18, fontWeight: 750, marginTop: 3 }}>{messages.length}</div>
+        </div>
+        <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)' }}>
+          <div style={{ color: 'var(--t1)', fontSize: 10, textTransform: 'uppercase', fontWeight: 700 }}>Working Set</div>
+          <div style={{ color: 'var(--t0)', fontSize: 18, fontWeight: 750, marginTop: 3 }}>{workingSetFiles.length}</div>
+        </div>
+      </div>
+      <div style={{
+        border: '1px solid var(--bd)',
+        borderRadius: 7,
+        padding: 10,
+        color: 'var(--t1)',
+        fontSize: 11,
+        lineHeight: 1.5,
+        background: 'var(--bg0)',
+      }}>
+        Command output, memory snapshots, instruction file contents, and skill instruction text are redacted by default. The export dialog lets you opt into each sensitive section.
+      </div>
+      <button
+        type="button"
+        disabled={!activeConversationId}
+        onClick={() => window.dispatchEvent(new CustomEvent('nid:audit-export-open'))}
+        style={{
+          border: '1px solid var(--bd)',
+          borderRadius: 6,
+          background: activeConversationId ? '#23863633' : 'transparent',
+          color: activeConversationId ? 'var(--t0)' : 'var(--t1)',
+          cursor: activeConversationId ? 'pointer' : 'not-allowed',
+          padding: '8px 11px',
+          fontSize: 12,
+          fontWeight: 700,
+        }}
+      >
+        Export Audit Bundle
+      </button>
     </div>
   );
 }
@@ -2068,7 +2133,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
         aria-label="Right sidebar sections"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
+          gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
           gap: 4,
           padding: 8,
           borderBottom: '1px solid var(--bd)',
@@ -2118,6 +2183,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
       )}
       {activeTab === 'instructions' && <ProjectInstructionsTab />}
       {activeTab === 'commands' && <CommandsTab />}
+      {activeTab === 'audit' && <AuditTab />}
       {activeTab === 'git' && <GitTab selectedPath={selectedReviewRef?.path} onReviewFile={(path) => {
         setSelectedReviewRef({ kind: 'code', path, label: path });
         setReviewScope('unstaged');

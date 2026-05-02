@@ -105,6 +105,8 @@ describe('ChatScreen Codex-style layout', () => {
     expect(screen.getByRole('dialog', { name: 'Export audit bundle' })).toBeTruthy();
     expect(screen.getByLabelText(/Include command output/)).not.toBeChecked();
     expect(screen.getByLabelText(/Include memory snapshots/)).not.toBeChecked();
+    expect(screen.getByLabelText(/Include instruction file contents/)).not.toBeChecked();
+    expect(screen.getByLabelText(/Include skill instruction text/)).not.toBeChecked();
 
     fireEvent.click(screen.getByLabelText(/Include command output/));
 
