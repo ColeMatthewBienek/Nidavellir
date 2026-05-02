@@ -48,6 +48,17 @@ class NodeCreateRequest(BaseModel):
     positionY: float = 0
 
 
+class NodeUpdateRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    status: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    skillIds: list[str] | None = None
+    positionX: float | None = None
+    positionY: float | None = None
+
+
 class EdgeCreateRequest(BaseModel):
     fromNodeId: str
     toNodeId: str
@@ -161,6 +172,28 @@ def create_node(task_id: str, body: NodeCreateRequest, request: Request) -> dict
         raise
 
 
+@router.patch("/nodes/{node_id}")
+def update_node(node_id: str, body: NodeUpdateRequest, request: Request) -> dict:
+    updates = {
+        "title": body.title,
+        "description": body.description,
+        "status": body.status,
+        "provider": body.provider,
+        "model": body.model,
+        "skill_ids": body.skillIds,
+        "position_x": body.positionX,
+        "position_y": body.positionY,
+    }
+    try:
+        node = _store(request).update_node(node_id, {key: value for key, value in updates.items() if value is not None})
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if node is None:
+        raise HTTPException(status_code=404, detail="node_not_found")
+    return node
+
+
 @router.post("/tasks/{task_id}/edges")
 def create_edge(task_id: str, body: EdgeCreateRequest, request: Request) -> dict:
     try:
@@ -172,6 +205,13 @@ def create_edge(task_id: str, body: EdgeCreateRequest, request: Request) -> dict
     except Exception as err:
         _handle_store_error(err)
         raise
+
+
+@router.delete("/edges/{edge_id}", status_code=204)
+def delete_edge(edge_id: str, request: Request) -> None:
+    deleted = _store(request).delete_edge(edge_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="edge_not_found")
 
 
 @router.post("/nodes/{node_id}/steps")

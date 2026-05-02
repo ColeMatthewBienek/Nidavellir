@@ -19,19 +19,38 @@ const task = {
 
 const detail = {
   ...task,
-  nodes: [{
-    id: 'node-1',
+  nodes: [
+    {
+      id: 'node-1',
+      task_id: 'task-1',
+      title: 'Data Model',
+      description: '',
+      status: 'ready',
+      provider: 'codex',
+      model: 'gpt-5.5',
+      skill_ids: [],
+      position_x: 40,
+      position_y: 40,
+    },
+    {
+      id: 'node-2',
+      task_id: 'task-1',
+      title: 'Board UI',
+      description: '',
+      status: 'not_started',
+      provider: null,
+      model: null,
+      skill_ids: [],
+      position_x: 240,
+      position_y: 40,
+    },
+  ],
+  edges: [{
+    id: 'edge-1',
     task_id: 'task-1',
-    title: 'Data Model',
-    description: '',
-    status: 'ready',
-    provider: 'codex',
-    model: 'gpt-5.5',
-    skill_ids: [],
-    position_x: 40,
-    position_y: 40,
+    from_node_id: 'node-1',
+    to_node_id: 'node-2',
   }],
-  edges: [],
   steps: [{
     id: 'step-1',
     node_id: 'node-1',
@@ -70,11 +89,48 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).includes('/api/orchestration/tasks/task-1') && options?.method === 'PATCH') {
         return Promise.resolve({ ok: true, json: async () => ({ ...detail, status: 'ready' }) });
       }
+      if (String(url).includes('/api/orchestration/tasks/task-1/nodes') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'node-new',
+            task_id: 'task-1',
+            title: 'Review',
+            description: '',
+            status: 'not_started',
+            provider: null,
+            model: null,
+            skill_ids: [],
+            position_x: 0,
+            position_y: 0,
+          }),
+        });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/edges') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'edge-1',
+            task_id: 'task-1',
+            from_node_id: 'node-1',
+            to_node_id: 'node-2',
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detail });
       }
+      if (String(url).includes('/api/orchestration/nodes/node-1') && options?.method === 'PATCH') {
+        return Promise.resolve({ ok: true, json: async () => ({ ...detail.nodes[0], title: 'Data Layer' }) });
+      }
       if (String(url).includes('/api/orchestration/steps/step-1/status')) {
         return Promise.resolve({ ok: true, json: async () => ({ ...detail.steps[0], status: 'complete' }) });
+      }
+      if (String(url).includes('/api/orchestration/nodes/node-1/steps') && options?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ ...detail.steps[0], id: 'step-new', title: 'Review output' }) });
+      }
+      if (String(url).includes('/api/orchestration/edges/edge-1') && options?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: async () => ({}) });
       }
       return Promise.resolve({ ok: true, json: async () => [] });
     }));
@@ -122,6 +178,75 @@ describe('PlanScreen orchestration board', () => {
       );
       expect(moveCalls.length).toBe(1);
       expect(completeCalls.length).toBe(1);
+    });
+  });
+
+  it('creates and edits DAG nodes from the Plan page', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '+ Node' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Node title' }), { target: { value: 'Review' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Node' }));
+
+    await waitFor(() => {
+      const createCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/tasks/task-1/nodes') && options?.method === 'POST'
+      );
+      expect(createCalls.length).toBe(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Node' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Node title' }), { target: { value: 'Data Layer' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Node' }));
+
+    await waitFor(() => {
+      const updateCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/nodes/node-1') && options?.method === 'PATCH'
+      );
+      expect(updateCalls.length).toBe(1);
+    });
+  });
+
+  it('creates and removes DAG dependencies from the Plan page', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Dependency source' }), { target: { value: 'node-1' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Dependency target' }), { target: { value: 'node-2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await waitFor(() => {
+      const edgeCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/tasks/task-1/edges') && options?.method === 'POST'
+      );
+      expect(edgeCalls.length).toBe(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove dependency Data Model to Board UI' }));
+
+    await waitFor(() => {
+      const deleteCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/edges/edge-1') && options?.method === 'DELETE'
+      );
+      expect(deleteCalls.length).toBe(1);
+    });
+  });
+
+  it('creates linear node steps through the step modal', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '+ Step' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Step title' }), { target: { value: 'Review output' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Step type' }), { target: { value: 'review' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Step' }));
+
+    await waitFor(() => {
+      const stepCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/nodes/node-1/steps') && options?.method === 'POST'
+      );
+      expect(stepCalls.length).toBe(1);
     });
   });
 });

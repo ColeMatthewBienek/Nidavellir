@@ -110,6 +110,38 @@ async def test_orchestration_task_dag_and_step_readiness_flow(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_orchestration_updates_nodes_and_removes_edges(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={"title": "Interactive DAG"})).json()
+        first = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "First"})).json()
+        second = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "Second"})).json()
+        edge = (await c.post(f"/api/orchestration/tasks/{task['id']}/edges", json={
+            "fromNodeId": first["id"],
+            "toNodeId": second["id"],
+        })).json()
+
+        updated = await c.patch(f"/api/orchestration/nodes/{first['id']}", json={
+            "title": "Renamed",
+            "positionX": 220,
+            "positionY": 120,
+        })
+        assert updated.status_code == 200
+        assert updated.json()["title"] == "Renamed"
+        assert updated.json()["position_x"] == 220
+        assert updated.json()["position_y"] == 120
+
+        deleted = await c.delete(f"/api/orchestration/edges/{edge['id']}")
+        assert deleted.status_code == 204
+
+        detail = (await c.get(f"/api/orchestration/tasks/{task['id']}")).json()
+        assert detail["edges"] == []
+        event_types = {event["type"] for event in (await c.get(f"/api/orchestration/tasks/{task['id']}/events")).json()}
+        assert {"node_updated", "edge_removed"} <= event_types
+
+
+@pytest.mark.asyncio
 async def test_orchestration_rejects_invalid_status(tmp_path: Path):
     setup_app(tmp_path)
 

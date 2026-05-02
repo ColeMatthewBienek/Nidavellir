@@ -293,6 +293,34 @@ class OrchestrationStore:
             row = conn.execute("SELECT * FROM orchestration_nodes WHERE id = ?", (node_id,)).fetchone()
         return self._node_row(row) if row else None
 
+    def update_node(self, node_id: str, updates: dict[str, Any]) -> dict | None:
+        node = self.get_node(node_id)
+        if not node:
+            return None
+        allowed = {
+            "title", "description", "status", "provider", "model", "skill_ids",
+            "position_x", "position_y",
+        }
+        values = {key: value for key, value in updates.items() if key in allowed}
+        if not values:
+            return node
+        if "status" in values:
+            self._require_status(values["status"], NODE_STATUSES, "node_status")
+        assignments = []
+        params: list[Any] = []
+        for key, value in values.items():
+            column = "skill_ids_json" if key == "skill_ids" else key
+            assignments.append(f"{column} = ?")
+            params.append(_json_dumps(value or []) if key == "skill_ids" else value)
+        assignments.append("updated_at = ?")
+        params.append(_now())
+        params.append(node_id)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE orchestration_nodes SET {', '.join(assignments)} WHERE id = ?", params)
+        self.append_event(task_id=node["task_id"], node_id=node_id, type="node_updated", payload=values)
+        self.recalculate_task_readiness(node["task_id"])
+        return self.get_node(node_id)
+
     def create_edge(self, *, task_id: str, from_node_id: str, to_node_id: str) -> dict:
         self._require_task(task_id)
         from_node = self._require_node(from_node_id)
@@ -324,6 +352,20 @@ class OrchestrationStore:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM orchestration_edges WHERE id = ?", (edge_id,)).fetchone()
         return self._edge_row(row) if row else None
+
+    def delete_edge(self, edge_id: str) -> bool:
+        edge = self.get_edge(edge_id)
+        if not edge:
+            return False
+        with self._conn() as conn:
+            conn.execute("DELETE FROM orchestration_edges WHERE id = ?", (edge_id,))
+        self.append_event(
+            task_id=edge["task_id"],
+            type="edge_removed",
+            payload={"from_node_id": edge["from_node_id"], "to_node_id": edge["to_node_id"]},
+        )
+        self.recalculate_task_readiness(edge["task_id"])
+        return True
 
     def create_step(
         self,

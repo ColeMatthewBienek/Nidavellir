@@ -14,6 +14,9 @@ const BOARD_COLUMNS = [
   { id: 'cancelled', label: 'Cancelled' },
 ];
 
+const NODE_STATUSES = ['not_started', 'ready', 'running', 'blocked', 'failed', 'complete', 'skipped', 'cancelled'];
+const STEP_TYPES = ['manual', 'agent', 'command', 'review', 'gate', 'artifact', 'handoff'];
+
 const STATUS_COLORS: Record<string, string> = {
   backlog: 'var(--t1)',
   ready: 'var(--blu)',
@@ -292,6 +295,10 @@ function TaskDetail({
   selectedNodeId,
   onSelectNode,
   onAddNode,
+  onEditNode,
+  onNudgeNode,
+  onAddEdge,
+  onDeleteEdge,
   onAddStep,
   onCompleteStep,
 }: {
@@ -300,6 +307,10 @@ function TaskDetail({
   selectedNodeId?: string | null;
   onSelectNode: (nodeId: string) => void;
   onAddNode: () => void;
+  onEditNode: (node: OrchestrationNode) => void;
+  onNudgeNode: (node: OrchestrationNode, dx: number, dy: number) => void;
+  onAddEdge: (fromNodeId: string, toNodeId: string) => void;
+  onDeleteEdge: (edgeId: string) => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
 }) {
@@ -308,6 +319,13 @@ function TaskDetail({
     ? task.steps.filter((step) => step.node_id === selectedNode.id).sort((a, b) => a.order_index - b.order_index)
     : [];
   const nodeIsRunnable = selectedNode ? task.readiness.runnable.some((item) => item.node_id === selectedNode.id) : false;
+  const [edgeFrom, setEdgeFrom] = useState('');
+  const [edgeTo, setEdgeTo] = useState('');
+
+  useEffect(() => {
+    if (!edgeFrom && task.nodes[0]) setEdgeFrom(task.nodes[0].id);
+    if (!edgeTo && task.nodes[1]) setEdgeTo(task.nodes[1].id);
+  }, [edgeFrom, edgeTo, task.nodes]);
 
   return (
     <aside style={{
@@ -343,9 +361,76 @@ function TaskDetail({
         </section>
 
         <section>
+          <SectionTitle>Dependencies</SectionTitle>
+          <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 8, marginTop: 9 }}>
+            {task.nodes.length >= 2 && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 8 }}>
+                <select
+                  aria-label="Dependency source"
+                  value={edgeFrom}
+                  onChange={(event) => setEdgeFrom(event.target.value)}
+                  style={{ minWidth: 0, border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 11, padding: 6 }}
+                >
+                  {task.nodes.map((node) => <option key={node.id} value={node.id}>{node.title}</option>)}
+                </select>
+                <select
+                  aria-label="Dependency target"
+                  value={edgeTo}
+                  onChange={(event) => setEdgeTo(event.target.value)}
+                  style={{ minWidth: 0, border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 11, padding: 6 }}
+                >
+                  {task.nodes.map((node) => <option key={node.id} value={node.id}>{node.title}</option>)}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => onAddEdge(edgeFrom, edgeTo)}
+                  disabled={!edgeFrom || !edgeTo || edgeFrom === edgeTo}
+                  style={{
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: '#1f6feb22',
+                    color: 'var(--blu)',
+                    cursor: edgeFrom && edgeTo && edgeFrom !== edgeTo ? 'pointer' : 'not-allowed',
+                    fontSize: 11,
+                    padding: '4px 8px',
+                    fontWeight: 700,
+                  }}
+                >
+                  Add
+                </button>
+              </div>
+            )}
+            {task.edges.length === 0 ? (
+              <div style={{ color: 'var(--t1)', fontSize: 12 }}>No dependencies yet. Nodes can run in parallel until an edge is added.</div>
+            ) : task.edges.map((edge) => {
+              const from = task.nodes.find((node) => node.id === edge.from_node_id);
+              const to = task.nodes.find((node) => node.id === edge.to_node_id);
+              return (
+                <div key={edge.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+                  <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ color: 'var(--t0)' }}>{from?.title ?? 'Unknown'}</span> before <span style={{ color: 'var(--t0)' }}>{to?.title ?? 'Unknown'}</span>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={`Remove dependency ${from?.title ?? 'source'} to ${to?.title ?? 'target'}`}
+                    onClick={() => onDeleteEdge(edge.id)}
+                    style={{ border: '1px solid var(--bd)', borderRadius: 5, background: '#f8514918', color: 'var(--red)', cursor: 'pointer', fontSize: 11, padding: '3px 7px' }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
             <SectionTitle>Node Flow</SectionTitle>
-            {selectedNode && <Btn small onClick={() => onAddStep(selectedNode.id)}>+ Step</Btn>}
+            <div style={{ display: 'flex', gap: 6 }}>
+              {selectedNode && <Btn small onClick={() => onEditNode(selectedNode)}>Edit Node</Btn>}
+              {selectedNode && <Btn small onClick={() => onAddStep(selectedNode.id)}>+ Step</Btn>}
+            </div>
           </div>
           {!selectedNode ? (
             <div style={{ color: 'var(--t1)', fontSize: 12 }}>Select or add a node to define its linear flow.</div>
@@ -358,6 +443,24 @@ function TaskDetail({
                 </div>
                 <div style={{ color: nodeIsRunnable ? 'var(--grn)' : 'var(--t1)', fontSize: 11, marginTop: 6 }}>
                   {nodeIsRunnable ? 'Runnable now' : 'Waiting for dependencies or steps'}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                  {[
+                    ['Left', -40, 0],
+                    ['Right', 40, 0],
+                    ['Up', 0, -40],
+                    ['Down', 0, 40],
+                  ].map(([label, dx, dy]) => (
+                    <button
+                      key={label}
+                      type="button"
+                      aria-label={`Move node ${label}`}
+                      onClick={() => onNudgeNode(selectedNode, Number(dx), Number(dy))}
+                      style={{ border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t1)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
               </div>
               {selectedSteps.length === 0 ? (
@@ -479,6 +582,170 @@ function NewTaskModal({
   );
 }
 
+function NodeModal({
+  node,
+  onClose,
+  onSave,
+}: {
+  node?: OrchestrationNode | null;
+  onClose: () => void;
+  onSave: (values: {
+    title: string;
+    description: string;
+    status: string;
+    provider: string;
+    model: string;
+    positionX: number;
+    positionY: number;
+  }) => void;
+}) {
+  const [title, setTitle] = useState(node?.title ?? '');
+  const [description, setDescription] = useState(node?.description ?? '');
+  const [status, setStatus] = useState(node?.status ?? 'not_started');
+  const [provider, setProvider] = useState(node?.provider ?? '');
+  const [model, setModel] = useState(node?.model ?? '');
+  const [positionX, setPositionX] = useState(String(Math.round(node?.position_x ?? 0)));
+  const [positionY, setPositionY] = useState(String(Math.round(node?.position_y ?? 0)));
+
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="orchestration-node-title" style={{
+      position: 'fixed',
+      inset: 0,
+      zIndex: 50,
+      background: '#00000088',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    }}>
+      <div style={{ width: 520, border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', padding: 18 }}>
+        <div id="orchestration-node-title" style={{ color: 'var(--t0)', fontSize: 16, fontWeight: 750, marginBottom: 12 }}>
+          {node ? 'Edit DAG node' : 'New DAG node'}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 10 }}>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Title</label>
+            <input
+              aria-label="Node title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              autoFocus
+              style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Status</label>
+            <select
+              aria-label="Node status"
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+              style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }}
+            >
+              {NODE_STATUSES.map((item) => <option key={item} value={item}>{item.replace(/_/g, ' ')}</option>)}
+            </select>
+          </div>
+        </div>
+        <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, margin: '12px 0 5px' }}>Description</label>
+        <textarea
+          aria-label="Node description"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          style={{ width: '100%', minHeight: 82, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, resize: 'vertical' }}
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px 90px', gap: 10, marginTop: 12 }}>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Provider</label>
+            <input aria-label="Node provider" value={provider} onChange={(event) => setProvider(event.target.value)} style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }} />
+          </div>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Model</label>
+            <input aria-label="Node model" value={model} onChange={(event) => setModel(event.target.value)} style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }} />
+          </div>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>X</label>
+            <input aria-label="Node x" type="number" value={positionX} onChange={(event) => setPositionX(event.target.value)} style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }} />
+          </div>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Y</label>
+            <input aria-label="Node y" type="number" value={positionY} onChange={(event) => setPositionY(event.target.value)} style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }} />
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <Btn primary disabled={!title.trim()} onClick={() => onSave({
+            title: title.trim(),
+            description: description.trim(),
+            status,
+            provider: provider.trim(),
+            model: model.trim(),
+            positionX: Number(positionX) || 0,
+            positionY: Number(positionY) || 0,
+          })}>
+            Save Node
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StepModal({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (values: { title: string; description: string; type: string }) => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [type, setType] = useState('manual');
+
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="orchestration-step-title" style={{
+      position: 'fixed',
+      inset: 0,
+      zIndex: 50,
+      background: '#00000088',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    }}>
+      <div style={{ width: 440, border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', padding: 18 }}>
+        <div id="orchestration-step-title" style={{ color: 'var(--t0)', fontSize: 16, fontWeight: 750, marginBottom: 12 }}>
+          New node step
+        </div>
+        <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Title</label>
+        <input
+          aria-label="Step title"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          autoFocus
+          style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, marginBottom: 12 }}
+        />
+        <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Type</label>
+        <select
+          aria-label="Step type"
+          value={type}
+          onChange={(event) => setType(event.target.value)}
+          style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, marginBottom: 12 }}
+        >
+          {STEP_TYPES.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+        <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Description</label>
+        <textarea
+          aria-label="Step description"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          style={{ width: '100%', minHeight: 82, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, resize: 'vertical' }}
+        />
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <Btn primary disabled={!title.trim()} onClick={() => onCreate({ title: title.trim(), description: description.trim(), type })}>Create Step</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PlanScreen() {
   const [tasks, setTasks] = useState<OrchestrationTaskSummary[]>([]);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
@@ -487,6 +754,8 @@ export function PlanScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editingNode, setEditingNode] = useState<OrchestrationNode | null | undefined>(undefined);
+  const [addingStepNodeId, setAddingStepNodeId] = useState<string | null>(null);
 
   const grouped = useMemo(() => {
     const groups: Record<string, OrchestrationTaskSummary[]> = {};
@@ -573,20 +842,35 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_move_failed'));
   };
 
-  const addNode = () => {
+  const addNode = (values: {
+    title: string;
+    description: string;
+    status: string;
+    provider: string;
+    model: string;
+    positionX: number;
+    positionY: number;
+  }) => {
     if (!selectedTask) return;
-    const title = window.prompt('Node title');
-    if (!title?.trim()) return;
     fetch(`${API}/api/orchestration/tasks/${selectedTask.id}/nodes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title.trim() }),
+      body: JSON.stringify({
+        title: values.title,
+        description: values.description,
+        status: values.status,
+        provider: values.provider || null,
+        model: values.model || null,
+        positionX: values.positionX,
+        positionY: values.positionY,
+      }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_node_${response.status}`);
         return response.json() as Promise<OrchestrationNode>;
       })
       .then((node) => {
+        setEditingNode(undefined);
         loadTasks();
         loadTask(node.task_id);
         setSelectedNodeId(node.id);
@@ -594,19 +878,98 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_node_failed'));
   };
 
-  const addStep = (nodeId: string) => {
-    const title = window.prompt('Step title');
-    if (!title?.trim()) return;
+  const updateNode = (node: OrchestrationNode, values: {
+    title: string;
+    description: string;
+    status: string;
+    provider: string;
+    model: string;
+    positionX: number;
+    positionY: number;
+  }) => {
+    fetch(`${API}/api/orchestration/nodes/${node.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: values.title,
+        description: values.description,
+        status: values.status,
+        provider: values.provider || null,
+        model: values.model || null,
+        positionX: values.positionX,
+        positionY: values.positionY,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_node_update_${response.status}`);
+        return response.json() as Promise<OrchestrationNode>;
+      })
+      .then((updated) => {
+        setEditingNode(undefined);
+        if (selectedTask) {
+          loadTasks();
+          loadTask(selectedTask.id);
+        }
+        setSelectedNodeId(updated.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_node_update_failed'));
+  };
+
+  const nudgeNode = (node: OrchestrationNode, dx: number, dy: number) => {
+    updateNode(node, {
+      title: node.title,
+      description: node.description,
+      status: node.status,
+      provider: node.provider ?? '',
+      model: node.model ?? '',
+      positionX: Math.max(0, Math.round((node.position_x || 0) + dx)),
+      positionY: Math.max(0, Math.round((node.position_y || 0) + dy)),
+    });
+  };
+
+  const addEdge = (fromNodeId: string, toNodeId: string) => {
+    if (!selectedTask || !fromNodeId || !toNodeId || fromNodeId === toNodeId) return;
+    fetch(`${API}/api/orchestration/tasks/${selectedTask.id}/edges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromNodeId, toNodeId }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_edge_${response.status}`);
+        return response.json() as Promise<OrchestrationEdge>;
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_edge_failed'));
+  };
+
+  const deleteEdge = (edgeId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/edges/${edgeId}`, { method: 'DELETE' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_edge_delete_${response.status}`);
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_edge_delete_failed'));
+  };
+
+  const addStep = (nodeId: string, values: { title: string; description: string; type: string }) => {
     fetch(`${API}/api/orchestration/nodes/${nodeId}/steps`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title.trim(), type: 'manual' }),
+      body: JSON.stringify({ title: values.title, description: values.description, type: values.type }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_step_${response.status}`);
         return response.json() as Promise<OrchestrationStep>;
       })
       .then(() => {
+        setAddingStepNodeId(null);
         if (selectedTask) {
           loadTasks();
           loadTask(selectedTask.id);
@@ -706,8 +1069,12 @@ export function PlanScreen() {
           events={events}
           selectedNodeId={selectedNodeId}
           onSelectNode={setSelectedNodeId}
-          onAddNode={addNode}
-          onAddStep={addStep}
+          onAddNode={() => setEditingNode(null)}
+          onEditNode={(node) => setEditingNode(node)}
+          onNudgeNode={nudgeNode}
+          onAddEdge={addEdge}
+          onDeleteEdge={deleteEdge}
+          onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
         />
       )}
@@ -716,6 +1083,24 @@ export function PlanScreen() {
         <NewTaskModal
           onClose={() => setCreating(false)}
           onCreate={createTask}
+        />
+      )}
+
+      {editingNode !== undefined && (
+        <NodeModal
+          node={editingNode}
+          onClose={() => setEditingNode(undefined)}
+          onSave={(values) => {
+            if (editingNode) updateNode(editingNode, values);
+            else addNode(values);
+          }}
+        />
+      )}
+
+      {addingStepNodeId && (
+        <StepModal
+          onClose={() => setAddingStepNodeId(null)}
+          onCreate={(values) => addStep(addingStepNodeId, values)}
         />
       )}
     </div>
