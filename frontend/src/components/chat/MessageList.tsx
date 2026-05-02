@@ -5,6 +5,8 @@ import type { StreamEvent } from "@/lib/streamTypes";
 import { sendCancel } from "@/lib/agentSocket";
 import { buildCompletionReport, formatDuration, type CompletionReport } from "@/lib/completionReport";
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from "@/lib/activityTimeline";
+import { formatAssistantAnswer } from "@/lib/answerFormatting";
+import { parseSkillBuilderDraft, skillDraftImportPayload, type SkillBuilderDraft } from "@/lib/skillBuilderDraft";
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { StreamRenderer } from './StreamRenderer';
 
@@ -389,6 +391,122 @@ function CompletionReportCard({ report }: { report: CompletionReport }) {
   );
 }
 
+function answerTextFromMessage(message: Message): string {
+  if (message.events.length === 0) return message.content;
+  return message.events
+    .filter((event): event is Extract<StreamEvent, { type: 'answer_delta' | 'text' }> =>
+      event.type === 'answer_delta' || event.type === 'text'
+    )
+    .map((event) => event.content)
+    .join('');
+}
+
+function SkillBuilderDraftCard({ draft }: { draft: SkillBuilderDraft }) {
+  const [status, setStatus] = useState<'idle' | 'validating' | 'ready' | 'importing' | 'imported' | 'error'>('validating');
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus('validating');
+    fetch('http://localhost:7430/api/skills/validate/markdown', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(skillDraftImportPayload(draft)),
+    })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`http_${response.status}`)))
+      .then((body) => {
+        if (cancelled) return;
+        setWarnings(Array.isArray(body.warnings) ? body.warnings : []);
+        setErrors(Array.isArray(body.errors) ? body.errors : []);
+        setStatus(body.ok ? 'ready' : 'error');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setErrors([err instanceof Error ? err.message : 'validation_failed']);
+        setStatus('error');
+      });
+    return () => { cancelled = true; };
+  }, [draft]);
+
+  const addSkill = async () => {
+    setStatus('importing');
+    setErrors([]);
+    try {
+      const response = await fetch('http://localhost:7430/api/skills/import/markdown', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(skillDraftImportPayload(draft)),
+      });
+      const body = await response.json();
+      if (!response.ok || !body.ok) throw new Error(body.errors?.[0] || `skill_import_${response.status}`);
+      setStatus('imported');
+      window.dispatchEvent(new CustomEvent('nid:skills-changed'));
+    } catch (err) {
+      setErrors([err instanceof Error ? err.message : 'skill_import_failed']);
+      setStatus('error');
+    }
+  };
+
+  return (
+    <div
+      aria-label="Skill builder confirmation"
+      style={{
+        marginTop: 12,
+        border: '1px solid #1f6feb55',
+        borderRadius: 7,
+        background: '#1f6feb10',
+        padding: 12,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+        <div>
+          <div style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 700 }}>Create skill</div>
+          <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>/{draft.slug}</div>
+        </div>
+        <span style={{ color: status === 'error' ? 'var(--red)' : status === 'imported' ? 'var(--grn)' : 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+          {status}
+        </span>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', fontSize: 10 }}>
+        <span style={{ color: 'var(--t0)' }}>{draft.name}</span>
+        <span style={{ color: 'var(--t1)' }}>Scope: {draft.scope}</span>
+        <span style={{ color: 'var(--t1)' }}>Activation: {draft.activationMode}</span>
+        <span style={{ color: draft.enabled ? 'var(--grn)' : 'var(--t1)' }}>{draft.enabled ? 'Enabled' : 'Disabled'}</span>
+        <span style={{ color: draft.showInSlash ? 'var(--blu)' : 'var(--t1)' }}>{draft.showInSlash ? 'Shown in / menu' : 'Hidden from / menu'}</span>
+      </div>
+      {draft.triggers.length > 0 && (
+        <div style={{ color: 'var(--t1)', fontSize: 10 }}>
+          Triggers: {draft.triggers.map((trigger) => `${trigger.type}:${trigger.value}`).join(', ')}
+        </div>
+      )}
+      {warnings.map((warning) => <div key={warning} style={{ color: 'var(--yel)', fontSize: 11 }}>{warning}</div>)}
+      {errors.map((error) => <div key={error} style={{ color: 'var(--red)', fontSize: 11 }}>{error}</div>)}
+      <button
+        type="button"
+        onClick={addSkill}
+        disabled={status !== 'ready'}
+        style={{
+          alignSelf: 'flex-start',
+          padding: '7px 12px',
+          borderRadius: 5,
+          border: '1px solid var(--bd)',
+          background: status === 'ready' ? '#3fb95016' : 'var(--bg2)',
+          color: status === 'ready' ? 'var(--grn)' : 'var(--t1)',
+          cursor: status === 'ready' ? 'pointer' : 'not-allowed',
+          fontSize: 12,
+          fontWeight: 700,
+        }}
+      >
+        {status === 'imported' ? 'Skill Added' : status === 'importing' ? 'Adding...' : 'Add Skill'}
+      </button>
+    </div>
+  );
+}
+
 function RunningAgentTurn({ events = [], startedAt }: { events?: StreamEvent[]; startedAt?: Date }) {
   return (
     <div style={{
@@ -456,6 +574,7 @@ function renderParts(parts: string[]) {
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user';
   const completionReport = !isUser ? buildCompletionReport(message) : null;
+  const skillDraft = !isUser && !message.streaming ? parseSkillBuilderDraft(answerTextFromMessage(message)) : null;
   const timestamp = message.timestamp
     ? message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '';
@@ -532,12 +651,13 @@ function MessageBubble({ message }: { message: Message }) {
               <StreamRenderer events={message.events} streaming={message.streaming} providerId={useAgentStore.getState().selectedProvider} />
             ) : (
               <>
-                <MarkdownRenderer content={message.content} />
+                <MarkdownRenderer content={formatAssistantAnswer(message.content)} />
                 {message.streaming && (
                   <span style={{ color: 'var(--grn)', animation: 'nidBlink 1s step-start infinite' }}>▋</span>
                 )}
               </>
             )}
+            {skillDraft && <SkillBuilderDraftCard draft={skillDraft} />}
             {completionReport && <CompletionReportCard report={completionReport} />}
           </div>
         )}

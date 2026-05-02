@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MessageList } from '../../components/chat/MessageList';
 import { useAgentStore } from '../../store/agentStore';
 
 describe('MessageList activity feed', () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     useAgentStore.setState({
       messages: [],
       isStreaming: false,
@@ -182,6 +183,58 @@ describe('MessageList activity feed', () => {
     expect(screen.queryByText(/turn started/)).toBeNull();
     expect(screen.queryByText(/still working/)).toBeNull();
     expect(screen.getByText('Thinking')).toBeTruthy();
+  });
+
+  it('shows a confirmation card for skill-builder drafts and imports on click', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/api/skills/validate/markdown')) {
+        return Response.json({ ok: true, warnings: ['Looks good.'], errors: [] });
+      }
+      if (url.endsWith('/api/skills/import/markdown')) {
+        return Response.json({ ok: true, skill: { id: 'review-helper' }, warnings: [], errors: [] });
+      }
+      return Response.json({}, { status: 404 });
+    }));
+    const changed = vi.fn();
+    window.addEventListener('nid:skills-changed', changed);
+    useAgentStore.getState().addMessage('agent', '');
+    useAgentStore.getState().appendStreamEvents([{
+      type: 'answer_delta',
+      content: [
+        'Ready.',
+        '',
+        '```json',
+        '{"name":"Review Helper","slug":"review-helper","scope":"global","activationMode":"manual","triggers":[],"enabled":true,"showInSlash":true}',
+        '```',
+        '',
+        '```markdown',
+        '---',
+        'name: review-helper',
+        'description: Review code.',
+        '---',
+        '',
+        '# Review Helper',
+        '',
+        'Review code.',
+        '```',
+      ].join('\n'),
+    }]);
+    useAgentStore.getState().finalizeLastAgentMessage();
+
+    render(<MessageList />);
+
+    expect(await screen.findByLabelText('Skill builder confirmation')).toBeTruthy();
+    expect(await screen.findByText('Looks good.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Add Skill' }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        'http://localhost:7430/api/skills/import/markdown',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    expect(changed).toHaveBeenCalled();
+    window.removeEventListener('nid:skills-changed', changed);
   });
 
   it('replaces running activity with the final answer and summary when the turn completes', () => {

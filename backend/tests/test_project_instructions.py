@@ -10,7 +10,7 @@ from nidavellir.memory.store import MemoryStore
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
 from nidavellir.prompt.assembly import assemble_prompt
 from nidavellir.prompt.models import PromptSection
-from nidavellir.project_instructions.discovery import discover_project_instructions
+from nidavellir.project_instructions.discovery import default_global_instruction_files, discover_project_instructions
 from nidavellir.skills.store import SkillStore
 from nidavellir.tokens.store import TokenUsageStore
 
@@ -73,6 +73,49 @@ def test_provider_specific_instruction_layers_after_shared_content(tmp_path: Pat
     assert result.rendered_text.index("Shared Nidavellir rules") < result.rendered_text.index("Claude refinement")
 
 
+def test_provider_globals_can_be_supplied_as_machine_wide_instruction_files(tmp_path: Path):
+    globals_dir = tmp_path / "globals"
+    workspace = tmp_path / "repo"
+    globals_dir.mkdir()
+    workspace.mkdir()
+    (globals_dir / "AGENTS.md").write_text("Codex global behavior", encoding="utf-8")
+    (globals_dir / "CLAUDE.md").write_text("Claude global behavior", encoding="utf-8")
+    (workspace / "NIDAVELLIR.md").write_text("Runtime orchestration", encoding="utf-8")
+    (workspace / "PROJECT.md").write_text("Project scoped context", encoding="utf-8")
+
+    result = discover_project_instructions(
+        cwd=workspace,
+        provider="claude",
+        global_instruction_files={
+            "AGENTS.md": globals_dir / "AGENTS.md",
+            "CLAUDE.md": globals_dir / "CLAUDE.md",
+        },
+    )
+
+    assert [item.name for item in result.instructions] == ["CLAUDE.md", "PROJECT.md", "NIDAVELLIR.md"]
+    assert result.instructions[0].scope == "global"
+    assert "Codex global behavior" not in result.rendered_text
+    assert "Claude global behavior" in result.rendered_text
+    assert result.rendered_text.index("Claude global behavior") < result.rendered_text.index("Project scoped context")
+    assert result.rendered_text.index("Project scoped context") < result.rendered_text.index("Runtime orchestration")
+
+
+def test_default_global_instruction_files_prefers_provider_config_env(tmp_path: Path, monkeypatch):
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    codex_home.mkdir()
+    claude_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("Codex global", encoding="utf-8")
+    (claude_home / "CLAUDE.md").write_text("Claude global", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+
+    files = default_global_instruction_files()
+
+    assert files["AGENTS.md"] == codex_home / "AGENTS.md"
+    assert files["CLAUDE.md"] == claude_home / "CLAUDE.md"
+
+
 def test_ws_prompt_assembly_injects_project_instructions_as_separate_section(tmp_path: Path):
     from nidavellir.routers.ws import _build_prompt_assembly
 
@@ -97,6 +140,46 @@ def test_ws_prompt_assembly_injects_project_instructions_as_separate_section(tmp
     assert "Use strict project conventions." in assembly.rendered_text
     assert assembly.rendered_text.index("## Project Instructions") < assembly.rendered_text.index("## Conversation/Session Context")
     assert assembly.rendered_text.index("## Project Instructions") < assembly.rendered_text.index("## User Message")
+
+
+def test_ws_prompt_assembly_injects_attached_command_output(tmp_path: Path):
+    from nidavellir.commands import CommandRunStore
+    from nidavellir.routers.ws import _build_prompt_assembly
+
+    command_store = CommandRunStore(str(tmp_path / "commands.db"))
+    run = command_store.create_run(
+        conversation_id="conv",
+        command="npm test",
+        cwd=str(tmp_path),
+        exit_code=0,
+        stdout="tests passed",
+        stderr="",
+        timed_out=False,
+        include_in_chat=True,
+        added_to_working_set=False,
+        duration_ms=42,
+    )
+
+    class Store:
+        def list_conversation_files(self, conversation_id: str):
+            return []
+
+    assembly = _build_prompt_assembly(
+        store=Store(),
+        skill_store=None,
+        conversation_id="conv",
+        provider_id="codex",
+        model_id="gpt-5.5",
+        current_content="Use the command result",
+        memory_context="Prior context",
+        workdir=tmp_path,
+        command_store=command_store,
+    )
+
+    assert "## Command Output Attachments" in assembly.rendered_text
+    assert "npm test" in assembly.rendered_text
+    assert "tests passed" in assembly.rendered_text
+    assert run["id"] in assembly.sections[1].metadata["command_run_ids"]
 
 
 def _setup_app(tmp_path: Path):
@@ -135,6 +218,35 @@ async def test_project_instruction_api_lists_and_writes_known_files(tmp_path: Pa
 
         audit = await c.get("/api/permissions/audit")
         assert audit.json()[0]["action"] == "file_write"
+
+
+@pytest.mark.asyncio
+async def test_project_instruction_api_surfaces_global_provider_files(tmp_path: Path, monkeypatch):
+    _setup_app(tmp_path)
+    workspace = tmp_path / "repo"
+    codex_home = tmp_path / "codex"
+    claude_home = tmp_path / "claude"
+    workspace.mkdir()
+    codex_home.mkdir()
+    claude_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("Codex machine behavior", encoding="utf-8")
+    (claude_home / "CLAUDE.md").write_text("Claude machine behavior", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        listed = await c.get("/api/project-instructions", params={"workspace": str(workspace), "provider": "claude"})
+
+    assert listed.status_code == 200
+    body = listed.json()
+    editable = {item["name"]: item for item in body["editableFiles"]}
+    assert editable["AGENTS.md"]["path"] == str(codex_home / "AGENTS.md")
+    assert editable["AGENTS.md"]["scope"] == "global"
+    assert editable["AGENTS.md"]["content"] == "Codex machine behavior"
+    assert editable["CLAUDE.md"]["path"] == str(claude_home / "CLAUDE.md")
+    assert editable["CLAUDE.md"]["scope"] == "global"
+    assert editable["CLAUDE.md"]["content"] == "Claude machine behavior"
+    assert any(item["name"] == "CLAUDE.md" and item["scope"] == "global" for item in body["instructions"])
 
 
 @pytest.mark.asyncio

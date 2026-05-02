@@ -4,12 +4,14 @@ import { ChatScreen } from '../../screens/ChatScreen';
 import { useAgentStore } from '../../store/agentStore';
 import { _testResetSocket, _testSetSocket } from '../../lib/agentSocket';
 
+let slashSkillsResponse = [
+  { slug: 'strict-tdd-builder', name: 'Strict TDD Builder', enabled: true, showInSlash: true },
+];
+
 function mockFetch() {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.includes('/api/skills')) return Response.json([
-      { slug: 'strict-tdd-builder', name: 'Strict TDD Builder', enabled: true, showInSlash: true },
-    ]);
+    if (url.includes('/api/skills')) return Response.json(slashSkillsResponse);
     if (url.includes('/api/conversations')) return Response.json([]);
     if (url.includes('/api/memory/quality/summary')) {
       return Response.json({
@@ -44,6 +46,9 @@ function mockFetch() {
 describe('ChatScreen clipboard attachments', () => {
   beforeEach(() => {
     _testResetSocket();
+    slashSkillsResponse = [
+      { slug: 'strict-tdd-builder', name: 'Strict TDD Builder', enabled: true, showInSlash: true },
+    ];
     mockFetch();
     useAgentStore.setState({
       messages: [],
@@ -139,6 +144,25 @@ describe('ChatScreen clipboard attachments', () => {
       expect(screen.getByText('/strict-tdd-builder')).toBeTruthy();
     });
     expect(screen.getByText('Invoke Strict TDD Builder')).toBeTruthy();
+  });
+
+  it('reloads slash skills after the skill inventory changes', async () => {
+    render(<ChatScreen />);
+    const input = screen.getByTestId('chat-input') as HTMLTextAreaElement;
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('http://localhost:7430/api/skills'));
+    slashSkillsResponse = [
+      { slug: 'review-helper-edited', name: 'Review Helper Edited', enabled: true, showInSlash: true },
+    ];
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('nid:skills-changed'));
+    });
+
+    fireEvent.change(input, { target: { value: '/review' } });
+
+    expect(await screen.findByText('/review-helper-edited')).toBeTruthy();
+    expect(screen.getByText('Invoke Review Helper Edited')).toBeTruthy();
   });
 
   it('allows sending an invoked slash skill once task text is present', async () => {

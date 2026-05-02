@@ -87,8 +87,12 @@ def context_usage(
     try:
         workdir = conv.get("working_directory")
         if workdir:
-            from nidavellir.project_instructions.discovery import discover_project_instructions
-            project_instruction_tokens = discover_project_instructions(cwd=workdir, provider=provider).token_estimate
+            from nidavellir.project_instructions.discovery import default_global_instruction_files, discover_project_instructions
+            project_instruction_tokens = discover_project_instructions(
+                cwd=workdir,
+                provider=provider,
+                global_instruction_files=default_global_instruction_files(),
+            ).token_estimate
             current += project_instruction_tokens
     except Exception:
         project_instruction_tokens = 0

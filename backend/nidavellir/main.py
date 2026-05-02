@@ -20,6 +20,7 @@ from .commands import CommandRunner, CommandRunStore
 from .memory.store import MemoryStore
 from .permissions import PermissionAuditStore, PermissionEvaluator
 from .skills.store import SkillStore
+from .skills.builtin import ensure_builtin_skills
 from .tokens.store import TokenUsageStore
 
 _DB_PATH      = Path(os.environ.get("NIDAVELLIR_DB_PATH",      "./data/nidavellir.db"))
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
     app.state.memory_store = MemoryStore(str(_DB_PATH), vector_path=_VECTOR_PATH)
     app.state.token_store  = TokenUsageStore(str(_TOKEN_DB))
     app.state.skill_store  = SkillStore(str(_SKILL_DB))
+    ensure_builtin_skills(app.state.skill_store)
     app.state.permission_evaluator = PermissionEvaluator()
     app.state.permission_audit_store = PermissionAuditStore(str(_PERMISSION_DB))
     app.state.command_store = CommandRunStore(str(_COMMAND_DB))

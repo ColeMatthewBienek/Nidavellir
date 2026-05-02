@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+import sqlite3
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nidavellir.skills.activation import activate_skills
 from nidavellir.skills.compatibility import compatibility_for_skill
@@ -26,6 +27,15 @@ class ShowInSlashRequest(BaseModel):
     showInSlash: bool
 
 
+class UpdateSkillTextRequest(BaseModel):
+    name: str
+    slug: str | None = None
+    instructions: str
+    scope: str | None = None
+    activationMode: str | None = None
+    triggers: list[dict] | None = Field(default=None)
+
+
 class ImportLocalRequest(BaseModel):
     path: str
 
@@ -33,6 +43,12 @@ class ImportLocalRequest(BaseModel):
 class ImportMarkdownRequest(BaseModel):
     markdown: str
     name: str | None = None
+    slug: str | None = None
+    scope: str | None = None
+    activationMode: str | None = None
+    triggers: list[dict] | None = Field(default=None)
+    enabled: bool | None = None
+    showInSlash: bool | None = None
 
 
 class CompilePreviewRequest(BaseModel):
@@ -69,6 +85,24 @@ def skill_summary(skill) -> dict:
         "createdAt": skill.created_at,
         "updatedAt": skill.updated_at,
     }
+
+
+def _apply_import_options(skill, body: ImportMarkdownRequest):
+    data = skill.model_dump(mode="json")
+    if body.slug is not None:
+        data["slug"] = body.slug
+        data["id"] = body.slug
+    if body.scope is not None:
+        data["scope"] = body.scope
+    if body.activationMode is not None:
+        data["activation_mode"] = body.activationMode
+    if body.triggers is not None:
+        data["triggers"] = body.triggers
+    if body.enabled is not None:
+        data["enabled"] = body.enabled
+    if body.showInSlash is not None:
+        data["show_in_slash"] = body.showInSlash
+    return skill.__class__.model_validate(data)
 
 
 @router.get("/api/skills")
@@ -128,6 +162,37 @@ def set_skill_show_in_slash(skill_id: str, body: ShowInSlashRequest, request: Re
         raise HTTPException(status_code=404, detail="skill_not_found") from None
 
 
+@router.patch("/api/skills/{skill_id}")
+def update_skill_text(skill_id: str, body: UpdateSkillTextRequest, request: Request) -> dict:
+    try:
+        return skill_summary(
+            _store(request).update_skill_details(
+                skill_id,
+                name=body.name,
+                slug=body.slug,
+                core_instructions=body.instructions,
+                scope=body.scope,
+                activation_mode=body.activationMode,
+                triggers=body.triggers,
+            )
+        )
+    except sqlite3.IntegrityError as exc:
+        if "skills.slug" in str(exc) or "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(status_code=409, detail="skill_slug_already_exists") from exc
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError:
+        raise HTTPException(status_code=404, detail="skill_not_found") from None
+
+
+@router.delete("/api/skills/{skill_id}")
+def delete_skill(skill_id: str, request: Request) -> dict:
+    if not _store(request).delete_skill(skill_id):
+        raise HTTPException(status_code=404, detail="skill_not_found")
+    return {"ok": True, "deletedSkillId": skill_id}
+
+
 @router.post("/api/skills/import/local")
 def import_local_skill(body: ImportLocalRequest, request: Request) -> dict:
     store = _store(request)
@@ -180,6 +245,7 @@ def import_markdown_skill(body: ImportMarkdownRequest, request: Request) -> dict
     skill = None
     if result.skill is not None:
         try:
+            result.skill = _apply_import_options(result.skill, body)
             skill = store.create_skill(result.skill, change_reason="paste markdown import")
         except Exception as exc:
             result.errors.append(str(exc))
@@ -195,6 +261,26 @@ def import_markdown_skill(body: ImportMarkdownRequest, request: Request) -> dict
     )
     return {
         "ok": result.ok,
+        "importId": result.import_id,
+        "detectedFormat": result.detected_format,
+        "skill": skill_summary(skill) if skill else None,
+        "warnings": result.warnings,
+        "errors": result.errors,
+    }
+
+
+@router.post("/api/skills/validate/markdown")
+def validate_markdown_skill(body: ImportMarkdownRequest) -> dict:
+    result = import_skill_from_markdown(body.markdown, name=body.name)
+    skill = None
+    if result.skill is not None:
+        try:
+            skill = _apply_import_options(result.skill, body)
+        except Exception as exc:
+            result.errors.append(str(exc))
+            result.ok = False
+    return {
+        "ok": result.ok and not result.errors,
         "importId": result.import_id,
         "detectedFormat": result.detected_format,
         "skill": skill_summary(skill) if skill else None,

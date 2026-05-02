@@ -10,6 +10,7 @@ export const SLASH_CMDS: SlashCommand[] = [
   { cmd: '/agents',  desc: 'Show active agent status',      action: 'nav:agents' },
   { cmd: '/tasks',   desc: 'View task queue',               action: 'nav:tasks'  },
   { cmd: '/skills',  desc: 'Browse & invoke a skill',       action: 'nav:skills' },
+  { cmd: '/skill-builder', desc: 'Design and add a skill',   action: 'skill-builder' },
   { cmd: '/skill',   desc: 'Invoke a skill by slug',         action: 'skill'      },
   { cmd: '/cwd',     desc: 'Change Working Directory',       action: 'cwd'        },
   { cmd: '/context', desc: 'Toggle Working Set panel',      action: 'context'    },

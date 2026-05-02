@@ -29,6 +29,11 @@ type SlashSkill = {
   showInSlash: boolean;
 };
 
+type AuditBundleOptions = {
+  includeCommandOutput: boolean;
+  includeMemorySnapshots: boolean;
+};
+
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff', '.tif']);
 const UNSUPPORTED_EXTENSIONS = new Set(['.zip', '.tar', '.gz', '.tgz', '.rar', '.7z', '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.exe', '.dll']);
 
@@ -83,8 +88,16 @@ function parseCwdCommand(value: string): { isCwd: boolean; path: string | null }
   return { isCwd: true, path: raw };
 }
 
-function exportConversationAuditBundle(conversationId: string) {
-  window.location.href = `http://localhost:7430/api/conversations/${conversationId}/audit-bundle`;
+function auditBundleUrl(conversationId: string, options: AuditBundleOptions) {
+  const params = new URLSearchParams();
+  if (options.includeCommandOutput) params.set('include_command_output', 'true');
+  if (options.includeMemorySnapshots) params.set('include_memory_snapshots', 'true');
+  const query = params.toString();
+  return `http://localhost:7430/api/conversations/${conversationId}/audit-bundle${query ? `?${query}` : ''}`;
+}
+
+function exportConversationAuditBundle(conversationId: string, options: AuditBundleOptions) {
+  window.location.href = auditBundleUrl(conversationId, options);
 }
 
 function parseSkillCommand(value: string): { isSkill: boolean; slug: string | null; prompt: string | null } {
@@ -161,20 +174,30 @@ export function ChatScreen() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [auditExportId, setAuditExportId] = useState<string | null>(null);
+  const [auditOptions, setAuditOptions] = useState<AuditBundleOptions>({
+    includeCommandOutput: false,
+    includeMemorySnapshots: false,
+  });
   const [dragActive, setDragActive] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [slashSkills, setSlashSkills] = useState<SlashSkill[]>([]);
 
-  const slashCommands = useMemo<SlashCommand[]>(() => [
-    ...SLASH_CMDS,
-    ...slashSkills
+  const slashCommands = useMemo<SlashCommand[]>(() => {
+    const commands = [
+      ...SLASH_CMDS,
+      ...slashSkills
       .filter((skill) => skill.enabled && skill.showInSlash)
       .map((skill) => ({
         cmd: `/${skill.slug}`,
         desc: `Invoke ${skill.name}`,
         action: `skill:${skill.slug}`,
       })),
-  ], [slashSkills]);
+    ];
+    return commands.filter((command, index) =>
+      commands.findIndex((item) => item.cmd === command.cmd) === index
+    );
+  }, [slashSkills]);
   const slashMatch    = input.match(/^(\/\S*)$/);
   const slashQuery    = slashMatch ? slashMatch[1].toLowerCase() : null;
   const showSlash     = !isStreaming && !!slashQuery;
@@ -200,10 +223,15 @@ export function ChatScreen() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    fetch('http://localhost:7430/api/skills')
-      .then((response) => response.ok ? response.json() : [])
-      .then((skills: SlashSkill[]) => setSlashSkills(Array.isArray(skills) ? skills : []))
-      .catch(() => setSlashSkills([]));
+    const loadSlashSkills = () => {
+      fetch('http://localhost:7430/api/skills')
+        .then((response) => response.ok ? response.json() : [])
+        .then((skills: SlashSkill[]) => setSlashSkills(Array.isArray(skills) ? skills : []))
+        .catch(() => setSlashSkills([]));
+    };
+    loadSlashSkills();
+    window.addEventListener('nid:skills-changed', loadSlashSkills);
+    return () => window.removeEventListener('nid:skills-changed', loadSlashSkills);
   }, []);
 
   useEffect(() => {
@@ -222,11 +250,19 @@ export function ChatScreen() {
       }
       window.dispatchEvent(new CustomEvent('nid:workspace-tab', { detail: 'review' }));
     };
+    const useCommandOutput = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string }>).detail;
+      if (!detail?.content) return;
+      setInput(detail.content);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
     window.addEventListener('nid:invoke-skill', invokeSkill);
     window.addEventListener('nid:open-review', openReview);
+    window.addEventListener('nid:command-output-to-chat', useCommandOutput);
     return () => {
       window.removeEventListener('nid:invoke-skill', invokeSkill);
       window.removeEventListener('nid:open-review', openReview);
+      window.removeEventListener('nid:command-output-to-chat', useCommandOutput);
     };
   }, []);
 
@@ -257,6 +293,8 @@ export function ChatScreen() {
       setInput('/cwd ');
     } else if (cmd.action === 'skill') {
       setInput('/skill ');
+    } else if (cmd.action === 'skill-builder') {
+      setInput('/skill-builder ');
     } else if (cmd.action.startsWith('skill:')) {
       setInput(`/${cmd.action.slice('skill:'.length)} `);
     } else if (cmd.action === 'help') {
@@ -564,7 +602,11 @@ export function ChatScreen() {
                   role="menuitem"
                   onClick={() => {
                     setOpenMenuId(null);
-                    exportConversationAuditBundle(conversation.id);
+                    setAuditExportId(conversation.id);
+                    setAuditOptions({
+                      includeCommandOutput: false,
+                      includeMemorySnapshots: false,
+                    });
                   }}
                   style={menuItemStyle}
                 >
@@ -916,6 +958,96 @@ export function ChatScreen() {
       </div>
 
       {ctxOpen && <ContextPanel onClose={() => setCtxOpen(false)} />}
+      {auditExportId && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="audit-export-title"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 80,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: '#00000088',
+          }}
+        >
+          <div style={{
+            width: 'min(460px, calc(100vw - 32px))',
+            borderRadius: 8,
+            border: '1px solid var(--bd)',
+            background: 'var(--bg1)',
+            padding: 18,
+            boxShadow: '0 18px 48px #00000099',
+          }}>
+            <div id="audit-export-title" style={{ fontSize: 16, fontWeight: 700, color: 'var(--t0)', marginBottom: 8 }}>
+              Export audit bundle
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--t1)', lineHeight: 1.5, marginBottom: 14 }}>
+              The default export includes the manifest, messages, working-set metadata, permission decisions, memory activity, and command records with command output redacted.
+            </div>
+            <label style={{
+              display: 'flex',
+              gap: 9,
+              alignItems: 'flex-start',
+              padding: '9px 0',
+              color: 'var(--t0)',
+              fontSize: 13,
+              cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={auditOptions.includeCommandOutput}
+                onChange={(event) => setAuditOptions((current) => ({
+                  ...current,
+                  includeCommandOutput: event.target.checked,
+                }))}
+              />
+              <span>
+                Include command output
+                <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 2 }}>
+                  Adds captured stdout and stderr from command runs.
+                </span>
+              </span>
+            </label>
+            <label style={{
+              display: 'flex',
+              gap: 9,
+              alignItems: 'flex-start',
+              padding: '9px 0',
+              color: 'var(--t0)',
+              fontSize: 13,
+              cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={auditOptions.includeMemorySnapshots}
+                onChange={(event) => setAuditOptions((current) => ({
+                  ...current,
+                  includeMemorySnapshots: event.target.checked,
+                }))}
+              />
+              <span>
+                Include memory snapshots
+                <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 2 }}>
+                  Adds full memory content for memory activity records.
+                </span>
+              </span>
+            </label>
+            <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <Btn onClick={() => setAuditExportId(null)}>Cancel</Btn>
+              <Btn primary onClick={() => {
+                const id = auditExportId;
+                setAuditExportId(null);
+                exportConversationAuditBundle(id, auditOptions);
+              }}>
+                Download Bundle
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
       {deleteConversation && (
         <div
           role="dialog"

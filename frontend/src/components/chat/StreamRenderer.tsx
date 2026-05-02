@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { StreamingCursor } from "./StreamingCursor";
 import type { StreamEvent } from "@/lib/streamTypes";
+import { formatAssistantAnswer } from "@/lib/answerFormatting";
 
 interface StreamRendererProps {
   events:     StreamEvent[];
@@ -18,7 +19,7 @@ export function StreamRenderer({ events, streaming = false, providerId: _p }: St
 
   const flushText = () => {
     if (!textBuffer) return;
-    rendered.push(<MarkdownRenderer key={`text-${textKey++}`} content={textBuffer} />);
+    rendered.push(<MarkdownRenderer key={`text-${textKey++}`} content={formatAssistantAnswer(textBuffer)} />);
     textBuffer = "";
   };
 

@@ -161,6 +161,14 @@ function collapseAdjacentDuplicateText(content: string): string {
   return next;
 }
 
+function suffixPrefixOverlapLength(left: string, right: string): number {
+  const max = Math.min(left.length, right.length);
+  for (let size = max; size > 0; size -= 1) {
+    if (left.endsWith(right.slice(0, size))) return size;
+  }
+  return 0;
+}
+
 function normalizeIncomingEvents(existing: StreamEvent[], incoming: StreamEvent[]): StreamEvent[] {
   const normalized: StreamEvent[] = [];
   let currentAnswer = answerText(existing);
@@ -183,6 +191,17 @@ function normalizeIncomingEvents(existing: StreamEvent[], incoming: StreamEvent[
     if (currentAnswer.endsWith(content)) continue;
     if (content.startsWith(currentAnswer)) {
       content = content.slice(currentAnswer.length);
+    }
+    const overlap = suffixPrefixOverlapLength(currentAnswer, content);
+    if (overlap > 0) {
+      content = content.slice(overlap);
+    }
+    if (!content) continue;
+
+    const collapsedCombined = collapseAdjacentDuplicateText(currentAnswer + content);
+    if (collapsedCombined === currentAnswer) continue;
+    if (collapsedCombined.startsWith(currentAnswer)) {
+      content = collapsedCombined.slice(currentAnswer.length);
     }
     if (!content) continue;
 

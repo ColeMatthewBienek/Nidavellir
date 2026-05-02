@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from hashlib import sha256
 from pathlib import Path
@@ -17,6 +18,10 @@ PROVIDER_FILES = {
     "codex": "AGENTS.md",
     "claude": "CLAUDE.md",
     "anthropic": "CLAUDE.md",
+}
+GLOBAL_PROVIDER_PATHS = {
+    "AGENTS.md": ("CODEX_HOME", ".codex"),
+    "CLAUDE.md": ("CLAUDE_CONFIG_DIR", ".claude"),
 }
 
 
@@ -68,6 +73,7 @@ def _read_instruction(path: Path, *, scope: str, dir_index: int = 0, provider: s
             "layer_order": GENERIC_LAYER_ORDER.get(path.name, 50),
             "role": role,
             "content_hash": _content_hash(content),
+            "origin": scope,
         },
     )
 
@@ -99,6 +105,57 @@ def _render(instructions: list[ProjectInstruction]) -> str:
 
 def _provider_filename(provider: str | None) -> str | None:
     return PROVIDER_FILES.get((provider or "").lower())
+
+
+def _user_profile_path() -> Path | None:
+    value = os.environ.get("USERPROFILE")
+    if value:
+        return Path(value).expanduser()
+    return None
+
+
+def _first_existing_or_default(paths: list[Path]) -> Path:
+    for path in paths:
+        if path.exists():
+            return path
+    return paths[0]
+
+
+def default_global_instruction_files() -> dict[str, Path]:
+    """Return provider-native machine-wide instruction files.
+
+    Codex and Claude resolve their own global instruction files outside the
+    project root. Nidavellir surfaces those files explicitly instead of
+    pretending project-local AGENTS.md/CLAUDE.md are the only provider slots.
+    """
+    home = Path.home()
+    user_profile = _user_profile_path()
+    files: dict[str, Path] = {}
+
+    codex_home = Path(os.environ["CODEX_HOME"]).expanduser() if os.environ.get("CODEX_HOME") else None
+    codex_candidates = [path for path in [
+        codex_home / "AGENTS.md" if codex_home else None,
+        home / ".codex" / "AGENTS.md",
+        user_profile / ".codex" / "AGENTS.md" if user_profile else None,
+    ] if path is not None]
+    files["AGENTS.md"] = _first_existing_or_default(codex_candidates)
+
+    claude_config = Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser() if os.environ.get("CLAUDE_CONFIG_DIR") else None
+    claude_candidates = [path for path in [
+        claude_config / "CLAUDE.md" if claude_config else None,
+        home / ".claude" / "CLAUDE.md",
+        user_profile / ".claude" / "CLAUDE.md" if user_profile else None,
+    ] if path is not None]
+    files["CLAUDE.md"] = _first_existing_or_default(claude_candidates)
+
+    return files
+
+
+def read_global_instruction_file(filename: str, *, provider: str | None = None) -> ProjectInstruction | None:
+    path = default_global_instruction_files().get(filename)
+    if path is None:
+        return None
+    return _read_instruction(path, scope="global", dir_index=-1, provider=provider)
 
 
 def _role_priority(instruction: ProjectInstruction) -> int:
@@ -182,6 +239,7 @@ def discover_project_instructions(
     cwd: str | Path,
     agent_dir: str | Path | None = None,
     provider: str | None = None,
+    global_instruction_files: dict[str, str | Path] | None = None,
 ) -> ProjectInstructionDiscoveryResult:
     """Discover durable project guidance from global config and cwd ancestors.
 
@@ -193,6 +251,19 @@ def discover_project_instructions(
 
     if agent_dir is not None:
         for instruction in _instruction_files_in_dir(Path(agent_dir).expanduser(), scope="global", dir_index=-1, provider=provider):
+            resolved = str(Path(instruction.path).resolve())
+            if resolved not in seen:
+                instructions.append(instruction)
+                seen.add(resolved)
+
+    if global_instruction_files is not None:
+        for filename in ("AGENTS.md", "CLAUDE.md"):
+            path = global_instruction_files.get(filename)
+            if path is None:
+                continue
+            instruction = _read_instruction(Path(path).expanduser(), scope="global", dir_index=-1, provider=provider)
+            if instruction is None:
+                continue
             resolved = str(Path(instruction.path).resolve())
             if resolved not in seen:
                 instructions.append(instruction)

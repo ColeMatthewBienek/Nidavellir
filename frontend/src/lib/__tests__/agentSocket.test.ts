@@ -308,6 +308,66 @@ describe("chunk handling — raw storage", () => {
     });
   });
 
+  it("routes live command events into UI listeners and the session timeline", () => {
+    const ws = setupOpenSocket();
+    const commandEvents: unknown[] = [];
+    window.addEventListener("nid:command-event", (event) => {
+      commandEvents.push((event as CustomEvent).detail);
+    });
+
+    ws.simulateMessage({
+      type: "command_event",
+      event: {
+        type: "started",
+        run_id: "run-live",
+        command: "printf ok",
+        cwd: "/repo",
+      },
+    });
+    ws.simulateMessage({
+      type: "command_event",
+      event: {
+        type: "output",
+        run_id: "run-live",
+        command: "printf ok",
+        cwd: "/repo",
+        stream: "stdout",
+        content: "ok",
+      },
+    });
+    ws.simulateMessage({
+      type: "command_event",
+      event: {
+        type: "finished",
+        run_id: "run-live",
+        command: "printf ok",
+        cwd: "/repo",
+        exit_code: 0,
+        timed_out: false,
+        duration_ms: 11,
+      },
+    });
+
+    const msg = useAgentStore.getState().messages.at(-1)!;
+    expect(commandEvents).toHaveLength(3);
+    expect(msg.streaming).toBe(false);
+    expect(useAgentStore.getState().isStreaming).toBe(false);
+    expect(msg.events).toContainEqual({
+      type: "tool_start",
+      provider: "nidavellir",
+      id: "command:run-live",
+      name: "shell",
+      args: JSON.stringify({ command: "printf ok", cwd: "/repo" }),
+    });
+    expect(msg.events).toContainEqual({
+      type: "tool_end",
+      provider: "nidavellir",
+      id: "command:run-live",
+      status: "success",
+      summary: "Exit 0 in 11ms",
+    });
+  });
+
   it("flushes parser events when the response finishes", () => {
     useAgentStore.setState({ selectedProvider: "claude", selectedModel: "claude:claude-sonnet-4-6" });
     const ws = setupOpenSocket();

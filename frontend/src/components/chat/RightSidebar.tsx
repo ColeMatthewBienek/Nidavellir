@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { WorkingSetTab } from './WorkingSetTab';
+import { MarkdownRenderer } from './MarkdownRenderer';
 import { useAgentStore, type Message } from '@/store/agentStore';
 import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionReport, type CompletionReportFile } from '@/lib/completionReport';
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
 type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'git';
+type InstructionViewMode = 'edit' | 'preview';
 type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
 interface RightSidebarProps {
@@ -79,6 +81,7 @@ interface EditableInstructionFile {
   content: string;
   sizeBytes: number;
   modifiedAt?: number | null;
+  scope?: 'global' | 'project';
 }
 
 interface ProjectInstructionResponse {
@@ -117,6 +120,19 @@ interface CommandRun {
   added_to_working_set: boolean;
   duration_ms: number;
   created_at: string;
+}
+
+interface CommandRunEvent {
+  type: 'started' | 'output' | 'finished';
+  run_id: string;
+  conversation_id?: string | null;
+  command: string;
+  cwd: string;
+  stream?: 'stdout' | 'stderr';
+  content?: string;
+  exit_code?: number | null;
+  timed_out?: boolean;
+  duration_ms?: number;
 }
 
 interface CommentDraft {
@@ -1191,10 +1207,11 @@ function GitTab({ onReviewFile, selectedPath }: { onReviewFile: (path: string) =
 }
 
 function instructionRoleLabel(file: EditableInstructionFile, provider: string): string {
-  if (file.name === 'NIDAVELLIR.md') return 'Shared';
-  if (file.name === 'PROJECT.md') return 'Project';
-  if (file.name === 'AGENTS.md') return provider === 'codex' ? 'Codex active' : 'Codex';
-  if (file.name === 'CLAUDE.md') return provider === 'claude' || provider === 'anthropic' ? 'Claude active' : 'Claude';
+  const scope = file.scope === 'global' ? 'global' : 'project';
+  if (file.name === 'NIDAVELLIR.md') return 'Nidavellir runtime';
+  if (file.name === 'PROJECT.md') return 'Project scoped';
+  if (file.name === 'AGENTS.md') return provider === 'codex' ? `Codex ${scope} active` : `Codex ${scope}`;
+  if (file.name === 'CLAUDE.md') return provider === 'claude' || provider === 'anthropic' ? `Claude ${scope} active` : `Claude ${scope}`;
   return 'Instruction';
 }
 
@@ -1297,6 +1314,7 @@ function ProjectInstructionsTab() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingPermission, setPendingPermission] = useState<PermissionEvaluationResult | null>(null);
+  const [viewMode, setViewMode] = useState<InstructionViewMode>('edit');
 
   const selectedFile = data?.editableFiles.find((file) => file.name === selectedName) ?? data?.editableFiles[0] ?? null;
 
@@ -1345,6 +1363,7 @@ function ProjectInstructionsTab() {
       body: JSON.stringify({
         workspace: workingDirectory,
         filename: selectedFile.name,
+        path: selectedFile.path,
         content: draft,
         provider: selectedProvider || 'claude',
         permissionOverride,
@@ -1502,26 +1521,86 @@ function ProjectInstructionsTab() {
                 </span>
               </div>
 
-              <textarea
-                aria-label={`Edit ${selectedFile.name}`}
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                spellCheck={false}
+              <div
+                role="tablist"
+                aria-label="Instruction view mode"
                 style={{
-                  width: '100%',
-                  minHeight: 230,
-                  resize: 'vertical',
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
                   border: '1px solid var(--bd)',
                   borderRadius: 7,
+                  overflow: 'hidden',
                   background: 'var(--bg0)',
-                  color: 'var(--t0)',
-                  padding: 10,
-                  fontFamily: 'var(--mono)',
-                  fontSize: 12,
-                  lineHeight: 1.5,
-                  outline: 'none',
                 }}
-              />
+              >
+                {(['edit', 'preview'] as InstructionViewMode[]).map((mode) => {
+                  const active = viewMode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setViewMode(mode)}
+                      style={{
+                        border: 'none',
+                        borderLeft: mode === 'preview' ? '1px solid var(--bd)' : 'none',
+                        background: active ? '#1f6feb22' : 'transparent',
+                        color: active ? 'var(--t0)' : 'var(--t1)',
+                        cursor: 'pointer',
+                        padding: '6px 8px',
+                        fontSize: 12,
+                        fontWeight: active ? 700 : 500,
+                      }}
+                    >
+                      {mode === 'edit' ? 'Edit Markdown' : 'Preview'}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {viewMode === 'edit' ? (
+                <textarea
+                  aria-label={`Edit ${selectedFile.name}`}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  spellCheck={false}
+                  style={{
+                    width: '100%',
+                    minHeight: 230,
+                    resize: 'vertical',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 7,
+                    background: 'var(--bg0)',
+                    color: 'var(--t0)',
+                    padding: 10,
+                    fontFamily: 'var(--mono)',
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    outline: 'none',
+                  }}
+                />
+              ) : (
+                <div
+                  aria-label={`Preview ${selectedFile.name}`}
+                  style={{
+                    minHeight: 230,
+                    maxHeight: 420,
+                    overflow: 'auto',
+                    border: '1px solid var(--bd)',
+                    borderRadius: 7,
+                    background: 'var(--bg0)',
+                    color: 'var(--t0)',
+                    padding: 12,
+                  }}
+                >
+                  {draft.trim() ? (
+                    <MarkdownRenderer content={draft} />
+                  ) : (
+                    <div style={{ color: 'var(--t1)', fontSize: 12 }}>No markdown content to preview.</div>
+                  )}
+                </div>
+              )}
 
               {pendingPermission && (
                 <PermissionGate
@@ -1574,10 +1653,21 @@ function ProjectInstructionsTab() {
   );
 }
 
-function CommandRunCard({ run }: { run: CommandRun }) {
+function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onToggleChatAttachment: (run: CommandRun) => void }) {
   const [open, setOpen] = useState(false);
+  const running = run.exit_code === null && !run.timed_out;
   const ok = run.exit_code === 0 && !run.timed_out;
   const output = [run.stdout, run.stderr].filter(Boolean).join(run.stdout && run.stderr ? '\n' : '');
+  const sendOutputToChat = () => {
+    const content = [
+      `Use this command output from \`${run.command}\`:`,
+      '',
+      '```',
+      output || '(no output)',
+      '```',
+    ].join('\n');
+    window.dispatchEvent(new CustomEvent('nid:command-output-to-chat', { detail: { content } }));
+  };
   return (
     <div style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', overflow: 'hidden' }}>
       <button
@@ -1604,24 +1694,61 @@ function CommandRunCard({ run }: { run: CommandRun }) {
             {run.duration_ms}ms · {run.cwd}
           </span>
         </span>
-        <span style={{ color: ok ? 'var(--grn)' : 'var(--red)', fontSize: 11, alignSelf: 'center' }}>
-          {run.timed_out ? 'Timed out' : `Exit ${run.exit_code ?? '-'}`}
+        <span style={{ color: running ? 'var(--blu)' : ok ? 'var(--grn)' : 'var(--red)', fontSize: 11, alignSelf: 'center' }}>
+          {running ? 'Running' : run.timed_out ? 'Timed out' : `Exit ${run.exit_code ?? '-'}`}
         </span>
       </button>
       {open && (
-        <pre style={{
-          margin: 0,
-          maxHeight: 240,
-          overflow: 'auto',
-          borderTop: '1px solid #30363d55',
-          background: '#0d1117',
-          color: 'var(--t1)',
-          padding: 10,
-          fontFamily: 'var(--mono)',
-          fontSize: 11,
-          lineHeight: 1.45,
-          whiteSpace: 'pre-wrap',
-        }}>{output || '(no output)'}</pre>
+        <>
+          <pre style={{
+            margin: 0,
+            maxHeight: 240,
+            overflow: 'auto',
+            borderTop: '1px solid #30363d55',
+            background: '#0d1117',
+            color: 'var(--t1)',
+            padding: 10,
+            fontFamily: 'var(--mono)',
+            fontSize: 11,
+            lineHeight: 1.45,
+            whiteSpace: 'pre-wrap',
+          }}>{output || '(no output)'}</pre>
+          <div style={{ borderTop: '1px solid #30363d55', padding: 8, display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              onClick={() => onToggleChatAttachment(run)}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: run.include_in_chat ? '#1f6feb22' : 'var(--bg2)',
+                color: run.include_in_chat ? 'var(--blu)' : 'var(--t0)',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 650,
+                padding: '5px 8px',
+                marginRight: 8,
+              }}
+            >
+              {run.include_in_chat ? 'Attached to next turn' : 'Attach to next turn'}
+            </button>
+            <button
+              type="button"
+              onClick={sendOutputToChat}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: 'var(--bg2)',
+                color: 'var(--t0)',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 650,
+                padding: '5px 8px',
+              }}
+            >
+              Send output to chat
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -1653,6 +1780,48 @@ function CommandsTab() {
   useEffect(() => {
     loadRuns();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    const handleCommandEvent = (event: Event) => {
+      const detail = (event as CustomEvent<CommandRunEvent>).detail;
+      if (!detail?.run_id) return;
+      if (detail.conversation_id && activeConversationId && detail.conversation_id !== activeConversationId) return;
+      if (detail.type === 'started') {
+        setRuns((items) => [
+          {
+            id: detail.run_id,
+            conversation_id: detail.conversation_id,
+            command: detail.command,
+            cwd: detail.cwd,
+            exit_code: null,
+            stdout: '',
+            stderr: '',
+            timed_out: false,
+            include_in_chat: false,
+            added_to_working_set: false,
+            duration_ms: 0,
+            created_at: new Date().toISOString(),
+          },
+          ...items.filter((item) => item.id !== detail.run_id),
+        ]);
+      } else if (detail.type === 'output') {
+        setRuns((items) => items.map((item) => {
+          if (item.id !== detail.run_id) return item;
+          if (detail.stream === 'stderr') return { ...item, stderr: item.stderr + (detail.content ?? '') };
+          return { ...item, stdout: item.stdout + (detail.content ?? '') };
+        }));
+      } else if (detail.type === 'finished') {
+        setRuns((items) => items.map((item) => item.id === detail.run_id ? {
+          ...item,
+          exit_code: detail.exit_code ?? null,
+          timed_out: Boolean(detail.timed_out),
+          duration_ms: detail.duration_ms ?? item.duration_ms,
+        } : item));
+      }
+    };
+    window.addEventListener('nid:command-event', handleCommandEvent);
+    return () => window.removeEventListener('nid:command-event', handleCommandEvent);
   }, [activeConversationId]);
 
   const runCommand = (permissionOverride?: 'allow_once') => {
@@ -1701,6 +1870,23 @@ function CommandsTab() {
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'command_run_failed'))
       .finally(() => setRunning(false));
+  };
+
+  const toggleChatAttachment = (run: CommandRun) => {
+    fetch(`http://localhost:7430/api/commands/runs/${run.id}/chat-attachment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ includeInChat: !run.include_in_chat }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`command_attachment_${response.status}`);
+        return response.json() as Promise<CommandRun>;
+      })
+      .then((updated) => {
+        setRuns((items) => items.map((item) => item.id === updated.id ? updated : item));
+        markResourcesChanged(updated.include_in_chat ? 'Command output attached to next turn' : 'Command output detached');
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'command_attachment_failed'));
   };
 
   if (!workingDirectory) {
@@ -1786,7 +1972,9 @@ function CommandsTab() {
         <div style={{ color: 'var(--t1)', fontSize: 12 }}>No command runs yet.</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-          {runs.slice(0, 10).map((run) => <CommandRunCard key={run.id} run={run} />)}
+          {runs.slice(0, 10).map((run) => (
+            <CommandRunCard key={run.id} run={run} onToggleChatAttachment={toggleChatAttachment} />
+          ))}
         </div>
       )}
     </div>

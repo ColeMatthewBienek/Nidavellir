@@ -6,7 +6,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
-from nidavellir.project_instructions.discovery import INSTRUCTION_FILENAMES, discover_project_instructions
+from nidavellir.project_instructions.discovery import (
+    INSTRUCTION_FILENAMES,
+    default_global_instruction_files,
+    discover_project_instructions,
+)
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 
@@ -18,6 +22,7 @@ class ProjectInstructionWriteRequest(BaseModel):
     filename: str
     content: str
     provider: str | None = None
+    path: str | None = None
     permissionOverride: str | None = None
 
 
@@ -43,8 +48,29 @@ def _safe_instruction_path(workspace: Path, filename: str) -> Path:
     return target
 
 
+def _instruction_target_path(workspace: Path, filename: str, path_value: str | None = None) -> Path:
+    global_path = default_global_instruction_files().get(filename)
+    if path_value is not None:
+        target = Path(path_value).expanduser().resolve(strict=False)
+        if global_path and target == global_path.expanduser().resolve(strict=False):
+            return target
+        project_target = _safe_instruction_path(workspace, filename)
+        if target == project_target:
+            return target
+        raise HTTPException(status_code=400, detail="unsupported_instruction_path")
+    if filename in {"AGENTS.md", "CLAUDE.md"} and global_path is not None:
+        return global_path.expanduser().resolve(strict=False)
+    return _safe_instruction_path(workspace, filename)
+
+
 def _editable_file(workspace: Path, filename: str) -> dict:
-    path = _safe_instruction_path(workspace, filename)
+    global_path = default_global_instruction_files().get(filename)
+    scope = "project"
+    if filename in {"AGENTS.md", "CLAUDE.md"} and global_path is not None:
+        path = global_path.expanduser().resolve(strict=False)
+        scope = "global"
+    else:
+        path = _safe_instruction_path(workspace, filename)
     exists = path.is_file()
     content = ""
     modified_at = None
@@ -61,13 +87,18 @@ def _editable_file(workspace: Path, filename: str) -> dict:
         "content": content,
         "sizeBytes": size_bytes,
         "modifiedAt": modified_at,
+        "scope": scope,
     }
 
 
 @router.get("")
 def get_project_instructions(request: Request, workspace: str | None = None, provider: str | None = None) -> dict:
     workspace_path = _resolve_workspace(workspace)
-    result = discover_project_instructions(cwd=workspace_path, provider=provider)
+    result = discover_project_instructions(
+        cwd=workspace_path,
+        provider=provider,
+        global_instruction_files=default_global_instruction_files(),
+    )
     return {
         "workspace": str(workspace_path),
         "provider": provider,
@@ -83,7 +114,7 @@ def get_project_instructions(request: Request, workspace: str | None = None, pro
 @router.put("")
 def write_project_instruction(body: ProjectInstructionWriteRequest, request: Request) -> dict:
     workspace_path = _resolve_workspace(body.workspace)
-    target = _safe_instruction_path(workspace_path, body.filename)
+    target = _instruction_target_path(workspace_path, body.filename, body.path)
     decision = evaluate_and_audit(
         request,
         PermissionEvaluationRequest(

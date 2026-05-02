@@ -12,6 +12,7 @@ let _agentMessageOpen = false;
 let _parser: ProviderStreamParser | null = null;
 let _clientConnectionId = "";
 let _activeTurnId: string | null = null;
+const _commandTimelineRunIds = new Set<string>();
 
 interface PersistedTurn {
   turnId: string;
@@ -185,6 +186,7 @@ function connect(): void {
       working_directory?: string;
       working_directory_display?: string;
       event?: StreamEvent;
+      command_event?: unknown;
     };
     try {
       data = JSON.parse(event.data as string);
@@ -263,6 +265,53 @@ function connect(): void {
           s.appendStreamEvents([data.event]);
         }
         break;
+
+      case "command_event": {
+        const commandEvent = data.event as {
+          type?: string;
+          run_id?: string;
+          command?: string;
+          cwd?: string;
+          exit_code?: number | null;
+          timed_out?: boolean;
+          duration_ms?: number;
+        } | undefined;
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("nid:command-event", { detail: commandEvent }));
+        }
+        if (!commandEvent?.run_id || !commandEvent.command) break;
+        if (commandEvent.type === "started") {
+          if (!useAgentStore.getState().isStreaming) {
+            useAgentStore.getState().addMessage("agent", "");
+            useAgentStore.setState({ isStreaming: true });
+            _commandTimelineRunIds.add(commandEvent.run_id);
+            useAgentStore.getState().appendStreamEvents([{
+              type: "tool_start",
+              provider: "nidavellir",
+              id: `command:${commandEvent.run_id}`,
+              name: "shell",
+              args: JSON.stringify({ command: commandEvent.command, cwd: commandEvent.cwd }),
+            }]);
+          }
+        } else if (commandEvent.type === "finished") {
+          if (_commandTimelineRunIds.has(commandEvent.run_id)) {
+            useAgentStore.getState().appendStreamEvents([{
+              type: "tool_end",
+              provider: "nidavellir",
+              id: `command:${commandEvent.run_id}`,
+              status: commandEvent.exit_code === 0 && !commandEvent.timed_out ? "success" : "error",
+              summary: commandEvent.timed_out
+                ? "Timed out"
+                : `Exit ${commandEvent.exit_code ?? "-"} in ${commandEvent.duration_ms ?? 0}ms`,
+            }]);
+            s.finalizeLastAgentMessage();
+            useAgentStore.setState({ isStreaming: false });
+            _commandTimelineRunIds.delete(commandEvent.run_id);
+          }
+          s.markResourcesChanged("Command run captured");
+        }
+        break;
+      }
 
       case "done":
         {
@@ -448,6 +497,7 @@ export function _testResetSocket(): void {
   _agentMessageOpen = false;
   _parser = null;
   _activeTurnId = null;
+  _commandTimelineRunIds.clear();
   _clientConnectionId = "";
   if (typeof window !== "undefined") {
     try {

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from nidavellir.commands.events import broadcast_command_event
 from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
@@ -21,6 +23,10 @@ class CommandRunRequest(BaseModel):
     addToWorkingSet: bool = False
     timeoutSeconds: int = Field(default=120, ge=1, le=600)
     permissionOverride: str | None = None
+
+
+class CommandAttachmentRequest(BaseModel):
+    includeInChat: bool = True
 
 
 def _store(request: Request) -> CommandRunStore:
@@ -53,6 +59,7 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
     if not command:
         raise HTTPException(status_code=400, detail="command_required")
     cwd = _resolve_cwd(body.cwd)
+    run_id = str(uuid.uuid4())
     decision = evaluate_and_audit(
         request,
         PermissionEvaluationRequest(
@@ -92,8 +99,23 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
             "permission": decision.model_dump(mode="json"),
         })
 
-    result = await _runner(request).run(command=command, cwd=str(cwd), timeout_seconds=body.timeoutSeconds)
+    async def emit(event: dict) -> None:
+        await broadcast_command_event(request.app, {
+            **event,
+            "run_id": run_id,
+            "conversation_id": body.conversationId,
+            "command": command,
+            "cwd": str(cwd),
+        })
+
+    result = await _runner(request).run(
+        command=command,
+        cwd=str(cwd),
+        timeout_seconds=body.timeoutSeconds,
+        on_event=emit,
+    )
     return _store(request).create_run(
+        run_id=run_id,
         conversation_id=body.conversationId,
         command=command,
         cwd=str(cwd),
@@ -110,3 +132,11 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
 @router.get("/runs")
 def list_command_runs(request: Request, conversationId: str | None = None, limit: int = 50) -> list[dict]:
     return _store(request).list_runs(conversation_id=conversationId, limit=limit)
+
+
+@router.post("/runs/{run_id}/chat-attachment")
+def set_command_chat_attachment(run_id: str, body: CommandAttachmentRequest, request: Request) -> dict:
+    run = _store(request).set_include_in_chat(run_id, body.includeInChat)
+    if run is None:
+        raise HTTPException(status_code=404, detail="command_run_not_found")
+    return run

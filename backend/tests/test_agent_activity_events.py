@@ -245,6 +245,45 @@ async def test_claude_stream_event_emits_tool_start_before_final_message():
 
 
 @pytest.mark.asyncio
+async def test_claude_stream_dedupes_partial_message_snapshots():
+    from nidavellir.agents.claude_agent import ClaudeAgent
+
+    agent = ClaudeAgent(slot_id=0, workdir=Path("/tmp"))
+    answer = (
+        "Good. I know the codebase well enough to grill you properly now.\n\n"
+        "Question 1: What problem are you actually trying to solve?"
+    )
+    lines = [
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": answer},
+            },
+        }).encode() + b"\n",
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": f"\n{answer}"},
+                ],
+            },
+        }).encode() + b"\n",
+        b"",
+    ]
+    mock_stdout = AsyncMock()
+    mock_stdout.readline = AsyncMock(side_effect=lines)
+    mock_process = MagicMock()
+    mock_process.stdout = mock_stdout
+    agent._process = mock_process
+
+    items = [item async for item in agent.stream()]
+
+    assert items == [answer]
+
+
+@pytest.mark.asyncio
 async def test_claude_stream_event_maps_thinking_to_reasoning_signal():
     from nidavellir.agents.claude_agent import ClaudeAgent
 

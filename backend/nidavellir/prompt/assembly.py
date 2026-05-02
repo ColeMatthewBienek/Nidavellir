@@ -9,6 +9,7 @@ SECTION_ORDER = [
     "conversation/session context",
     "handoff seed",
     "memory retrieval",
+    "command output attachments",
     "activated skills",
     "working set files",
     "recent messages",

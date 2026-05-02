@@ -128,6 +128,33 @@ describe("appendStreamEvents", () => {
     ]);
   });
 
+  it("drops newline-prefixed repeated assistant snapshots across parser calls", () => {
+    useAgentStore.getState().addMessage("agent", "");
+
+    const answer = [
+      "Good. I know the codebase well enough to grill you properly now.",
+      "",
+      "Question 1: What problem are you actually trying to solve with multilevel orchestration?",
+      "",
+      "My guess: you want to break a large task into subtasks.",
+    ].join("\n");
+
+    useAgentStore.getState().appendStreamEvents([
+      { type: "answer_delta", content: answer },
+    ]);
+    useAgentStore.getState().appendStreamEvents([
+      { type: "answer_delta", content: `\n${answer}` },
+    ]);
+
+    const msg = useAgentStore.getState().messages[0];
+    const content = msg.events
+      .filter((event) => event.type === "answer_delta")
+      .map((event) => event.content)
+      .join("");
+    expect(content.match(/Question 1:/g)).toHaveLength(1);
+    expect(msg.events).toEqual([{ type: "answer_delta", content: answer }]);
+  });
+
   it("collapses duplicated text inside a single provider answer delta", () => {
     useAgentStore.getState().addMessage("agent", "");
 
