@@ -25,6 +25,10 @@ class CommandRunRequest(BaseModel):
     permissionOverride: str | None = None
 
 
+class CommandAttachmentRequest(BaseModel):
+    includeInChat: bool = True
+
+
 def _store(request: Request) -> CommandRunStore:
     store = getattr(request.app.state, "command_store", None)
     if store is None:
@@ -128,3 +132,11 @@ async def run_command(body: CommandRunRequest, request: Request) -> dict:
 @router.get("/runs")
 def list_command_runs(request: Request, conversationId: str | None = None, limit: int = 50) -> list[dict]:
     return _store(request).list_runs(conversation_id=conversationId, limit=limit)
+
+
+@router.post("/runs/{run_id}/chat-attachment")
+def set_command_chat_attachment(run_id: str, body: CommandAttachmentRequest, request: Request) -> dict:
+    run = _store(request).set_include_in_chat(run_id, body.includeInChat)
+    if run is None:
+        raise HTTPException(status_code=404, detail="command_run_not_found")
+    return run

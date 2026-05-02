@@ -45,6 +45,10 @@ async def test_command_runner_captures_stdout_and_history(tmp_path: Path):
         assert history.status_code == 200
         assert history.json()[0]["id"] == body["id"]
 
+        attached = await c.post(f"/api/commands/runs/{body['id']}/chat-attachment", json={"includeInChat": True})
+        assert attached.status_code == 200
+        assert attached.json()["include_in_chat"] is True
+
 
 @pytest.mark.asyncio
 async def test_command_runner_streams_start_output_and_finish_events(tmp_path: Path):

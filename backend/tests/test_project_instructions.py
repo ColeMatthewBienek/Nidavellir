@@ -142,6 +142,46 @@ def test_ws_prompt_assembly_injects_project_instructions_as_separate_section(tmp
     assert assembly.rendered_text.index("## Project Instructions") < assembly.rendered_text.index("## User Message")
 
 
+def test_ws_prompt_assembly_injects_attached_command_output(tmp_path: Path):
+    from nidavellir.commands import CommandRunStore
+    from nidavellir.routers.ws import _build_prompt_assembly
+
+    command_store = CommandRunStore(str(tmp_path / "commands.db"))
+    run = command_store.create_run(
+        conversation_id="conv",
+        command="npm test",
+        cwd=str(tmp_path),
+        exit_code=0,
+        stdout="tests passed",
+        stderr="",
+        timed_out=False,
+        include_in_chat=True,
+        added_to_working_set=False,
+        duration_ms=42,
+    )
+
+    class Store:
+        def list_conversation_files(self, conversation_id: str):
+            return []
+
+    assembly = _build_prompt_assembly(
+        store=Store(),
+        skill_store=None,
+        conversation_id="conv",
+        provider_id="codex",
+        model_id="gpt-5.5",
+        current_content="Use the command result",
+        memory_context="Prior context",
+        workdir=tmp_path,
+        command_store=command_store,
+    )
+
+    assert "## Command Output Attachments" in assembly.rendered_text
+    assert "npm test" in assembly.rendered_text
+    assert "tests passed" in assembly.rendered_text
+    assert run["id"] in assembly.sections[1].metadata["command_run_ids"]
+
+
 def _setup_app(tmp_path: Path):
     app.state.memory_store = MemoryStore(str(tmp_path / "memory.db"))
     app.state.token_store = TokenUsageStore(str(tmp_path / "tokens.db"))

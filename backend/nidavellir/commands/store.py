@@ -108,6 +108,41 @@ class CommandRunStore:
                 ).fetchall()
         return [self._row(row) for row in rows]
 
+    def set_include_in_chat(self, run_id: str, include: bool) -> dict | None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE command_runs SET include_in_chat = ? WHERE id = ?",
+                (1 if include else 0, run_id),
+            )
+        return self.get_run(run_id)
+
+    def list_chat_attachments(self, *, conversation_id: str, limit: int = 10) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM command_runs
+                   WHERE conversation_id = ? AND include_in_chat = 1
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (conversation_id, limit),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def clear_chat_attachments(self, *, conversation_id: str, run_ids: list[str] | None = None) -> None:
+        with self._conn() as conn:
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                conn.execute(
+                    f"""UPDATE command_runs
+                        SET include_in_chat = 0
+                        WHERE conversation_id = ? AND id IN ({placeholders})""",
+                    (conversation_id, *run_ids),
+                )
+            else:
+                conn.execute(
+                    "UPDATE command_runs SET include_in_chat = 0 WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+
     def _row(self, row: sqlite3.Row) -> dict:
         item = dict(row)
         item["timed_out"] = bool(item["timed_out"])

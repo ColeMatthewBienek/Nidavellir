@@ -1653,7 +1653,7 @@ function ProjectInstructionsTab() {
   );
 }
 
-function CommandRunCard({ run }: { run: CommandRun }) {
+function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onToggleChatAttachment: (run: CommandRun) => void }) {
   const [open, setOpen] = useState(false);
   const running = run.exit_code === null && !run.timed_out;
   const ok = run.exit_code === 0 && !run.timed_out;
@@ -1714,6 +1714,23 @@ function CommandRunCard({ run }: { run: CommandRun }) {
             whiteSpace: 'pre-wrap',
           }}>{output || '(no output)'}</pre>
           <div style={{ borderTop: '1px solid #30363d55', padding: 8, display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              onClick={() => onToggleChatAttachment(run)}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: run.include_in_chat ? '#1f6feb22' : 'var(--bg2)',
+                color: run.include_in_chat ? 'var(--blu)' : 'var(--t0)',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 650,
+                padding: '5px 8px',
+                marginRight: 8,
+              }}
+            >
+              {run.include_in_chat ? 'Attached to next turn' : 'Attach to next turn'}
+            </button>
             <button
               type="button"
               onClick={sendOutputToChat}
@@ -1855,6 +1872,23 @@ function CommandsTab() {
       .finally(() => setRunning(false));
   };
 
+  const toggleChatAttachment = (run: CommandRun) => {
+    fetch(`http://localhost:7430/api/commands/runs/${run.id}/chat-attachment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ includeInChat: !run.include_in_chat }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`command_attachment_${response.status}`);
+        return response.json() as Promise<CommandRun>;
+      })
+      .then((updated) => {
+        setRuns((items) => items.map((item) => item.id === updated.id ? updated : item));
+        markResourcesChanged(updated.include_in_chat ? 'Command output attached to next turn' : 'Command output detached');
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'command_attachment_failed'));
+  };
+
   if (!workingDirectory) {
     return (
       <EmptySidebarTab
@@ -1938,7 +1972,9 @@ function CommandsTab() {
         <div style={{ color: 'var(--t1)', fontSize: 12 }}>No command runs yet.</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-          {runs.slice(0, 10).map((run) => <CommandRunCard key={run.id} run={run} />)}
+          {runs.slice(0, 10).map((run) => (
+            <CommandRunCard key={run.id} run={run} onToggleChatAttachment={toggleChatAttachment} />
+          ))}
         </div>
       )}
     </div>

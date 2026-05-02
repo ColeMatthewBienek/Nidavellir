@@ -43,6 +43,25 @@ describe('ContextPanel — Token Usage section', () => {
           }),
         });
       }
+      if (String(url).includes('/api/commands/runs/run-1/chat-attachment')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'run-1',
+            conversation_id: 'conv-test',
+            command: 'printf ok',
+            cwd: '/repo',
+            exit_code: 0,
+            stdout: 'ok',
+            stderr: '',
+            timed_out: false,
+            include_in_chat: true,
+            added_to_working_set: false,
+            duration_ms: 12,
+            created_at: '2026-04-30T00:00:00Z',
+          }),
+        });
+      }
       if (String(url).includes('/api/commands/runs')) {
         return Promise.resolve({
           ok: true,
@@ -344,6 +363,8 @@ describe('ContextPanel — Token Usage section', () => {
     expect(await screen.findByText('printf ok')).toBeTruthy();
     fireEvent.click(screen.getByText('printf ok'));
     expect(screen.getByText('ok')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Attach to next turn' }));
+    expect(await screen.findByRole('button', { name: 'Attached to next turn' })).toBeTruthy();
   });
 
   it('shows a permission gate for risky command runs', async () => {
