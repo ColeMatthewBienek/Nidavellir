@@ -16,8 +16,10 @@ from .routers import skills as skills_router
 from .routers import permissions as permissions_router
 from .routers import project_instructions as project_instructions_router
 from .routers import commands as commands_router
+from .routers import orchestration as orchestration_router
 from .commands import CommandRunner, CommandRunStore
 from .memory.store import MemoryStore
+from .orchestration import OrchestrationStore
 from .permissions import PermissionAuditStore, PermissionEvaluator
 from .skills.store import SkillStore
 from .skills.builtin import ensure_builtin_skills
@@ -28,6 +30,7 @@ _TOKEN_DB     = Path(os.environ.get("NIDAVELLIR_TOKEN_DB",     "./data/tokens.db
 _SKILL_DB     = Path(os.environ.get("NIDAVELLIR_SKILL_DB",     "./data/skills.db"))
 _PERMISSION_DB = Path(os.environ.get("NIDAVELLIR_PERMISSION_DB", "./data/permissions.db"))
 _COMMAND_DB   = Path(os.environ.get("NIDAVELLIR_COMMAND_DB",   "./data/commands.db"))
+_ORCHESTRATION_DB = Path(os.environ.get("NIDAVELLIR_ORCHESTRATION_DB", "./data/orchestration.db"))
 _VECTOR_PATH  = os.environ.get("NIDAVELLIR_VECTOR_PATH", "./data/qdrant") or None
 
 
@@ -42,6 +45,7 @@ async def lifespan(app: FastAPI):
     app.state.permission_audit_store = PermissionAuditStore(str(_PERMISSION_DB))
     app.state.command_store = CommandRunStore(str(_COMMAND_DB))
     app.state.command_runner = CommandRunner()
+    app.state.orchestration_store = OrchestrationStore(str(_ORCHESTRATION_DB))
     yield
     # No explicit close needed — connections are per-operation
 
@@ -72,3 +76,4 @@ app.include_router(git_router.router)
 app.include_router(permissions_router.router)
 app.include_router(project_instructions_router.router)
 app.include_router(commands_router.router)
+app.include_router(orchestration_router.router)
