@@ -10,6 +10,7 @@ from nidavellir.main import app
 from nidavellir.memory.store import MemoryStore
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest, PermissionEvaluationResult
+from nidavellir.skills.models import NidavellirSkill
 from nidavellir.skills.store import SkillStore
 from nidavellir.tokens.store import TokenUsageStore
 
@@ -30,6 +31,52 @@ def setup_app(tmp_path: Path) -> tuple[MemoryStore, CommandRunStore, PermissionA
 @pytest.mark.asyncio
 async def test_conversation_audit_bundle_exports_session_artifacts(tmp_path: Path):
     memory_store, command_store, permission_store = setup_app(tmp_path)
+    (tmp_path / "NIDAVELLIR.md").write_text("Use project audit rules.", encoding="utf-8")
+    app.state.skill_store.create_skill(NidavellirSkill.model_validate({
+        "id": "skill-audit",
+        "slug": "audit-helper",
+        "name": "Audit Helper",
+        "description": "Helps review audit bundles.",
+        "scope": "global",
+        "activation_mode": "manual",
+        "triggers": [{"type": "keyword", "value": "audit", "weight": 1}],
+        "instructions": {"core": "Inspect exported evidence carefully."},
+        "required_capabilities": {},
+        "priority": 50,
+        "enabled": True,
+        "show_in_slash": True,
+        "version": 1,
+        "status": "validated",
+        "source": {"format": "native", "trust_status": "trusted"},
+    }))
+    app.state.skill_store.log_activation(
+        skill_id="skill-audit",
+        conversation_id="conv-audit",
+        session_id="sess-audit",
+        provider="codex",
+        model="gpt-5.5",
+        trigger_reason="manual",
+        score=1.0,
+        matched_triggers=["audit"],
+        compatibility_status="compatible",
+        diagnostics=[],
+        token_estimate=8,
+        injected=True,
+    )
+    app.state.skill_store.log_activation(
+        skill_id="skill-audit",
+        conversation_id="conv-other",
+        session_id="sess-other",
+        provider="codex",
+        model="gpt-5.5",
+        trigger_reason="manual",
+        score=1.0,
+        matched_triggers=["audit"],
+        compatibility_status="compatible",
+        diagnostics=[],
+        token_estimate=8,
+        injected=True,
+    )
     memory_store.create_conversation(
         "conv-audit",
         title="Audit me",
@@ -89,9 +136,15 @@ async def test_conversation_audit_bundle_exports_session_artifacts(tmp_path: Pat
         "command_runs": 1,
         "permission_audit_events": 1,
         "memory_activity": 1,
+        "project_instructions": 1,
+        "suppressed_project_instructions": 0,
+        "skills": 1,
+        "skill_activations": 1,
     }
     assert body["manifest"]["redaction"]["command_output"] == "omitted"
     assert body["manifest"]["redaction"]["memory_snapshots"] == "omitted"
+    assert body["manifest"]["redaction"]["project_instruction_contents"] == "omitted"
+    assert body["manifest"]["redaction"]["skill_instructions"] == "omitted"
     assert body["conversation"]["id"] == "conv-audit"
     assert body["conversation"]["active_session_id"] == "sess-audit"
     assert [message["id"] for message in body["messages"]] == ["msg-user", "msg-agent"]
@@ -102,16 +155,43 @@ async def test_conversation_audit_bundle_exports_session_artifacts(tmp_path: Pat
     assert body["permission_audit_events"][0]["conversation_id"] == "conv-audit"
     assert body["memory_activity"][0]["session_id"] == "sess-audit"
     assert body["memory_activity"][0]["memory_snapshot"] is None
+    assert body["project_instructions"]["active"][0]["name"] == "NIDAVELLIR.md"
+    assert body["project_instructions"]["active"][0]["content"] == ""
+    assert body["project_instructions"]["active"][0]["content_redacted"] is True
+    assert body["skills"][0]["slug"] == "audit-helper"
+    assert body["skills"][0]["instructions"]["core"] == ""
+    assert body["skills"][0]["instructions_redacted"] is True
+    assert len(body["skill_activations"]) == 1
+    assert body["skill_activations"][0]["conversation_id"] == "conv-audit"
 
 
 @pytest.mark.asyncio
-async def test_conversation_audit_bundle_can_include_command_output_and_memory_snapshots(tmp_path: Path):
+async def test_conversation_audit_bundle_can_include_redacted_prompt_surfaces(tmp_path: Path):
     memory_store, command_store, _permission_store = setup_app(tmp_path)
+    (tmp_path / "PROJECT.md").write_text("Project-only audit context", encoding="utf-8")
+    app.state.skill_store.create_skill(NidavellirSkill.model_validate({
+        "id": "skill-full",
+        "slug": "full-helper",
+        "name": "Full Helper",
+        "description": "Full prompt surface test.",
+        "scope": "project",
+        "activation_mode": "automatic",
+        "triggers": [{"type": "keyword", "value": "full", "weight": 1}],
+        "instructions": {"core": "Full skill instruction text."},
+        "required_capabilities": {},
+        "priority": 60,
+        "enabled": True,
+        "show_in_slash": False,
+        "version": 1,
+        "status": "validated",
+        "source": {"format": "native", "trust_status": "trusted"},
+    }))
     memory_store.create_conversation(
         "conv-full",
         active_session_id="sess-full",
         provider_id="codex",
         model_id="gpt-5.5",
+        working_directory=str(tmp_path),
     )
     memory_store.save_memories([{
         "id": "mem-full",
@@ -150,15 +230,22 @@ async def test_conversation_audit_bundle_can_include_command_output_and_memory_s
         response = await c.get(
             "/api/conversations/conv-full/audit-bundle"
             "?include_command_output=true&include_memory_snapshots=true"
+            "&include_instruction_contents=true&include_skill_instructions=true"
         )
 
     assert response.status_code == 200
     body = response.json()
     assert body["manifest"]["redaction"]["command_output"] == "included"
     assert body["manifest"]["redaction"]["memory_snapshots"] == "included"
+    assert body["manifest"]["redaction"]["project_instruction_contents"] == "included"
+    assert body["manifest"]["redaction"]["skill_instructions"] == "included"
     assert body["command_runs"][0]["stdout"] == "ok"
     assert body["command_runs"][0]["output_redacted"] is False
     assert body["memory_activity"][0]["memory_snapshot"]["content"] == "Important implementation detail"
+    assert body["project_instructions"]["active"][0]["content"] == "Project-only audit context"
+    assert body["project_instructions"]["active"][0]["content_redacted"] is False
+    assert body["skills"][0]["instructions"]["core"] == "Full skill instruction text."
+    assert body["skills"][0]["instructions_redacted"] is False
 
 
 @pytest.mark.asyncio
@@ -177,6 +264,7 @@ async def test_conversation_audit_bundle_warns_when_optional_stores_unavailable(
     assert body["manifest"]["session_id"] == "conv-warn"
     assert body["manifest"]["counts"]["command_runs"] == 0
     assert body["manifest"]["counts"]["permission_audit_events"] == 0
+    assert body["manifest"]["counts"]["skills"] == 0
     warnings = " ".join(body["manifest"]["warnings"])
     assert "active_session_id" in warnings
     assert "command store unavailable" in warnings

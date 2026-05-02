@@ -5,10 +5,12 @@ import binascii
 import json
 import uuid
 from datetime import UTC, datetime
+from hashlib import sha256
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from nidavellir.project_instructions.discovery import discover_project_instructions
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
 from nidavellir.routers.permissions import evaluate_and_audit
@@ -121,12 +123,62 @@ def _redacted_command_run(row: dict, *, include_output: bool) -> dict:
     return item
 
 
+def _hash_text(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def _instruction_item(item, *, include_content: bool) -> dict:
+    content = item.content or ""
+    return {
+        "name": item.name,
+        "path": item.path,
+        "scope": item.scope,
+        "token_estimate": item.token_estimate,
+        "metadata": item.metadata,
+        "content_sha256": _hash_text(content),
+        "content_bytes": len(content.encode("utf-8")),
+        "content_redacted": not include_content,
+        "content": content if include_content else "",
+    }
+
+
+def _instruction_suppression(item) -> dict:
+    return {
+        "name": item.name,
+        "path": item.path,
+        "scope": item.scope,
+        "reason": item.reason,
+        "duplicate_of": item.duplicate_of,
+        "metadata": item.metadata,
+    }
+
+
+def _skill_item(skill, *, include_instructions: bool) -> dict:
+    data = skill.model_dump(mode="json")
+    instructions = data.get("instructions") or {}
+    core = str(instructions.get("core") or "")
+    data["instruction_sha256"] = _hash_text(core)
+    data["instruction_bytes"] = len(core.encode("utf-8"))
+    data["instructions_redacted"] = not include_instructions
+    if not include_instructions:
+        data["instructions"] = {
+            "core": "",
+            "constraints": [],
+            "steps": [],
+            "examples": [],
+            "anti_patterns": [],
+        }
+    return data
+
+
 def _conversation_audit_bundle(
     conversation_id: str,
     request: Request,
     *,
     include_command_output: bool = False,
     include_memory_snapshots: bool = False,
+    include_instruction_contents: bool = False,
+    include_skill_instructions: bool = False,
 ) -> dict:
     store = _store(request)
     conv = store.get_conversation(conversation_id)
@@ -135,7 +187,11 @@ def _conversation_audit_bundle(
 
     command_store = getattr(request.app.state, "command_store", None)
     permission_audit_store = getattr(request.app.state, "permission_audit_store", None)
+    skill_store = getattr(request.app.state, "skill_store", None)
     session_id = conv.get("active_session_id") or conversation_id
+    provider = conv.get("active_provider") or conv.get("provider_id")
+    model = conv.get("active_model") or conv.get("model_id")
+    working_directory = conv.get("working_directory") or effective_default_working_directory()
     warnings: list[str] = []
     if not conv.get("active_session_id"):
         warnings.append("conversation has no active_session_id; conversation id was used as the session id")
@@ -143,6 +199,8 @@ def _conversation_audit_bundle(
         warnings.append("command store unavailable; command_runs omitted")
     if not permission_audit_store:
         warnings.append("permission audit store unavailable; permission_audit_events omitted")
+    if not skill_store:
+        warnings.append("skill store unavailable; skills omitted")
 
     messages = [_message(row) for row in store.get_conversation_messages(conversation_id)]
     files = [_file_item(row) for row in store.list_conversation_files(conversation_id, active_only=False)]
@@ -160,6 +218,23 @@ def _conversation_audit_bundle(
         session_id=session_id,
         include_snapshots=include_memory_snapshots,
     )
+    instruction_result = discover_project_instructions(cwd=working_directory, provider=provider)
+    instructions = [_instruction_item(item, include_content=include_instruction_contents) for item in instruction_result.instructions]
+    discovered_instructions = [
+        _instruction_item(item, include_content=include_instruction_contents)
+        for item in instruction_result.discovered
+    ]
+    suppressed_instructions = [_instruction_suppression(item) for item in instruction_result.suppressed]
+    skills = [
+        _skill_item(skill, include_instructions=include_skill_instructions)
+        for skill in (skill_store.list_skills() if skill_store else [])
+    ]
+    skill_activations = []
+    if skill_store:
+        skill_activations = [
+            row for row in skill_store.list_activations(limit=500)
+            if row.get("conversation_id") == conversation_id or row.get("session_id") == session_id
+        ]
 
     return {
         "schema_version": "conversation_audit_bundle.v1",
@@ -167,21 +242,27 @@ def _conversation_audit_bundle(
         "manifest": {
             "conversation_id": conversation_id,
             "session_id": session_id,
-            "provider": conv.get("active_provider") or conv.get("provider_id"),
-            "model": conv.get("active_model") or conv.get("model_id"),
-            "working_directory": conv.get("working_directory") or effective_default_working_directory(),
+            "provider": provider,
+            "model": model,
+            "working_directory": working_directory,
             "counts": {
                 "messages": len(messages),
                 "working_set_files": len(files),
                 "command_runs": len(command_runs),
                 "permission_audit_events": len(permission_events),
                 "memory_activity": len(memory_activity),
+                "project_instructions": len(instructions),
+                "suppressed_project_instructions": len(suppressed_instructions),
+                "skills": len(skills),
+                "skill_activations": len(skill_activations),
             },
             "redaction": {
                 "messages": "included",
                 "working_set_file_contents": "omitted",
                 "command_output": "included" if include_command_output else "omitted",
                 "memory_snapshots": "included" if include_memory_snapshots else "omitted",
+                "project_instruction_contents": "included" if include_instruction_contents else "omitted",
+                "skill_instructions": "included" if include_skill_instructions else "omitted",
             },
             "warnings": warnings,
         },
@@ -193,9 +274,9 @@ def _conversation_audit_bundle(
             "parent_id": conv.get("parent_id"),
             "continuity_mode": conv.get("continuity_mode"),
             "active_session_id": session_id,
-            "active_provider": conv.get("active_provider") or conv.get("provider_id"),
-            "active_model": conv.get("active_model") or conv.get("model_id"),
-            "working_directory": conv.get("working_directory") or effective_default_working_directory(),
+            "active_provider": provider,
+            "active_model": model,
+            "working_directory": working_directory,
             "working_directory_display": conv.get("working_directory_display") or conv.get("working_directory"),
             "created_at": conv.get("created_at"),
             "updated_at": conv.get("updated_at"),
@@ -205,6 +286,15 @@ def _conversation_audit_bundle(
         "command_runs": command_runs,
         "permission_audit_events": permission_events,
         "memory_activity": memory_activity,
+        "project_instructions": {
+            "provider": instruction_result.provider,
+            "token_estimate": instruction_result.token_estimate,
+            "active": instructions,
+            "discovered": discovered_instructions,
+            "suppressed": suppressed_instructions,
+        },
+        "skills": skills,
+        "skill_activations": skill_activations,
     }
 
 
@@ -265,12 +355,16 @@ def export_conversation_audit_bundle(
     request: Request,
     include_command_output: bool = False,
     include_memory_snapshots: bool = False,
+    include_instruction_contents: bool = False,
+    include_skill_instructions: bool = False,
 ):
     bundle = _conversation_audit_bundle(
         conversation_id,
         request,
         include_command_output=include_command_output,
         include_memory_snapshots=include_memory_snapshots,
+        include_instruction_contents=include_instruction_contents,
+        include_skill_instructions=include_skill_instructions,
     )
     payload = json.dumps(bundle, indent=2, sort_keys=True)
     filename = f"nidavellir-conversation-{conversation_id}-audit.json"

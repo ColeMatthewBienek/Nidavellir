@@ -32,6 +32,8 @@ type SlashSkill = {
 type AuditBundleOptions = {
   includeCommandOutput: boolean;
   includeMemorySnapshots: boolean;
+  includeInstructionContents: boolean;
+  includeSkillInstructions: boolean;
 };
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff', '.tif']);
@@ -92,6 +94,8 @@ function auditBundleUrl(conversationId: string, options: AuditBundleOptions) {
   const params = new URLSearchParams();
   if (options.includeCommandOutput) params.set('include_command_output', 'true');
   if (options.includeMemorySnapshots) params.set('include_memory_snapshots', 'true');
+  if (options.includeInstructionContents) params.set('include_instruction_contents', 'true');
+  if (options.includeSkillInstructions) params.set('include_skill_instructions', 'true');
   const query = params.toString();
   return `http://localhost:7430/api/conversations/${conversationId}/audit-bundle${query ? `?${query}` : ''}`;
 }
@@ -178,6 +182,8 @@ export function ChatScreen() {
   const [auditOptions, setAuditOptions] = useState<AuditBundleOptions>({
     includeCommandOutput: false,
     includeMemorySnapshots: false,
+    includeInstructionContents: false,
+    includeSkillInstructions: false,
   });
   const [dragActive, setDragActive] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -256,13 +262,27 @@ export function ChatScreen() {
       setInput(detail.content);
       requestAnimationFrame(() => inputRef.current?.focus());
     };
+    const openAuditExport = () => {
+      const conversationId = useAgentStore.getState().activeConversationId;
+      if (!conversationId) return;
+      setCtxOpen(true);
+      setAuditExportId(conversationId);
+      setAuditOptions({
+        includeCommandOutput: false,
+        includeMemorySnapshots: false,
+        includeInstructionContents: false,
+        includeSkillInstructions: false,
+      });
+    };
     window.addEventListener('nid:invoke-skill', invokeSkill);
     window.addEventListener('nid:open-review', openReview);
     window.addEventListener('nid:command-output-to-chat', useCommandOutput);
+    window.addEventListener('nid:audit-export-open', openAuditExport);
     return () => {
       window.removeEventListener('nid:invoke-skill', invokeSkill);
       window.removeEventListener('nid:open-review', openReview);
       window.removeEventListener('nid:command-output-to-chat', useCommandOutput);
+      window.removeEventListener('nid:audit-export-open', openAuditExport);
     };
   }, []);
 
@@ -606,6 +626,8 @@ export function ChatScreen() {
                     setAuditOptions({
                       includeCommandOutput: false,
                       includeMemorySnapshots: false,
+                      includeInstructionContents: false,
+                      includeSkillInstructions: false,
                     });
                   }}
                   style={menuItemStyle}
@@ -985,7 +1007,7 @@ export function ChatScreen() {
               Export audit bundle
             </div>
             <div style={{ fontSize: 13, color: 'var(--t1)', lineHeight: 1.5, marginBottom: 14 }}>
-              The default export includes the manifest, messages, working-set metadata, permission decisions, memory activity, and command records with command output redacted.
+              The default export includes the manifest, messages, working-set metadata, permission decisions, memory activity, project instruction diagnostics, skill inventory metadata, and command records with sensitive prompt and command text redacted.
             </div>
             <label style={{
               display: 'flex',
@@ -1008,6 +1030,54 @@ export function ChatScreen() {
                 Include command output
                 <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 2 }}>
                   Adds captured stdout and stderr from command runs.
+                </span>
+              </span>
+            </label>
+            <label style={{
+              display: 'flex',
+              gap: 9,
+              alignItems: 'flex-start',
+              padding: '9px 0',
+              color: 'var(--t0)',
+              fontSize: 13,
+              cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={auditOptions.includeInstructionContents}
+                onChange={(event) => setAuditOptions((current) => ({
+                  ...current,
+                  includeInstructionContents: event.target.checked,
+                }))}
+              />
+              <span>
+                Include instruction file contents
+                <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 2 }}>
+                  Adds active and discovered project instruction text.
+                </span>
+              </span>
+            </label>
+            <label style={{
+              display: 'flex',
+              gap: 9,
+              alignItems: 'flex-start',
+              padding: '9px 0',
+              color: 'var(--t0)',
+              fontSize: 13,
+              cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={auditOptions.includeSkillInstructions}
+                onChange={(event) => setAuditOptions((current) => ({
+                  ...current,
+                  includeSkillInstructions: event.target.checked,
+                }))}
+              />
+              <span>
+                Include skill instruction text
+                <span style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginTop: 2 }}>
+                  Adds full skill prompt bodies from the skill inventory.
                 </span>
               </span>
             </label>

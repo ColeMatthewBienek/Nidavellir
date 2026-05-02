@@ -211,7 +211,20 @@ describe('ContextPanel — Token Usage section', () => {
     expect(screen.getByRole('tab', { name: 'Review' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Instructions' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Commands' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Audit' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Git' })).toBeTruthy();
+  });
+
+  it('opens audit export from the Workspace Audit tab', () => {
+    const listener = vi.fn();
+    window.addEventListener('nid:audit-export-open', listener);
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Audit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Export Audit Bundle' }));
+
+    expect(listener).toHaveBeenCalledOnce();
+    window.removeEventListener('nid:audit-export-open', listener);
   });
 
   it('shows Summary and Review placeholders without losing Working Set state', () => {
