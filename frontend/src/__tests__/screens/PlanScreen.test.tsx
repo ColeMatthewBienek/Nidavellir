@@ -93,6 +93,16 @@ const detailWithWorktree = {
   }],
 };
 
+const detailWithAgentStep = {
+  ...detailWithWorktree,
+  steps: [{
+    ...detail.steps[0],
+    type: 'agent',
+    title: 'Ask agent',
+    config: { prompt: 'Update the docs' },
+  }],
+};
+
 describe('PlanScreen orchestration board', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -334,6 +344,25 @@ describe('PlanScreen orchestration board', () => {
     });
   });
 
+  it('creates agent steps with prompt config', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '+ Step' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Step title' }), { target: { value: 'Ask agent' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Step type' }), { target: { value: 'agent' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Agent prompt' }), { target: { value: 'Update the docs' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Step' }));
+
+    await waitFor(() => {
+      const stepCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/nodes/node-1/steps') && options?.method === 'POST'
+      );
+      expect(stepCalls.length).toBe(1);
+      expect(JSON.parse(String(stepCalls[0][1]?.body)).config.prompt).toBe('Update the docs');
+    });
+  });
+
   it('creates node worktrees through the Plan page', async () => {
     render(<PlanScreen />);
 
@@ -429,6 +458,43 @@ describe('PlanScreen orchestration board', () => {
     await waitFor(() => {
       const runCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).includes('/api/orchestration/steps/step-1/run-command') && options?.method === 'POST'
+      );
+      expect(runCalls.length).toBe(1);
+    });
+  });
+
+  it('runs agent steps from the node worktree', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).endsWith('/api/orchestration/tasks') && !options) {
+        return Promise.resolve({ ok: true, json: async () => [task] });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/events')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).includes('/api/orchestration/steps/step-1/run-agent') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            step: { ...detailWithAgentStep.steps[0], status: 'complete', output_summary: 'done' },
+            run_attempt: { id: 'attempt-1' },
+            worktree: { ...detailWithAgentStep.worktrees[0], status: 'dirty', dirty_count: 1 },
+            transcript: 'done',
+          }),
+        });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1')) {
+        return Promise.resolve({ ok: true, json: async () => detailWithAgentStep });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    }));
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Update the docs')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      const runCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/steps/step-1/run-agent') && options?.method === 'POST'
       );
       expect(runCalls.length).toBe(1);
     });
