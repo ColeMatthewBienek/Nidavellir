@@ -15,6 +15,8 @@ from .routers import link_refs as link_refs_router
 from .routers import skills as skills_router
 from .routers import permissions as permissions_router
 from .routers import project_instructions as project_instructions_router
+from .routers import commands as commands_router
+from .commands import CommandRunner, CommandRunStore
 from .memory.store import MemoryStore
 from .permissions import PermissionAuditStore, PermissionEvaluator
 from .skills.store import SkillStore
@@ -24,6 +26,7 @@ _DB_PATH      = Path(os.environ.get("NIDAVELLIR_DB_PATH",      "./data/nidavelli
 _TOKEN_DB     = Path(os.environ.get("NIDAVELLIR_TOKEN_DB",     "./data/tokens.db"))
 _SKILL_DB     = Path(os.environ.get("NIDAVELLIR_SKILL_DB",     "./data/skills.db"))
 _PERMISSION_DB = Path(os.environ.get("NIDAVELLIR_PERMISSION_DB", "./data/permissions.db"))
+_COMMAND_DB   = Path(os.environ.get("NIDAVELLIR_COMMAND_DB",   "./data/commands.db"))
 _VECTOR_PATH  = os.environ.get("NIDAVELLIR_VECTOR_PATH", "./data/qdrant") or None
 
 
@@ -35,6 +38,8 @@ async def lifespan(app: FastAPI):
     app.state.skill_store  = SkillStore(str(_SKILL_DB))
     app.state.permission_evaluator = PermissionEvaluator()
     app.state.permission_audit_store = PermissionAuditStore(str(_PERMISSION_DB))
+    app.state.command_store = CommandRunStore(str(_COMMAND_DB))
+    app.state.command_runner = CommandRunner()
     yield
     # No explicit close needed — connections are per-operation
 
@@ -64,3 +69,4 @@ app.include_router(skills_router.router)
 app.include_router(git_router.router)
 app.include_router(permissions_router.router)
 app.include_router(project_instructions_router.router)
+app.include_router(commands_router.router)

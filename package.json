@@ -15,9 +15,6 @@
     "test": "cd backend && uv run pytest && cd ../frontend && npm test",
     "test:feature": "bash scripts/test-feature.sh"
   },
-  "dependencies": {
-    "gh": "^2.8.9"
-  },
   "devDependencies": {
     "concurrently": "^9.0.0",
     "wait-on": "^8.0.0"

@@ -12,5 +12,3 @@ export function createParser(providerId: string): ProviderStreamParser {
     default:       return new OllamaStreamParser(); // plain text fallback
   }
 }
-
-export { ClaudeStreamParser, CodexStreamParser, OllamaStreamParser };

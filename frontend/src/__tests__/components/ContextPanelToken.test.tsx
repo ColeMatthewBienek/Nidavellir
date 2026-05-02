@@ -13,11 +13,13 @@ describe('ContextPanel — Token Usage section', () => {
       selectedProvider: 'claude',
       workingDirectory: '/repo',
       workingSetFiles: [],
+      contextUsage: null,
+      resourceRevision: 0,
       refreshWorkingSetFiles: vi.fn().mockResolvedValue(undefined),
       removeWorkingSetFile: vi.fn().mockResolvedValue(undefined),
       addWorkingSetFiles: vi.fn().mockResolvedValue(true),
     });
-    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
       if (String(url).includes('/api/project-instructions')) {
         return Promise.resolve({
           ok: true,
@@ -41,6 +43,32 @@ describe('ContextPanel — Token Usage section', () => {
           }),
         });
       }
+      if (String(url).includes('/api/commands/runs')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [],
+        });
+      }
+      if (String(url).includes('/api/commands/run')) {
+        const parsed = JSON.parse(String(options?.body ?? '{}'));
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'run-1',
+            conversation_id: 'conv-test',
+            command: parsed.command,
+            cwd: '/repo',
+            exit_code: 0,
+            stdout: 'ok',
+            stderr: '',
+            timed_out: false,
+            include_in_chat: false,
+            added_to_working_set: false,
+            duration_ms: 12,
+            created_at: '2026-04-30T00:00:00Z',
+          }),
+        });
+      }
       if (String(url).includes('/api/permissions/evaluate')) {
         return Promise.resolve({
           ok: true,
@@ -51,6 +79,24 @@ describe('ContextPanel — Token Usage section', () => {
             protected: false,
             outside_workspace: false,
             requires_user_choice: false,
+          }),
+        });
+      }
+      if (String(url).includes('/api/context/usage')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            model: 'claude-sonnet-4-6',
+            provider: 'claude',
+            currentTokens: 18,
+            usableTokens: 192000,
+            percentUsed: 0.01,
+            state: 'ok',
+            accuracy: 'estimated',
+            contextLimit: 200000,
+            reservedOutputTokens: 8000,
+            lastUpdatedAt: '2026-04-30T00:00:00Z',
+            projectInstructionTokens: 6,
           }),
         });
       }
@@ -145,6 +191,7 @@ describe('ContextPanel — Token Usage section', () => {
     expect(screen.getByRole('tab', { name: 'Summary' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Review' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Instructions' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Commands' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: 'Git' })).toBeTruthy();
   });
 
@@ -253,6 +300,92 @@ describe('ContextPanel — Token Usage section', () => {
       'http://localhost:7430/api/project-instructions',
       expect.objectContaining({ method: 'PUT' }),
     ));
+  });
+
+  it('refreshes resource pressure after saving project instructions', async () => {
+    const fetchMock = vi.mocked(fetch);
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Instructions' }));
+    const editor = await screen.findByRole('textbox', { name: 'Edit NIDAVELLIR.md' });
+    fireEvent.change(editor, { target: { value: 'Changed shared rules' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/context/usage'),
+    ));
+    expect(useAgentStore.getState().resourceRevision).toBeGreaterThan(0);
+  });
+
+  it('runs a command and shows captured output in history', async () => {
+    render(<ContextPanel onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Commands' }));
+    const input = await screen.findByRole('textbox', { name: 'Command' });
+    fireEvent.change(input, { target: { value: 'printf ok' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    expect(await screen.findByText('printf ok')).toBeTruthy();
+    fireEvent.click(screen.getByText('printf ok'));
+    expect(screen.getByText('ok')).toBeTruthy();
+  });
+
+  it('shows a permission gate for risky command runs', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).includes('/api/commands/runs')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).includes('/api/commands/run') && options?.method === 'POST') {
+        const parsed = JSON.parse(String(options.body));
+        if (!parsed.permissionOverride) {
+          return Promise.resolve({
+            ok: false,
+            json: async () => ({
+              detail: {
+                code: 'permission_required',
+                permission: {
+                  action: 'shell_command',
+                  decision: 'ask',
+                  reason: 'shell command matches risky command policy',
+                  protected: false,
+                  outside_workspace: false,
+                  matched_rule: 'rm',
+                  requires_user_choice: true,
+                },
+              },
+            }),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'run-risky',
+            conversation_id: 'conv-test',
+            command: parsed.command,
+            cwd: '/repo',
+            exit_code: 0,
+            stdout: 'allowed',
+            stderr: '',
+            timed_out: false,
+            include_in_chat: false,
+            added_to_working_set: false,
+            duration_ms: 20,
+            created_at: '2026-04-30T00:00:00Z',
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ContextPanel onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Commands' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Command' }), { target: { value: 'rm -rf build' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    expect(await screen.findByText('Permission required')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+    expect(await screen.findByText('rm -rf build')).toBeTruthy();
   });
 
   it('shows live Summary progress while a build turn is still running', () => {

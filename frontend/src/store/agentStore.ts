@@ -18,7 +18,7 @@ export interface Message {
   events:    StreamEvent[]; // parser output — drives StreamRenderer
 }
 
-export interface MemoryRecord {
+interface MemoryRecord {
   id:          string;
   content:     string;
   category:    string;
@@ -27,7 +27,7 @@ export interface MemoryRecord {
   importance:  number;
 }
 
-export interface ContextUsage {
+interface ContextUsage {
   model:         string;
   provider:      string;
   currentTokens: number;
@@ -39,7 +39,7 @@ export interface ContextUsage {
   lastUpdatedAt: string;
 }
 
-export interface ConversationListItem {
+interface ConversationListItem {
   id: string;
   title: string;
   updatedAt: string;
@@ -53,7 +53,7 @@ export interface ConversationListItem {
   archived: boolean;
 }
 
-export interface ConversationFile {
+interface ConversationFile {
   id: string;
   conversationId: string;
   fileName: string;
@@ -306,6 +306,9 @@ interface AgentStore {
   setMemories:              (memories: MemoryRecord[]) => void;
   contextUsage:             ContextUsage | null;
   setContextUsage:          (usage: ContextUsage | null) => void;
+  refreshContextUsage:      () => Promise<void>;
+  resourceRevision:         number;
+  markResourcesChanged:     (reason?: string) => void;
 
   // Session continuity
   handoffPending:   boolean;
@@ -672,6 +675,40 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   setMemories:       (memories) => set({ memories }),
   contextUsage:      null,
   setContextUsage:   (usage) => set({ contextUsage: usage }),
+  refreshContextUsage: async () => {
+    const state = get();
+    const conversationId = state.activeConversationId;
+    if (!conversationId) return;
+    const [providerId, ...modelParts] = state.selectedModel.split(":");
+    const provider = providerId || state.selectedProvider;
+    const model = modelParts.join(":") || state.selectedModel;
+    try {
+      const params = new URLSearchParams({ conversation_id: conversationId, provider, model });
+      const resp = await fetch(`http://localhost:7430/api/context/usage?${params}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      set({
+        contextUsage: {
+          model: data.model,
+          provider: data.provider ?? provider,
+          currentTokens: data.currentTokens,
+          usableTokens: data.usableTokens,
+          totalLimit: data.contextLimit,
+          percentUsed: data.percentUsed ?? 0,
+          state: data.state ?? "ok",
+          accurate: data.accuracy === "accurate",
+          lastUpdatedAt: data.lastUpdatedAt ?? new Date().toISOString(),
+        },
+      });
+    } catch {
+      // resource reload should not interrupt the active workflow
+    }
+  },
+  resourceRevision: 0,
+  markResourcesChanged: (reason = "resources changed") => {
+    set((state) => ({ resourceRevision: state.resourceRevision + 1, toastMessage: reason }));
+    get().refreshContextUsage().catch(() => {});
+  },
 
   // ── Session continuity ────────────────────────────────────────────────────
   handoffPending:  false,

@@ -83,6 +83,15 @@ def context_usage(
         current += memory_store.active_file_text_tokens(conv_id)
     except Exception:
         pass
+    project_instruction_tokens = 0
+    try:
+        workdir = conv.get("working_directory")
+        if workdir:
+            from nidavellir.project_instructions.discovery import discover_project_instructions
+            project_instruction_tokens = discover_project_instructions(cwd=workdir, provider=provider).token_estimate
+            current += project_instruction_tokens
+    except Exception:
+        project_instruction_tokens = 0
     accuracy = "estimated"  # local heuristic; becomes "accurate" when provider pre-counts
 
     pressure = compute_context_pressure(current, model, provider, accuracy=accuracy)
@@ -99,6 +108,7 @@ def context_usage(
         "reservedOutputTokens": pressure.reserved_output_tokens,
         "lastUpdatedAt":        pressure.last_updated_at,
         "includesHandoffSeed":  includes_seed,
+        "projectInstructionTokens": project_instruction_tokens,
     }
 
 
