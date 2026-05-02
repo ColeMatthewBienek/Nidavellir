@@ -9,11 +9,34 @@ MAX_CAPTURE_CHARS = 64_000
 CommandEventCallback = Callable[[dict], Awaitable[None]]
 
 
-def _trim_output(text: str) -> str:
-    if len(text) <= MAX_CAPTURE_CHARS:
-        return text
-    omitted = len(text) - MAX_CAPTURE_CHARS
-    return text[:MAX_CAPTURE_CHARS] + f"\n\n[truncated {omitted} chars]"
+class OutputCapture:
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+        self.size = 0
+        self.truncated = False
+
+    def append(self, text: str) -> str | None:
+        if self.truncated:
+            return None
+        remaining = MAX_CAPTURE_CHARS - self.size
+        if remaining <= 0:
+            self.truncated = True
+            marker = "\n\n[truncated output]"
+            self.parts.append(marker)
+            return marker
+        if len(text) <= remaining:
+            self.parts.append(text)
+            self.size += len(text)
+            return text
+        self.parts.append(text[:remaining])
+        self.size += remaining
+        self.truncated = True
+        marker = f"\n\n[truncated {len(text) - remaining} chars]"
+        self.parts.append(marker)
+        return text[:remaining] + marker
+
+    def text(self) -> str:
+        return "".join(self.parts)
 
 
 class CommandRunner:
@@ -43,10 +66,10 @@ class CommandRunner:
         )
         await emit({"type": "started", "pid": proc.pid})
 
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
+        stdout_capture = OutputCapture()
+        stderr_capture = OutputCapture()
 
-        async def read_stream(stream: asyncio.StreamReader | None, stream_name: str, parts: list[str]) -> None:
+        async def read_stream(stream: asyncio.StreamReader | None, stream_name: str, capture: OutputCapture) -> None:
             if stream is None:
                 return
             while True:
@@ -54,11 +77,12 @@ class CommandRunner:
                 if not chunk:
                     return
                 text = chunk.decode(errors="replace")
-                parts.append(text)
-                await emit({"type": "output", "stream": stream_name, "content": text})
+                emitted = capture.append(text)
+                if emitted:
+                    await emit({"type": "output", "stream": stream_name, "content": emitted})
 
-        stdout_task = asyncio.create_task(read_stream(proc.stdout, "stdout", stdout_parts))
-        stderr_task = asyncio.create_task(read_stream(proc.stderr, "stderr", stderr_parts))
+        stdout_task = asyncio.create_task(read_stream(proc.stdout, "stdout", stdout_capture))
+        stderr_task = asyncio.create_task(read_stream(proc.stderr, "stderr", stderr_capture))
         timed_out = False
         try:
             await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
@@ -69,8 +93,8 @@ class CommandRunner:
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
         duration_ms = int((time.monotonic() - started) * 1000)
-        stdout = _trim_output("".join(stdout_parts))
-        stderr = _trim_output("".join(stderr_parts))
+        stdout = stdout_capture.text()
+        stderr = stderr_capture.text()
         await emit({
             "type": "finished",
             "exit_code": proc.returncode,

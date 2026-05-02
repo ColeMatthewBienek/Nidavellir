@@ -340,3 +340,48 @@ async def test_context_usage_counts_active_project_instructions(tmp_path: Path):
     body = usage.json()
     assert body["projectInstructionTokens"] > 0
     assert body["currentTokens"] >= body["projectInstructionTokens"]
+
+
+@pytest.mark.asyncio
+async def test_context_usage_counts_attached_command_output(tmp_path: Path):
+    from nidavellir.commands import CommandRunStore
+
+    _setup_app(tmp_path)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    command_store = CommandRunStore(str(tmp_path / "commands.db"))
+    app.state.command_store = command_store
+    app.state.memory_store.create_conversation(
+        "conv-command-context",
+        model_id="claude-sonnet-4-6",
+        provider_id="anthropic",
+        working_directory=str(workspace),
+        working_directory_display=str(workspace),
+    )
+    command_store.create_run(
+        conversation_id="conv-command-context",
+        command="npm test",
+        cwd=str(workspace),
+        exit_code=0,
+        stdout="attached command output " * 100,
+        stderr="",
+        timed_out=False,
+        include_in_chat=True,
+        added_to_working_set=False,
+        duration_ms=42,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        usage = await c.get(
+            "/api/context/usage",
+            params={
+                "conversation_id": "conv-command-context",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+            },
+        )
+
+    assert usage.status_code == 200
+    body = usage.json()
+    assert body["commandAttachmentTokens"] > 0
+    assert body["currentTokens"] >= body["commandAttachmentTokens"]

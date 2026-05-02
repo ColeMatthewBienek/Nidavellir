@@ -83,6 +83,29 @@ def context_usage(
         current += memory_store.active_file_text_tokens(conv_id)
     except Exception:
         pass
+    command_attachment_tokens = 0
+    try:
+        command_store = getattr(request.app.state, "command_store", None)
+        if command_store is not None:
+            attached_runs = command_store.list_chat_attachments(conversation_id=conv_id)
+            command_attachment_text = "\n\n".join(
+                "\n".join(
+                    part for part in [
+                        str(run.get("command") or ""),
+                        str(run.get("stdout") or ""),
+                        str(run.get("stderr") or ""),
+                    ] if part
+                )
+                for run in attached_runs
+            )
+            if command_attachment_text.strip():
+                command_attachment_tokens = estimate_payload_tokens([{
+                    "role": "system",
+                    "content": command_attachment_text,
+                }])
+                current += command_attachment_tokens
+    except Exception:
+        command_attachment_tokens = 0
     project_instruction_tokens = 0
     try:
         workdir = conv.get("working_directory")
@@ -113,6 +136,7 @@ def context_usage(
         "lastUpdatedAt":        pressure.last_updated_at,
         "includesHandoffSeed":  includes_seed,
         "projectInstructionTokens": project_instruction_tokens,
+        "commandAttachmentTokens": command_attachment_tokens,
     }
 
 

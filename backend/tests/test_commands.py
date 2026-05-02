@@ -6,6 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from nidavellir.commands import CommandRunner, CommandRunStore
+from nidavellir.commands.runner import MAX_CAPTURE_CHARS
 from nidavellir.main import app
 from nidavellir.memory.store import MemoryStore
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
@@ -68,6 +69,26 @@ async def test_command_runner_streams_start_output_and_finish_events(tmp_path: P
     assert {"type": "output", "stream": "stdout", "content": "streamed"} in events
     assert events[-1]["type"] == "finished"
     assert events[-1]["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_command_runner_caps_streamed_output_while_running(tmp_path: Path):
+    events = []
+
+    async def collect(event: dict):
+        events.append(event)
+
+    result = await CommandRunner().run(
+        command="python -c 'print(\"x\" * 70000, end=\"\")'",
+        cwd=str(tmp_path),
+        on_event=collect,
+    )
+
+    output_events = [event for event in events if event.get("type") == "output"]
+    streamed = "".join(event.get("content", "") for event in output_events)
+    assert len(result["stdout"]) <= MAX_CAPTURE_CHARS + 100
+    assert "[truncated" in result["stdout"]
+    assert streamed == result["stdout"]
 
 
 @pytest.mark.asyncio

@@ -275,11 +275,16 @@ function connect(): void {
           exit_code?: number | null;
           timed_out?: boolean;
           duration_ms?: number;
+          conversation_id?: string | null;
         } | undefined;
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("nid:command-event", { detail: commandEvent }));
         }
         if (!commandEvent?.run_id || !commandEvent.command) break;
+        const activeConversation = useAgentStore.getState().conversationId;
+        if (commandEvent.conversation_id && activeConversation && commandEvent.conversation_id !== activeConversation) {
+          break;
+        }
         if (commandEvent.type === "started") {
           if (!useAgentStore.getState().isStreaming) {
             useAgentStore.getState().addMessage("agent", "");

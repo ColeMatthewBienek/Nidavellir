@@ -74,7 +74,12 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", MockWebSocket);
   vi.useFakeTimers();
   _testResetSocket();
-  useAgentStore.setState({ messages: [], isStreaming: false });
+  useAgentStore.setState({
+    messages: [],
+    isStreaming: false,
+    conversationId: null,
+    activeConversationId: null,
+  });
 });
 
 afterEach(() => {
@@ -310,6 +315,7 @@ describe("chunk handling — raw storage", () => {
 
   it("routes live command events into UI listeners and the session timeline", () => {
     const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-live", activeConversationId: "conv-live" });
     const commandEvents: unknown[] = [];
     window.addEventListener("nid:command-event", (event) => {
       commandEvents.push((event as CustomEvent).detail);
@@ -320,6 +326,7 @@ describe("chunk handling — raw storage", () => {
       event: {
         type: "started",
         run_id: "run-live",
+        conversation_id: "conv-live",
         command: "printf ok",
         cwd: "/repo",
       },
@@ -329,6 +336,7 @@ describe("chunk handling — raw storage", () => {
       event: {
         type: "output",
         run_id: "run-live",
+        conversation_id: "conv-live",
         command: "printf ok",
         cwd: "/repo",
         stream: "stdout",
@@ -340,6 +348,7 @@ describe("chunk handling — raw storage", () => {
       event: {
         type: "finished",
         run_id: "run-live",
+        conversation_id: "conv-live",
         command: "printf ok",
         cwd: "/repo",
         exit_code: 0,
@@ -366,6 +375,25 @@ describe("chunk handling — raw storage", () => {
       status: "success",
       summary: "Exit 0 in 11ms",
     });
+  });
+
+  it("does not add command timeline events from another active conversation", () => {
+    const ws = setupOpenSocket();
+    useAgentStore.setState({ conversationId: "conv-active", activeConversationId: "conv-active" });
+
+    ws.simulateMessage({
+      type: "command_event",
+      event: {
+        type: "started",
+        run_id: "run-other",
+        conversation_id: "conv-other",
+        command: "printf nope",
+        cwd: "/repo",
+      },
+    });
+
+    expect(useAgentStore.getState().messages).toHaveLength(0);
+    expect(useAgentStore.getState().isStreaming).toBe(false);
   });
 
   it("flushes parser events when the response finishes", () => {
