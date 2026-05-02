@@ -78,6 +78,7 @@ interface OrchestrationStep {
   title: string;
   description: string;
   status: string;
+  config: Record<string, unknown>;
   output_summary: string;
 }
 
@@ -325,6 +326,7 @@ function TaskDetail({
   onRemoveWorktree,
   onAddStep,
   onCompleteStep,
+  onRunCommandStep,
 }: {
   task: OrchestrationTaskDetail;
   events: OrchestrationEvent[];
@@ -340,6 +342,7 @@ function TaskDetail({
   onRemoveWorktree: (worktreeId: string) => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
+  onRunCommandStep: (stepId: string) => void;
 }) {
   const selectedNode = task.nodes.find((node) => node.id === selectedNodeId) ?? task.nodes[0] ?? null;
   const selectedSteps = selectedNode
@@ -540,10 +543,33 @@ function TaskDetail({
                   <div style={{ minWidth: 0 }}>
                     <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 700 }}>{step.title}</div>
                     <div style={{ color: 'var(--t1)', fontSize: 10, marginTop: 3 }}>{step.type}</div>
+                    {step.type === 'command' && typeof step.config.command === 'string' && (
+                      <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', marginTop: 5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {step.config.command}
+                      </div>
+                    )}
                     {step.output_summary && <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 6 }}>{step.output_summary}</div>}
                   </div>
                   {step.status === 'complete' ? (
                     <StatusPill status="complete" />
+                  ) : step.type === 'command' ? (
+                    <button
+                      type="button"
+                      onClick={() => onRunCommandStep(step.id)}
+                      disabled={!selectedNodeWorktree && !taskWorktree}
+                      style={{
+                        border: '1px solid var(--bd)',
+                        borderRadius: 5,
+                        background: '#1f6feb22',
+                        color: !selectedNodeWorktree && !taskWorktree ? 'var(--t1)' : 'var(--blu)',
+                        cursor: !selectedNodeWorktree && !taskWorktree ? 'not-allowed' : 'pointer',
+                        fontSize: 11,
+                        padding: '4px 7px',
+                        fontWeight: 700,
+                      }}
+                    >
+                      Run
+                    </button>
                   ) : (
                     <button
                       type="button"
@@ -799,11 +825,12 @@ function StepModal({
   onCreate,
 }: {
   onClose: () => void;
-  onCreate: (values: { title: string; description: string; type: string }) => void;
+  onCreate: (values: { title: string; description: string; type: string; command: string }) => void;
 }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [type, setType] = useState('manual');
+  const [command, setCommand] = useState('');
 
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="orchestration-step-title" style={{
@@ -836,6 +863,17 @@ function StepModal({
         >
           {STEP_TYPES.map((item) => <option key={item} value={item}>{item}</option>)}
         </select>
+        {type === 'command' && (
+          <>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Command</label>
+            <input
+              aria-label="Step command"
+              value={command}
+              onChange={(event) => setCommand(event.target.value)}
+              style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, marginBottom: 12, fontFamily: 'var(--mono)' }}
+            />
+          </>
+        )}
         <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Description</label>
         <textarea
           aria-label="Step description"
@@ -845,7 +883,7 @@ function StepModal({
         />
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <Btn onClick={onClose}>Cancel</Btn>
-          <Btn primary disabled={!title.trim()} onClick={() => onCreate({ title: title.trim(), description: description.trim(), type })}>Create Step</Btn>
+          <Btn primary disabled={!title.trim() || (type === 'command' && !command.trim())} onClick={() => onCreate({ title: title.trim(), description: description.trim(), type, command: command.trim() })}>Create Step</Btn>
         </div>
       </div>
     </div>
@@ -1143,11 +1181,16 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_edge_delete_failed'));
   };
 
-  const addStep = (nodeId: string, values: { title: string; description: string; type: string }) => {
+  const addStep = (nodeId: string, values: { title: string; description: string; type: string; command: string }) => {
     fetch(`${API}/api/orchestration/nodes/${nodeId}/steps`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: values.title, description: values.description, type: values.type }),
+      body: JSON.stringify({
+        title: values.title,
+        description: values.description,
+        type: values.type,
+        config: values.type === 'command' ? { command: values.command } : {},
+      }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_step_${response.status}`);
@@ -1161,6 +1204,24 @@ export function PlanScreen() {
         }
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_step_failed'));
+  };
+
+  const runCommandStep = (stepId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/steps/${stepId}/run-command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: selectedTask.conversation_id ?? null }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_command_step_${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_command_step_failed'));
   };
 
   const completeStep = (stepId: string) => {
@@ -1317,6 +1378,7 @@ export function PlanScreen() {
           onRemoveWorktree={removeWorktree}
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
+          onRunCommandStep={runCommandStep}
         />
       )}
 

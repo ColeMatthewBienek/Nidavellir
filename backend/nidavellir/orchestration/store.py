@@ -444,6 +444,44 @@ class OrchestrationStore:
             row = conn.execute("SELECT * FROM orchestration_steps WHERE id = ?", (step_id,)).fetchone()
         return self._step_row(row) if row else None
 
+    def update_step(
+        self,
+        step_id: str,
+        updates: dict[str, Any],
+    ) -> dict | None:
+        step = self.get_step(step_id)
+        if not step:
+            return None
+        node = self._require_node(step["node_id"])
+        allowed = {"title", "type", "description", "status", "config", "output_summary", "order_index"}
+        values = {key: value for key, value in updates.items() if key in allowed}
+        if not values:
+            return step
+        if "type" in values:
+            self._require_status(values["type"], STEP_TYPES, "step_type")
+        if "status" in values:
+            self._require_status(values["status"], STEP_STATUSES, "step_status")
+        assignments = []
+        params: list[Any] = []
+        for key, value in values.items():
+            column = "config_json" if key == "config" else key
+            assignments.append(f"{column} = ?")
+            params.append(_json_dumps(value or {}) if key == "config" else value)
+        assignments.append("updated_at = ?")
+        params.append(_now())
+        params.append(step_id)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE orchestration_steps SET {', '.join(assignments)} WHERE id = ?", params)
+        self.append_event(
+            task_id=node["task_id"],
+            node_id=node["id"],
+            step_id=step_id,
+            type="step_updated",
+            payload=values,
+        )
+        self.recalculate_task_readiness(node["task_id"])
+        return self.get_step(step_id)
+
     def update_step_status(self, step_id: str, status: str, output_summary: str | None = None) -> dict | None:
         self._require_status(status, STEP_STATUSES, "step_status")
         step = self.get_step(step_id)
@@ -466,6 +504,24 @@ class OrchestrationStore:
         )
         self.recalculate_task_readiness(node["task_id"])
         return self.get_step(step_id)
+
+    def find_worktree_for_node(self, *, task_id: str, node_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM orchestration_worktrees
+                   WHERE task_id = ? AND node_id = ? AND status != 'removed'
+                   ORDER BY created_at DESC LIMIT 1""",
+                (task_id, node_id),
+            ).fetchone()
+            if row:
+                return self._worktree_row(row)
+            fallback = conn.execute(
+                """SELECT * FROM orchestration_worktrees
+                   WHERE task_id = ? AND node_id IS NULL AND status != 'removed'
+                   ORDER BY created_at DESC LIMIT 1""",
+                (task_id,),
+            ).fetchone()
+        return self._worktree_row(fallback) if fallback else None
 
     def create_worktree(
         self,

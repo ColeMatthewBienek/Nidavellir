@@ -60,6 +60,7 @@ const detail = {
     title: 'Create schema',
     description: '',
     status: 'pending',
+    config: {},
     output_summary: '',
   }],
   readiness: {
@@ -70,6 +71,12 @@ const detail = {
 
 const detailWithWorktree = {
   ...detail,
+  steps: [{
+    ...detail.steps[0],
+    type: 'command',
+    title: 'Write marker',
+    config: { command: 'printf marker > marker.txt' },
+  }],
   worktrees: [{
     id: 'worktree-1',
     task_id: 'task-1',
@@ -185,7 +192,7 @@ describe('PlanScreen orchestration board', () => {
         return Promise.resolve({ ok: true, json: async () => ({ ...detail.steps[0], status: 'complete' }) });
       }
       if (String(url).includes('/api/orchestration/nodes/node-1/steps') && options?.method === 'POST') {
-        return Promise.resolve({ ok: true, json: async () => ({ ...detail.steps[0], id: 'step-new', title: 'Review output' }) });
+        return Promise.resolve({ ok: true, json: async () => ({ ...detail.steps[0], id: 'step-new', title: 'Review output', config: {} }) });
       }
       if (String(url).includes('/api/orchestration/edges/edge-1') && options?.method === 'DELETE') {
         return Promise.resolve({ ok: true, json: async () => ({}) });
@@ -308,6 +315,25 @@ describe('PlanScreen orchestration board', () => {
     });
   });
 
+  it('creates command steps with command config', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '+ Step' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Step title' }), { target: { value: 'Write marker' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Step type' }), { target: { value: 'command' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Step command' }), { target: { value: 'printf marker > marker.txt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Step' }));
+
+    await waitFor(() => {
+      const stepCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/nodes/node-1/steps') && options?.method === 'POST'
+      );
+      expect(stepCalls.length).toBe(1);
+      expect(JSON.parse(String(stepCalls[0][1]?.body)).config.command).toBe('printf marker > marker.txt');
+    });
+  });
+
   it('creates node worktrees through the Plan page', async () => {
     render(<PlanScreen />);
 
@@ -339,6 +365,16 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
         return Promise.resolve({ ok: true, json: async () => ({ ...detailWithWorktree.worktrees[0], status: 'removed' }) });
       }
+      if (String(url).includes('/api/orchestration/steps/step-1/run-command') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            step: { ...detailWithWorktree.steps[0], status: 'complete', output_summary: 'marker' },
+            run: { id: 'run-1' },
+            worktree: { ...detailWithWorktree.worktrees[0], status: 'dirty', dirty_count: 1 },
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detailWithWorktree });
       }
@@ -359,6 +395,42 @@ describe('PlanScreen orchestration board', () => {
       );
       expect(refreshCalls.length).toBe(1);
       expect(removeCalls.length).toBe(1);
+    });
+  });
+
+  it('runs command steps from the node worktree', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).endsWith('/api/orchestration/tasks') && !options) {
+        return Promise.resolve({ ok: true, json: async () => [task] });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/events')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).includes('/api/orchestration/steps/step-1/run-command') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            step: { ...detailWithWorktree.steps[0], status: 'complete', output_summary: 'marker' },
+            run: { id: 'run-1' },
+            worktree: { ...detailWithWorktree.worktrees[0], status: 'dirty', dirty_count: 1 },
+          }),
+        });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1')) {
+        return Promise.resolve({ ok: true, json: async () => detailWithWorktree });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    }));
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('printf marker > marker.txt')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      const runCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/steps/step-1/run-command') && options?.method === 'POST'
+      );
+      expect(runCalls.length).toBe(1);
     });
   });
 });

@@ -205,6 +205,54 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_orchestration_runs_command_steps_inside_node_worktree(tmp_path: Path):
+    setup_app(tmp_path)
+    repo = create_git_repo(tmp_path / "repo")
+    worktree_path = tmp_path / "worktrees" / "command-node"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Command worktree test",
+            "baseRepoPath": str(repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "Command Node"})).json()
+        worktree = (await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/command-worktree-test/command-node",
+            "worktreePath": str(worktree_path),
+        })).json()
+        step = (await c.post(f"/api/orchestration/nodes/{node['id']}/steps", json={
+            "title": "Write marker",
+            "type": "command",
+            "config": {"command": "printf marker > marker.txt && pwd"},
+        })).json()
+
+        result = await c.post(f"/api/orchestration/steps/{step['id']}/run-command", json={
+            "conversationId": "conv-command",
+        })
+        assert result.status_code == 200
+        body = result.json()
+        assert body["step"]["status"] == "complete"
+        assert body["run"]["cwd"] == str(worktree_path)
+        assert str(worktree_path) in body["run"]["stdout"]
+        assert body["worktree"]["id"] == worktree["id"]
+        assert body["worktree"]["status"] == "dirty"
+        assert body["worktree"]["dirty_summary"][0]["path"] == "marker.txt"
+        assert (worktree_path / "marker.txt").read_text(encoding="utf-8") == "marker"
+
+        runs = await c.get("/api/commands/runs", params={"conversationId": "conv-command"})
+        assert runs.status_code == 200
+        assert runs.json()[0]["id"] == body["run"]["id"]
+
+        events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
+        event_types = {event["type"] for event in events.json()}
+        assert {"command_step_started", "command_step_finished"} <= event_types
+
+
+@pytest.mark.asyncio
 async def test_orchestration_rejects_invalid_status(tmp_path: Path):
     setup_app(tmp_path)
 

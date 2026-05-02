@@ -8,6 +8,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from nidavellir.commands import CommandRunner, CommandRunStore
+from nidavellir.commands.events import broadcast_command_event
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.orchestration.worktrees import (
     WorktreeError,
@@ -19,6 +21,9 @@ from nidavellir.orchestration.worktrees import (
     repo_root,
     slugify,
 )
+from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
+from nidavellir.resources.events import broadcast_resource_event
+from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -91,6 +96,14 @@ class StepStatusRequest(BaseModel):
     outputSummary: str | None = None
 
 
+class StepRunCommandRequest(BaseModel):
+    command: str | None = None
+    conversationId: str | None = None
+    includeInChat: bool = False
+    timeoutSeconds: int = Field(default=120, ge=1, le=600)
+    permissionOverride: str | None = None
+
+
 class WorktreeCreateRequest(BaseModel):
     nodeId: str | None = None
     repoPath: str | None = None
@@ -104,6 +117,21 @@ def _store(request: Request) -> OrchestrationStore:
     if store is None:
         raise HTTPException(status_code=503, detail="orchestration_store_not_available")
     return store
+
+
+def _command_store(request: Request) -> CommandRunStore:
+    store = getattr(request.app.state, "command_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="command_store_not_available")
+    return store
+
+
+def _command_runner(request: Request) -> CommandRunner:
+    runner = getattr(request.app.state, "command_runner", None)
+    if runner is None:
+        runner = CommandRunner()
+        request.app.state.command_runner = runner
+    return runner
 
 
 def _handle_store_error(err: Exception) -> None:
@@ -123,6 +151,13 @@ def _default_branch_name(task: dict, node: dict | None) -> str:
     suffix = slugify(node["title"]) if node else "task"
     unique = uuid.uuid4().hex[:8]
     return f"orchestration/{task_slug}/{suffix}-{unique}"
+
+
+def _command_from_step(step: dict, command_override: str | None) -> str:
+    command = (command_override or step.get("config", {}).get("command") or "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command_required")
+    return command
 
 
 @router.get("/tasks")
@@ -275,6 +310,154 @@ def update_step_status(step_id: str, body: StepStatusRequest, request: Request) 
     if step is None:
         raise HTTPException(status_code=404, detail="step_not_found")
     return step
+
+
+@router.post("/steps/{step_id}/run-command")
+async def run_command_step(step_id: str, body: StepRunCommandRequest, request: Request) -> dict:
+    store = _store(request)
+    step = store.get_step(step_id)
+    if step is None:
+        raise HTTPException(status_code=404, detail="step_not_found")
+    if step["type"] != "command":
+        raise HTTPException(status_code=400, detail="step_not_command")
+    node = store.get_node(step["node_id"])
+    if node is None:
+        raise HTTPException(status_code=404, detail="node_not_found")
+    task = store.get_task(node["task_id"])
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    worktree = store.find_worktree_for_node(task_id=task["id"], node_id=node["id"])
+    if worktree is None:
+        raise HTTPException(status_code=400, detail="worktree_required")
+    command = _command_from_step(step, body.command)
+    cwd = Path(worktree["worktree_path"]).expanduser().resolve()
+    if not cwd.exists() or not cwd.is_dir():
+        store.update_worktree(worktree["id"], {"status": "missing", "dirty_count": 0, "dirty_summary": []})
+        raise HTTPException(status_code=400, detail="worktree_missing")
+
+    decision = evaluate_and_audit(
+        request,
+        PermissionEvaluationRequest(
+            action="shell_command",
+            command=command,
+            actor="agent",
+            workspace=str(cwd),
+            conversation_id=body.conversationId or task.get("conversation_id"),
+            metadata={
+                "source": "orchestration.command_step",
+                "task_id": task["id"],
+                "node_id": node["id"],
+                "step_id": step_id,
+                "worktree_id": worktree["id"],
+            },
+        ),
+    )
+    if decision.decision == PermissionDecision.ASK:
+        if body.permissionOverride == PermissionDecision.ALLOW_ONCE.value:
+            audit_store(request).log(
+                PermissionEvaluationRequest(
+                    action="shell_command",
+                    command=command,
+                    actor="agent",
+                    workspace=str(cwd),
+                    conversation_id=body.conversationId or task.get("conversation_id"),
+                    metadata={
+                        "source": "orchestration.command_step",
+                        "override": "allow_once",
+                        "task_id": task["id"],
+                        "node_id": node["id"],
+                        "step_id": step_id,
+                        "worktree_id": worktree["id"],
+                    },
+                ),
+                decision.model_copy(update={
+                    "decision": PermissionDecision.ALLOW_ONCE,
+                    "reason": f"allow_once override: {decision.reason}",
+                    "requires_user_choice": False,
+                }),
+            )
+        else:
+            raise HTTPException(status_code=403, detail={
+                "code": "permission_required",
+                "permission": decision.model_dump(mode="json"),
+            })
+    elif decision.decision == PermissionDecision.DENY:
+        raise HTTPException(status_code=403, detail={
+            "code": "permission_denied",
+            "permission": decision.model_dump(mode="json"),
+        })
+
+    run_id = str(uuid.uuid4())
+    conversation_id = body.conversationId or task.get("conversation_id")
+    store.update_step_status(step_id, "running", output_summary="Command running.")
+    store.append_event(
+        task_id=task["id"],
+        node_id=node["id"],
+        step_id=step_id,
+        type="command_step_started",
+        payload={"command": command, "worktree_id": worktree["id"], "run_id": run_id},
+    )
+
+    async def emit(event: dict) -> None:
+        await broadcast_command_event(request.app, {
+            **event,
+            "run_id": run_id,
+            "conversation_id": conversation_id,
+            "command": command,
+            "cwd": str(cwd),
+            "orchestration_task_id": task["id"],
+            "orchestration_node_id": node["id"],
+            "orchestration_step_id": step_id,
+        })
+
+    result = await _command_runner(request).run(
+        command=command,
+        cwd=str(cwd),
+        timeout_seconds=body.timeoutSeconds,
+        on_event=emit,
+    )
+    run = _command_store(request).create_run(
+        run_id=run_id,
+        conversation_id=conversation_id,
+        command=command,
+        cwd=str(cwd),
+        exit_code=result["exit_code"],
+        stdout=result["stdout"],
+        stderr=result["stderr"],
+        timed_out=result["timed_out"],
+        include_in_chat=body.includeInChat,
+        added_to_working_set=False,
+        duration_ms=result["duration_ms"],
+    )
+    output = result["stdout"] or result["stderr"]
+    summary = output.strip().splitlines()[-1][:240] if output.strip() else f"Command exited {result['exit_code']}"
+    status = "failed" if result["timed_out"] or result["exit_code"] not in (0, None) else "complete"
+    updated_step = store.update_step_status(step_id, status, output_summary=summary)
+    try:
+        info = git_status(cwd)
+        worktree = store.update_worktree(worktree["id"], {
+            "head_commit": info["head_commit"],
+            "status": info["status"],
+            "dirty_count": info["dirty_count"],
+            "dirty_summary": info["dirty_summary"],
+        }) or worktree
+    except Exception:
+        worktree = store.update_worktree(worktree["id"], {"status": "error"}) or worktree
+    store.append_event(
+        task_id=task["id"],
+        node_id=node["id"],
+        step_id=step_id,
+        type="command_step_finished",
+        payload={"run_id": run_id, "exit_code": result["exit_code"], "status": status, "worktree_id": worktree["id"]},
+    )
+    await broadcast_resource_event(request.app, {
+        "kind": "orchestration",
+        "action": "command_step_finished",
+        "conversation_id": conversation_id,
+        "run_id": run_id,
+        "message": "Orchestration command step captured",
+    })
+    return {"step": updated_step, "run": run, "worktree": worktree}
 
 
 @router.get("/tasks/{task_id}/worktrees")
