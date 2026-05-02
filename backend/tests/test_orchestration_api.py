@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,17 @@ def setup_app(tmp_path: Path):
     app.state.command_store = CommandRunStore(str(tmp_path / "commands.db"))
     app.state.command_runner = CommandRunner()
     app.state.orchestration_store = OrchestrationStore(str(tmp_path / "orchestration.db"))
+
+
+def create_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "nidavellir@example.test"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Nidavellir Test"], cwd=path, check=True)
+    (path / "README.md").write_text("# test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=path, check=True, capture_output=True, text=True)
+    return path
 
 
 @pytest.mark.asyncio
@@ -139,6 +151,57 @@ async def test_orchestration_updates_nodes_and_removes_edges(tmp_path: Path):
         assert detail["edges"] == []
         event_types = {event["type"] for event in (await c.get(f"/api/orchestration/tasks/{task['id']}/events")).json()}
         assert {"node_updated", "edge_removed"} <= event_types
+
+
+@pytest.mark.asyncio
+async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: Path):
+    setup_app(tmp_path)
+    repo = create_git_repo(tmp_path / "repo")
+    worktree_path = tmp_path / "worktrees" / "node-a"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Worktree test",
+            "baseRepoPath": str(repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "Node A"})).json()
+
+        created = await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/worktree-test/node-a",
+            "worktreePath": str(worktree_path),
+        })
+        assert created.status_code == 200
+        worktree = created.json()
+        assert worktree["node_id"] == node["id"]
+        assert worktree["status"] == "clean"
+        assert worktree["dirty_count"] == 0
+        assert worktree_path.exists()
+
+        (worktree_path / "README.md").write_text("# changed\n", encoding="utf-8")
+        refreshed = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/refresh")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["status"] == "dirty"
+        assert refreshed.json()["dirty_count"] == 1
+        assert refreshed.json()["dirty_summary"][0]["path"] == "README.md"
+
+        (worktree_path / "README.md").write_text("# test\n", encoding="utf-8")
+        clean = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/refresh")
+        assert clean.status_code == 200
+        assert clean.json()["status"] == "clean"
+
+        removed = await c.delete(f"/api/orchestration/worktrees/{worktree['id']}")
+        assert removed.status_code == 200
+        assert removed.json()["status"] == "removed"
+        assert not worktree_path.exists()
+
+        detail = (await c.get(f"/api/orchestration/tasks/{task['id']}")).json()
+        assert detail["worktrees"][0]["status"] == "removed"
+        event_types = {event["type"] for event in (await c.get(f"/api/orchestration/tasks/{task['id']}/events")).json()}
+        assert {"worktree_created", "worktree_updated", "worktree_removed"} <= event_types
 
 
 @pytest.mark.asyncio

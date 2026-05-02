@@ -28,6 +28,11 @@ const STATUS_COLORS: Record<string, string> = {
   not_started: 'var(--t1)',
   complete: 'var(--grn)',
   failed: 'var(--red)',
+  clean: 'var(--grn)',
+  dirty: 'var(--yel)',
+  missing: 'var(--red)',
+  removed: 'var(--t1)',
+  error: 'var(--red)',
 };
 
 interface OrchestrationTaskSummary {
@@ -76,6 +81,21 @@ interface OrchestrationStep {
   output_summary: string;
 }
 
+interface OrchestrationWorktree {
+  id: string;
+  task_id: string;
+  node_id?: string | null;
+  repo_path: string;
+  worktree_path: string;
+  base_branch: string;
+  branch_name: string;
+  base_commit?: string | null;
+  head_commit?: string | null;
+  status: string;
+  dirty_count: number;
+  dirty_summary: Array<{ path: string; status: string }>;
+}
+
 interface OrchestrationReadiness {
   runnable: Array<{ node_id: string; step_id: string; step_type: string }>;
   blocked: Array<{ node_id: string; blocked_by: string[] }>;
@@ -85,6 +105,7 @@ interface OrchestrationTaskDetail extends OrchestrationTaskSummary {
   nodes: OrchestrationNode[];
   edges: OrchestrationEdge[];
   steps: OrchestrationStep[];
+  worktrees: OrchestrationWorktree[];
   readiness: OrchestrationReadiness;
 }
 
@@ -299,6 +320,9 @@ function TaskDetail({
   onNudgeNode,
   onAddEdge,
   onDeleteEdge,
+  onCreateWorktree,
+  onRefreshWorktree,
+  onRemoveWorktree,
   onAddStep,
   onCompleteStep,
 }: {
@@ -311,6 +335,9 @@ function TaskDetail({
   onNudgeNode: (node: OrchestrationNode, dx: number, dy: number) => void;
   onAddEdge: (fromNodeId: string, toNodeId: string) => void;
   onDeleteEdge: (edgeId: string) => void;
+  onCreateWorktree: (nodeId?: string | null) => void;
+  onRefreshWorktree: (worktreeId: string) => void;
+  onRemoveWorktree: (worktreeId: string) => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
 }) {
@@ -319,6 +346,8 @@ function TaskDetail({
     ? task.steps.filter((step) => step.node_id === selectedNode.id).sort((a, b) => a.order_index - b.order_index)
     : [];
   const nodeIsRunnable = selectedNode ? task.readiness.runnable.some((item) => item.node_id === selectedNode.id) : false;
+  const taskWorktree = task.worktrees.find((worktree) => !worktree.node_id);
+  const selectedNodeWorktree = selectedNode ? task.worktrees.find((worktree) => worktree.node_id === selectedNode.id) : null;
   const [edgeFrom, setEdgeFrom] = useState('');
   const [edgeTo, setEdgeTo] = useState('');
 
@@ -352,6 +381,35 @@ function TaskDetail({
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <section>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
+            <SectionTitle>Worktrees</SectionTitle>
+            <Btn small onClick={() => onCreateWorktree(null)}>{taskWorktree ? 'New Task Worktree' : '+ Task Worktree'}</Btn>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {taskWorktree ? (
+              <WorktreeCard worktree={taskWorktree} label="Task branch" onRefresh={onRefreshWorktree} onRemove={onRemoveWorktree} />
+            ) : (
+              <div style={{ border: '1px dashed var(--bd)', borderRadius: 7, padding: 10, color: 'var(--t1)', fontSize: 12 }}>
+                No task worktree yet. Node worktrees can still be created directly from the base repo.
+              </div>
+            )}
+            {selectedNode && (
+              selectedNodeWorktree ? (
+                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} onRefresh={onRefreshWorktree} onRemove={onRemoveWorktree} />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onCreateWorktree(selectedNode.id)}
+                  style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', color: 'var(--t0)', cursor: 'pointer', padding: 10, textAlign: 'left', fontSize: 12 }}
+                >
+                  + Create worktree for {selectedNode.title}
+                </button>
+              )
+            )}
+          </div>
+        </section>
+
         <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
             <SectionTitle>DAG</SectionTitle>
@@ -531,6 +589,54 @@ function SectionTitle({ children }: { children: string }) {
   return (
     <div style={{ color: 'var(--t1)', fontSize: 11, fontWeight: 750, textTransform: 'uppercase', letterSpacing: 0 }}>
       {children}
+    </div>
+  );
+}
+
+function WorktreeCard({
+  worktree,
+  label,
+  onRefresh,
+  onRemove,
+}: {
+  worktree: OrchestrationWorktree;
+  label: string;
+  onRefresh: (worktreeId: string) => void;
+  onRemove: (worktreeId: string) => void;
+}) {
+  return (
+    <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 7 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 700 }}>{label}</div>
+        <StatusPill status={worktree.status} />
+      </div>
+      <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {worktree.branch_name}
+      </div>
+      <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {worktree.worktree_path}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ color: worktree.dirty_count ? 'var(--yel)' : 'var(--grn)', fontSize: 11 }}>
+          {worktree.dirty_count ? `${worktree.dirty_count} changed files` : 'clean'}
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            type="button"
+            onClick={() => onRefresh(worktree.id)}
+            style={{ border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t1)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={() => onRemove(worktree.id)}
+            style={{ border: '1px solid var(--bd)', borderRadius: 5, background: '#f8514918', color: 'var(--red)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -746,6 +852,84 @@ function StepModal({
   );
 }
 
+function WorktreeModal({
+  task,
+  node,
+  onClose,
+  onCreate,
+}: {
+  task: OrchestrationTaskDetail;
+  node?: OrchestrationNode | null;
+  onClose: () => void;
+  onCreate: (values: { repoPath: string; baseBranch: string; branchName: string; worktreePath: string }) => void;
+}) {
+  const [repoPath, setRepoPath] = useState(task.base_repo_path ?? '');
+  const [baseBranch, setBaseBranch] = useState(task.task_branch ?? task.base_branch ?? 'main');
+  const [branchName, setBranchName] = useState('');
+  const [worktreePath, setWorktreePath] = useState('');
+
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="orchestration-worktree-title" style={{
+      position: 'fixed',
+      inset: 0,
+      zIndex: 50,
+      background: '#00000088',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    }}>
+      <div style={{ width: 540, border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', padding: 18 }}>
+        <div id="orchestration-worktree-title" style={{ color: 'var(--t0)', fontSize: 16, fontWeight: 750, marginBottom: 6 }}>
+          Create {node ? 'node' : 'task'} worktree
+        </div>
+        <div style={{ color: 'var(--t1)', fontSize: 12, marginBottom: 12 }}>
+          {node ? node.title : task.title}
+        </div>
+        <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Repository path</label>
+        <input
+          aria-label="Repository path"
+          value={repoPath}
+          onChange={(event) => setRepoPath(event.target.value)}
+          autoFocus
+          style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, marginBottom: 12 }}
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Base branch/ref</label>
+            <input aria-label="Base branch" value={baseBranch} onChange={(event) => setBaseBranch(event.target.value)} style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }} />
+          </div>
+          <div>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Branch name</label>
+            <input aria-label="Branch name" placeholder="auto-generated" value={branchName} onChange={(event) => setBranchName(event.target.value)} style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }} />
+          </div>
+        </div>
+        <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, margin: '12px 0 5px' }}>Worktree path</label>
+        <input
+          aria-label="Worktree path"
+          placeholder="auto-generated"
+          value={worktreePath}
+          onChange={(event) => setWorktreePath(event.target.value)}
+          style={{ width: '100%', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8 }}
+        />
+        <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45, marginTop: 10 }}>
+          Nidavellir creates the branch and worktree, then records clean/dirty status for provider handoff.
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <Btn primary disabled={!repoPath.trim() || !baseBranch.trim()} onClick={() => onCreate({
+            repoPath: repoPath.trim(),
+            baseBranch: baseBranch.trim(),
+            branchName: branchName.trim(),
+            worktreePath: worktreePath.trim(),
+          })}>
+            Create Worktree
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PlanScreen() {
   const [tasks, setTasks] = useState<OrchestrationTaskSummary[]>([]);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
@@ -756,6 +940,7 @@ export function PlanScreen() {
   const [creating, setCreating] = useState(false);
   const [editingNode, setEditingNode] = useState<OrchestrationNode | null | undefined>(undefined);
   const [addingStepNodeId, setAddingStepNodeId] = useState<string | null>(null);
+  const [creatingWorktreeNodeId, setCreatingWorktreeNodeId] = useState<string | null | undefined>(undefined);
 
   const grouped = useMemo(() => {
     const groups: Record<string, OrchestrationTaskSummary[]> = {};
@@ -997,6 +1182,59 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_step_status_failed'));
   };
 
+  const createWorktree = (nodeId: string | null | undefined, values: { repoPath: string; baseBranch: string; branchName: string; worktreePath: string }) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/tasks/${selectedTask.id}/worktrees`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nodeId: nodeId || null,
+        repoPath: values.repoPath,
+        baseBranch: values.baseBranch,
+        branchName: values.branchName || null,
+        worktreePath: values.worktreePath || null,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_worktree_${response.status}`);
+        return response.json() as Promise<OrchestrationWorktree>;
+      })
+      .then(() => {
+        setCreatingWorktreeNodeId(undefined);
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_failed'));
+  };
+
+  const refreshWorktree = (worktreeId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/worktrees/${worktreeId}/refresh`, { method: 'POST' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_worktree_refresh_${response.status}`);
+        return response.json() as Promise<OrchestrationWorktree>;
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_refresh_failed'));
+  };
+
+  const removeWorktree = (worktreeId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/worktrees/${worktreeId}`, { method: 'DELETE' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_worktree_remove_${response.status}`);
+        return response.json() as Promise<OrchestrationWorktree>;
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_remove_failed'));
+  };
+
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
 
@@ -1074,6 +1312,9 @@ export function PlanScreen() {
           onNudgeNode={nudgeNode}
           onAddEdge={addEdge}
           onDeleteEdge={deleteEdge}
+          onCreateWorktree={(nodeId) => setCreatingWorktreeNodeId(nodeId ?? null)}
+          onRefreshWorktree={refreshWorktree}
+          onRemoveWorktree={removeWorktree}
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
         />
@@ -1101,6 +1342,15 @@ export function PlanScreen() {
         <StepModal
           onClose={() => setAddingStepNodeId(null)}
           onCreate={(values) => addStep(addingStepNodeId, values)}
+        />
+      )}
+
+      {creatingWorktreeNodeId !== undefined && selectedTask && (
+        <WorktreeModal
+          task={selectedTask}
+          node={creatingWorktreeNodeId ? selectedTask.nodes.find((node) => node.id === creatingWorktreeNodeId) : null}
+          onClose={() => setCreatingWorktreeNodeId(undefined)}
+          onCreate={(values) => createWorktree(creatingWorktreeNodeId, values)}
         />
       )}
     </div>

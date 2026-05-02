@@ -51,6 +51,7 @@ const detail = {
     from_node_id: 'node-1',
     to_node_id: 'node-2',
   }],
+  worktrees: [],
   steps: [{
     id: 'step-1',
     node_id: 'node-1',
@@ -65,6 +66,24 @@ const detail = {
     runnable: [{ node_id: 'node-1', step_id: 'step-1', step_type: 'manual' }],
     blocked: [],
   },
+};
+
+const detailWithWorktree = {
+  ...detail,
+  worktrees: [{
+    id: 'worktree-1',
+    task_id: 'task-1',
+    node_id: 'node-1',
+    repo_path: '/repo',
+    worktree_path: '/repo-worktrees/node-1',
+    base_branch: 'main',
+    branch_name: 'orchestration/build-orchestration/data-model',
+    base_commit: 'abc',
+    head_commit: 'abc',
+    status: 'clean',
+    dirty_count: 0,
+    dirty_summary: [],
+  }],
 };
 
 describe('PlanScreen orchestration board', () => {
@@ -116,6 +135,45 @@ describe('PlanScreen orchestration board', () => {
             to_node_id: 'node-2',
           }),
         });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/worktrees') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'worktree-1',
+            task_id: 'task-1',
+            node_id: 'node-1',
+            repo_path: '/repo',
+            worktree_path: '/repo-worktrees/node-1',
+            base_branch: 'main',
+            branch_name: 'orchestration/build-orchestration/data-model',
+            base_commit: 'abc',
+            head_commit: 'abc',
+            status: 'clean',
+            dirty_count: 0,
+            dirty_summary: [],
+          }),
+        });
+      }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1/refresh') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'worktree-1',
+            task_id: 'task-1',
+            node_id: 'node-1',
+            repo_path: '/repo',
+            worktree_path: '/repo-worktrees/node-1',
+            base_branch: 'main',
+            branch_name: 'orchestration/build-orchestration/data-model',
+            status: 'dirty',
+            dirty_count: 1,
+            dirty_summary: [{ path: 'README.md', status: 'M' }],
+          }),
+        });
+      }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: async () => ({ id: 'worktree-1', status: 'removed' }) });
       }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detail });
@@ -247,6 +305,60 @@ describe('PlanScreen orchestration board', () => {
         String(url).includes('/api/orchestration/nodes/node-1/steps') && options?.method === 'POST'
       );
       expect(stepCalls.length).toBe(1);
+    });
+  });
+
+  it('creates node worktrees through the Plan page', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '+ Create worktree for Data Model' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Repository path' }), { target: { value: '/repo' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Base branch' }), { target: { value: 'main' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create Worktree' }));
+
+    await waitFor(() => {
+      const worktreeCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/tasks/task-1/worktrees') && options?.method === 'POST'
+      );
+      expect(worktreeCalls.length).toBe(1);
+    });
+  });
+
+  it('refreshes and removes worktrees from the Plan page', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).endsWith('/api/orchestration/tasks') && !options) {
+        return Promise.resolve({ ok: true, json: async () => [task] });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/events')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1/refresh') && options?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ ...detailWithWorktree.worktrees[0], status: 'dirty', dirty_count: 1 }) });
+      }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
+        return Promise.resolve({ ok: true, json: async () => ({ ...detailWithWorktree.worktrees[0], status: 'removed' }) });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1')) {
+        return Promise.resolve({ ok: true, json: async () => detailWithWorktree });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    }));
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('orchestration/build-orchestration/data-model')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+    await waitFor(() => {
+      const refreshCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/worktrees/worktree-1/refresh') && options?.method === 'POST'
+      );
+      const removeCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE'
+      );
+      expect(refreshCalls.length).toBe(1);
+      expect(removeCalls.length).toBe(1);
     });
   });
 });

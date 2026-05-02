@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from nidavellir.orchestration import OrchestrationStore
+from nidavellir.orchestration.worktrees import (
+    WorktreeError,
+    create_git_worktree,
+    current_branch,
+    default_worktree_path,
+    git_status,
+    remove_git_worktree,
+    repo_root,
+    slugify,
+)
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -79,6 +91,14 @@ class StepStatusRequest(BaseModel):
     outputSummary: str | None = None
 
 
+class WorktreeCreateRequest(BaseModel):
+    nodeId: str | None = None
+    repoPath: str | None = None
+    baseBranch: str | None = None
+    branchName: str | None = None
+    worktreePath: str | None = None
+
+
 def _store(request: Request) -> OrchestrationStore:
     store = getattr(request.app.state, "orchestration_store", None)
     if store is None:
@@ -93,7 +113,16 @@ def _handle_store_error(err: Exception) -> None:
         raise HTTPException(status_code=400, detail=str(err)) from err
     if isinstance(err, sqlite3.IntegrityError):
         raise HTTPException(status_code=400, detail="orchestration_integrity_error") from err
+    if isinstance(err, WorktreeError):
+        raise HTTPException(status_code=400, detail=str(err)) from err
     raise err
+
+
+def _default_branch_name(task: dict, node: dict | None) -> str:
+    task_slug = slugify(task["title"])
+    suffix = slugify(node["title"]) if node else "task"
+    unique = uuid.uuid4().hex[:8]
+    return f"orchestration/{task_slug}/{suffix}-{unique}"
 
 
 @router.get("/tasks")
@@ -246,6 +275,96 @@ def update_step_status(step_id: str, body: StepStatusRequest, request: Request) 
     if step is None:
         raise HTTPException(status_code=404, detail="step_not_found")
     return step
+
+
+@router.get("/tasks/{task_id}/worktrees")
+def list_task_worktrees(task_id: str, request: Request) -> list[dict]:
+    if _store(request).get_task(task_id) is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    return _store(request).list_worktrees(task_id=task_id)
+
+
+@router.post("/tasks/{task_id}/worktrees")
+def create_worktree(task_id: str, body: WorktreeCreateRequest, request: Request) -> dict:
+    store = _store(request)
+    task = store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    node = None
+    if body.nodeId:
+        node = store.get_node(body.nodeId)
+        if node is None:
+            raise HTTPException(status_code=404, detail="node_not_found")
+        if node["task_id"] != task_id:
+            raise HTTPException(status_code=400, detail="worktree_node_must_belong_to_task")
+    try:
+        source_repo = Path(body.repoPath or task.get("base_repo_path") or ".").expanduser().resolve()
+        root = repo_root(source_repo)
+        base_branch = body.baseBranch or task.get("task_branch") or task.get("base_branch") or current_branch(root)
+        branch_name = body.branchName or _default_branch_name(task, node)
+        target_path = Path(body.worktreePath).expanduser().resolve() if body.worktreePath else default_worktree_path(root, branch_name)
+        git_info = create_git_worktree(
+            repo_path=root,
+            worktree_path=target_path,
+            branch_name=branch_name,
+            base_ref=base_branch,
+        )
+        return store.create_worktree(
+            task_id=task_id,
+            node_id=body.nodeId,
+            repo_path=git_info["repo_path"],
+            worktree_path=git_info["worktree_path"],
+            base_branch=base_branch,
+            branch_name=branch_name,
+            base_commit=git_info["base_commit"],
+            head_commit=git_info["head_commit"],
+            status=git_info["status"],
+            dirty_count=git_info["dirty_count"],
+            dirty_summary=git_info["dirty_summary"],
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/worktrees/{worktree_id}/refresh")
+def refresh_worktree(worktree_id: str, request: Request) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    try:
+        info = git_status(Path(worktree["worktree_path"]))
+        updated = store.update_worktree(worktree_id, {
+            "head_commit": info["head_commit"],
+            "status": info["status"],
+            "dirty_count": info["dirty_count"],
+            "dirty_summary": info["dirty_summary"],
+        })
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if updated is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    return updated
+
+
+@router.delete("/worktrees/{worktree_id}")
+def delete_worktree(worktree_id: str, request: Request, removeGitWorktree: bool = True) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    try:
+        if removeGitWorktree:
+            remove_git_worktree(repo_path=Path(worktree["repo_path"]), worktree_path=Path(worktree["worktree_path"]))
+        updated = store.mark_worktree_removed(worktree_id)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if updated is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    return updated
 
 
 @router.get("/tasks/{task_id}/events")

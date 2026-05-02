@@ -92,6 +92,24 @@ CREATE TABLE IF NOT EXISTS orchestration_artifacts (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS orchestration_worktrees (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES orchestration_tasks(id) ON DELETE CASCADE,
+  node_id TEXT REFERENCES orchestration_nodes(id) ON DELETE CASCADE,
+  repo_path TEXT NOT NULL,
+  worktree_path TEXT NOT NULL,
+  base_branch TEXT NOT NULL,
+  branch_name TEXT NOT NULL,
+  base_commit TEXT,
+  head_commit TEXT,
+  status TEXT NOT NULL DEFAULT 'created',
+  dirty_count INTEGER NOT NULL DEFAULT 0,
+  dirty_summary_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(worktree_path)
+);
+
 CREATE TABLE IF NOT EXISTS orchestration_events (
   id TEXT PRIMARY KEY,
   task_id TEXT REFERENCES orchestration_tasks(id) ON DELETE CASCADE,
@@ -107,12 +125,15 @@ CREATE INDEX IF NOT EXISTS idx_orchestration_nodes_task_id ON orchestration_node
 CREATE INDEX IF NOT EXISTS idx_orchestration_edges_task_id ON orchestration_edges(task_id);
 CREATE INDEX IF NOT EXISTS idx_orchestration_steps_node_id ON orchestration_steps(node_id);
 CREATE INDEX IF NOT EXISTS idx_orchestration_events_task_id ON orchestration_events(task_id);
+CREATE INDEX IF NOT EXISTS idx_orchestration_worktrees_task_id ON orchestration_worktrees(task_id);
+CREATE INDEX IF NOT EXISTS idx_orchestration_worktrees_node_id ON orchestration_worktrees(node_id);
 """
 
 TASK_STATUSES = {"backlog", "ready", "running", "review", "done", "blocked", "cancelled"}
 NODE_STATUSES = {"not_started", "ready", "running", "blocked", "failed", "complete", "skipped", "cancelled"}
 STEP_STATUSES = {"pending", "ready", "running", "waiting_for_user", "failed", "complete", "skipped", "cancelled"}
 STEP_TYPES = {"manual", "agent", "command", "review", "gate", "artifact", "handoff"}
+WORKTREE_STATUSES = {"created", "clean", "dirty", "missing", "removed", "error"}
 
 
 def _now() -> str:
@@ -215,10 +236,12 @@ class OrchestrationStore:
                    ORDER BY s.node_id ASC, s.order_index ASC, s.created_at ASC""",
                 (task_id,),
             ).fetchall()
+            worktrees = conn.execute("SELECT * FROM orchestration_worktrees WHERE task_id = ? ORDER BY created_at ASC", (task_id,)).fetchall()
         item = self._task_row(task)
         item["nodes"] = [self._node_row(row) for row in nodes]
         item["edges"] = [self._edge_row(row) for row in edges]
         item["steps"] = [self._step_row(row) for row in steps]
+        item["worktrees"] = [self._worktree_row(row) for row in worktrees]
         item["readiness"] = self.calculate_readiness(task_id)
         return item
 
@@ -444,6 +467,117 @@ class OrchestrationStore:
         self.recalculate_task_readiness(node["task_id"])
         return self.get_step(step_id)
 
+    def create_worktree(
+        self,
+        *,
+        task_id: str,
+        repo_path: str,
+        worktree_path: str,
+        base_branch: str,
+        branch_name: str,
+        node_id: str | None = None,
+        base_commit: str | None = None,
+        head_commit: str | None = None,
+        status: str = "created",
+        dirty_count: int = 0,
+        dirty_summary: list[dict] | None = None,
+    ) -> dict:
+        self._require_task(task_id)
+        if node_id:
+            node = self._require_node(node_id)
+            if node["task_id"] != task_id:
+                raise ValueError("worktree_node_must_belong_to_task")
+        self._require_status(status, WORKTREE_STATUSES, "worktree_status")
+        worktree_id = str(uuid.uuid4())
+        now = _now()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO orchestration_worktrees
+                   (id, task_id, node_id, repo_path, worktree_path, base_branch, branch_name,
+                    base_commit, head_commit, status, dirty_count, dirty_summary_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    worktree_id,
+                    task_id,
+                    node_id,
+                    repo_path,
+                    worktree_path,
+                    base_branch,
+                    branch_name,
+                    base_commit,
+                    head_commit,
+                    status,
+                    dirty_count,
+                    _json_dumps(dirty_summary or []),
+                    now,
+                    now,
+                ),
+            )
+        if node_id is None:
+            self.update_task(task_id, {"base_repo_path": repo_path, "base_branch": base_branch, "task_branch": branch_name, "worktree_path": worktree_path})
+        self.append_event(
+            task_id=task_id,
+            node_id=node_id,
+            type="worktree_created",
+            payload={"branch_name": branch_name, "worktree_path": worktree_path, "status": status},
+        )
+        return self.get_worktree(worktree_id) or {}
+
+    def list_worktrees(self, task_id: str | None = None) -> list[dict]:
+        with self._conn() as conn:
+            if task_id:
+                rows = conn.execute("SELECT * FROM orchestration_worktrees WHERE task_id = ? ORDER BY created_at ASC", (task_id,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM orchestration_worktrees ORDER BY updated_at DESC").fetchall()
+        return [self._worktree_row(row) for row in rows]
+
+    def get_worktree(self, worktree_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM orchestration_worktrees WHERE id = ?", (worktree_id,)).fetchone()
+        return self._worktree_row(row) if row else None
+
+    def update_worktree(self, worktree_id: str, updates: dict[str, Any]) -> dict | None:
+        worktree = self.get_worktree(worktree_id)
+        if not worktree:
+            return None
+        allowed = {"head_commit", "status", "dirty_count", "dirty_summary", "worktree_path", "branch_name", "base_branch"}
+        values = {key: value for key, value in updates.items() if key in allowed}
+        if not values:
+            return worktree
+        if "status" in values:
+            self._require_status(values["status"], WORKTREE_STATUSES, "worktree_status")
+        assignments = []
+        params: list[Any] = []
+        for key, value in values.items():
+            column = "dirty_summary_json" if key == "dirty_summary" else key
+            assignments.append(f"{column} = ?")
+            params.append(_json_dumps(value or []) if key == "dirty_summary" else value)
+        assignments.append("updated_at = ?")
+        params.append(_now())
+        params.append(worktree_id)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE orchestration_worktrees SET {', '.join(assignments)} WHERE id = ?", params)
+        self.append_event(
+            task_id=worktree["task_id"],
+            node_id=worktree["node_id"],
+            type="worktree_updated",
+            payload=values,
+        )
+        return self.get_worktree(worktree_id)
+
+    def mark_worktree_removed(self, worktree_id: str) -> dict | None:
+        worktree = self.get_worktree(worktree_id)
+        if not worktree:
+            return None
+        updated = self.update_worktree(worktree_id, {"status": "removed", "dirty_count": 0, "dirty_summary": []})
+        self.append_event(
+            task_id=worktree["task_id"],
+            node_id=worktree["node_id"],
+            type="worktree_removed",
+            payload={"branch_name": worktree["branch_name"], "worktree_path": worktree["worktree_path"]},
+        )
+        return updated
+
     def append_event(
         self,
         *,
@@ -621,4 +755,9 @@ class OrchestrationStore:
     def _event_row(self, row: sqlite3.Row) -> dict:
         item = dict(row)
         item["payload"] = _json_loads(item.pop("payload_json"), {})
+        return item
+
+    def _worktree_row(self, row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["dirty_summary"] = _json_loads(item.pop("dirty_summary_json"), [])
         return item
