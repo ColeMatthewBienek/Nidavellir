@@ -107,6 +107,24 @@ async def test_command_runner_captures_stderr_and_nonzero_exit(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_command_presets_reflect_workspace_tooling(tmp_path: Path):
+    setup_app(tmp_path)
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.get("/api/commands/presets", params={"cwd": str(tmp_path)})
+
+    assert response.status_code == 200
+    commands = {item["command"] for item in response.json()}
+    assert "cd frontend && npm run typecheck" in commands
+    assert "cd backend && uv run python -m pytest" in commands
+    assert "npx fallow dead-code --format json --quiet" in commands
+
+
+@pytest.mark.asyncio
 async def test_command_runner_requires_permission_for_risky_command(tmp_path: Path):
     setup_app(tmp_path)
 

@@ -136,6 +136,12 @@ interface CommandRunEvent {
   duration_ms?: number;
 }
 
+interface CommandPreset {
+  id: string;
+  label: string;
+  command: string;
+}
+
 interface CommentDraft {
   path: string;
   line: number;
@@ -1718,11 +1724,23 @@ function ProjectInstructionsTab() {
   );
 }
 
-function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onToggleChatAttachment: (run: CommandRun) => void }) {
+function CommandRunCard({
+  run,
+  onToggleChatAttachment,
+  onRerun,
+}: {
+  run: CommandRun;
+  onToggleChatAttachment: (run: CommandRun) => void;
+  onRerun: (run: CommandRun) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
   const running = run.exit_code === null && !run.timed_out;
   const ok = run.exit_code === 0 && !run.timed_out;
   const output = [run.stdout, run.stderr].filter(Boolean).join(run.stdout && run.stderr ? '\n' : '');
+  const visibleOutput = filter.trim()
+    ? output.split(/\r?\n/).filter((line) => line.toLowerCase().includes(filter.trim().toLowerCase())).join('\n')
+    : output;
   const sendOutputToChat = () => {
     const content = [
       `Use this command output from \`${run.command}\`:`,
@@ -1732,6 +1750,9 @@ function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onTo
       '```',
     ].join('\n');
     window.dispatchEvent(new CustomEvent('nid:command-output-to-chat', { detail: { content } }));
+  };
+  const copyOutput = () => {
+    navigator.clipboard?.writeText(output || '').catch(() => {});
   };
   return (
     <div style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', overflow: 'hidden' }}>
@@ -1765,11 +1786,67 @@ function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onTo
       </button>
       {open && (
         <>
+          <div style={{
+            borderTop: '1px solid #30363d55',
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0, 1fr) auto auto',
+            gap: 8,
+            padding: 8,
+            background: 'var(--bg0)',
+          }}>
+            <input
+              aria-label={`Filter output for ${run.command}`}
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="Filter output"
+              style={{
+                minWidth: 0,
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: '#0d1117',
+                color: 'var(--t0)',
+                padding: '5px 7px',
+                fontSize: 11,
+                outline: 'none',
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => onRerun(run)}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: 'var(--bg2)',
+                color: 'var(--t0)',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 650,
+                padding: '5px 8px',
+              }}
+            >
+              Rerun
+            </button>
+            <button
+              type="button"
+              onClick={copyOutput}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 5,
+                background: 'var(--bg2)',
+                color: 'var(--t0)',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 650,
+                padding: '5px 8px',
+              }}
+            >
+              Copy
+            </button>
+          </div>
           <pre style={{
             margin: 0,
             maxHeight: 240,
             overflow: 'auto',
-            borderTop: '1px solid #30363d55',
             background: '#0d1117',
             color: 'var(--t1)',
             padding: 10,
@@ -1777,7 +1854,7 @@ function CommandRunCard({ run, onToggleChatAttachment }: { run: CommandRun; onTo
             fontSize: 11,
             lineHeight: 1.45,
             whiteSpace: 'pre-wrap',
-          }}>{output || '(no output)'}</pre>
+          }}>{visibleOutput || (filter.trim() ? '(no matches)' : '(no output)')}</pre>
           <div style={{ borderTop: '1px solid #30363d55', padding: 8, display: 'flex', justifyContent: 'flex-end' }}>
             <button
               type="button"
@@ -1824,6 +1901,7 @@ function CommandsTab() {
   const activeConversationId = useAgentStore((state) => state.activeConversationId);
   const resourceRevision = useAgentStore((state) => state.resourceRevision);
   const [command, setCommand] = useState('');
+  const [presets, setPresets] = useState<CommandPreset[]>([]);
   const [runs, setRuns] = useState<CommandRun[]>([]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1842,10 +1920,30 @@ function CommandsTab() {
       .catch(() => {});
   };
 
+  const loadPresets = () => {
+    if (!workingDirectory) {
+      setPresets([]);
+      return;
+    }
+    const params = new URLSearchParams({ cwd: workingDirectory });
+    fetch(`http://localhost:7430/api/commands/presets?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`command_presets_${response.status}`);
+        return response.json() as Promise<CommandPreset[]>;
+      })
+      .then(setPresets)
+      .catch(() => setPresets([]));
+  };
+
   useEffect(() => {
     loadRuns();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConversationId, resourceRevision]);
+
+  useEffect(() => {
+    loadPresets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workingDirectory, resourceRevision]);
 
   useEffect(() => {
     const handleCommandEvent = (event: Event) => {
@@ -1889,12 +1987,12 @@ function CommandsTab() {
     return () => window.removeEventListener('nid:command-event', handleCommandEvent);
   }, [activeConversationId]);
 
-  const runCommand = (permissionOverride?: 'allow_once') => {
+  const runCommand = (permissionOverride?: 'allow_once', explicitCommand?: string) => {
     if (!workingDirectory) {
       setError('working_directory_required');
       return;
     }
-    const commandToRun = (pendingCommand ?? command).trim();
+    const commandToRun = (explicitCommand ?? pendingCommand ?? command).trim();
     if (!commandToRun) {
       setError('command_required');
       return;
@@ -1952,6 +2050,13 @@ function CommandsTab() {
       .catch((err) => setError(err instanceof Error ? err.message : 'command_attachment_failed'));
   };
 
+  const rerun = (run: CommandRun) => {
+    setPendingPermission(null);
+    setPendingCommand(run.command);
+    setCommand(run.command);
+    runCommand(undefined, run.command);
+  };
+
   if (!workingDirectory) {
     return (
       <EmptySidebarTab
@@ -1996,6 +2101,31 @@ function CommandsTab() {
         }}
       />
 
+      {presets.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {presets.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              title={preset.command}
+              onClick={() => setCommand(preset.command)}
+              style={{
+                border: '1px solid var(--bd)',
+                borderRadius: 999,
+                background: 'var(--bg2)',
+                color: 'var(--t0)',
+                cursor: 'pointer',
+                padding: '4px 8px',
+                fontSize: 11,
+                fontWeight: 650,
+              }}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {pendingPermission && (
         <PermissionGate
           permission={pendingPermission}
@@ -2036,7 +2166,12 @@ function CommandsTab() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
           {runs.slice(0, 10).map((run) => (
-            <CommandRunCard key={run.id} run={run} onToggleChatAttachment={toggleChatAttachment} />
+            <CommandRunCard
+              key={run.id}
+              run={run}
+              onToggleChatAttachment={toggleChatAttachment}
+              onRerun={rerun}
+            />
           ))}
         </div>
       )}
