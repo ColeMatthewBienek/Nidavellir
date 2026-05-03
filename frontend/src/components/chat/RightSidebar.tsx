@@ -155,6 +155,7 @@ interface ToolRequestRecord {
   workspace?: string | null;
   arguments?: Record<string, unknown> | null;
   permission?: PermissionEvaluationResult | null;
+  execution?: Record<string, unknown> | null;
   reason?: string | null;
   created_at: string;
   resolved_at?: string | null;
@@ -2310,6 +2311,22 @@ function ApprovalsTab() {
                 }}>{item.command || item.path || String(item.arguments?.args ?? '')}</pre>
               )}
               {item.reason && <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>{item.reason}</div>}
+              {item.execution && (
+                <pre style={{
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  color: 'var(--t0)',
+                  background: 'var(--bg2)',
+                  border: '1px solid var(--bd)',
+                  borderRadius: 5,
+                  padding: 8,
+                  fontSize: 11,
+                  lineHeight: 1.4,
+                  maxHeight: 160,
+                  overflow: 'auto',
+                }}>{JSON.stringify(item.execution, null, 2)}</pre>
+              )}
               {item.status === 'pending' && (
                 <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
                   <button type="button" onClick={() => resolve(item.id, 'deny')} style={{

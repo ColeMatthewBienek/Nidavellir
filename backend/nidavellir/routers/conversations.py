@@ -124,6 +124,26 @@ def _redacted_command_run(row: dict, *, include_output: bool) -> dict:
     return item
 
 
+def _redacted_tool_request(row: dict) -> dict:
+    item = dict(row)
+    arguments = dict(item.get("arguments") or {})
+    if "content" in arguments:
+        content = str(arguments.get("content") or "")
+        arguments["content_redacted"] = True
+        arguments["content_bytes"] = len(content.encode("utf-8"))
+        arguments["content"] = ""
+    execution = item.get("execution")
+    if isinstance(execution, dict) and isinstance(execution.get("content"), str):
+        content = execution.get("content") or ""
+        execution = dict(execution)
+        execution["content_redacted"] = True
+        execution["content_bytes"] = len(content.encode("utf-8"))
+        execution["content"] = ""
+    item["arguments"] = arguments
+    item["execution"] = execution
+    return item
+
+
 def _hash_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
@@ -188,6 +208,7 @@ def _conversation_audit_bundle(
 
     command_store = getattr(request.app.state, "command_store", None)
     permission_audit_store = getattr(request.app.state, "permission_audit_store", None)
+    tool_request_store = getattr(request.app.state, "tool_request_store", None)
     skill_store = getattr(request.app.state, "skill_store", None)
     session_id = conv.get("active_session_id") or conversation_id
     provider = conv.get("active_provider") or conv.get("provider_id")
@@ -200,6 +221,8 @@ def _conversation_audit_bundle(
         warnings.append("command store unavailable; command_runs omitted")
     if not permission_audit_store:
         warnings.append("permission audit store unavailable; permission_audit_events omitted")
+    if not tool_request_store:
+        warnings.append("tool request store unavailable; tool_requests omitted")
     if not skill_store:
         warnings.append("skill store unavailable; skills omitted")
 
@@ -212,6 +235,10 @@ def _conversation_audit_bundle(
     permission_events = (
         permission_audit_store.list_events(limit=500, conversation_id=conversation_id)
         if permission_audit_store else []
+    )
+    tool_requests = (
+        [_redacted_tool_request(row) for row in tool_request_store.list(conversation_id=conversation_id, limit=500)]
+        if tool_request_store else []
     )
     memory_activity = store.export_activity_events(
         hours=0,
@@ -251,6 +278,7 @@ def _conversation_audit_bundle(
                 "working_set_files": len(files),
                 "command_runs": len(command_runs),
                 "permission_audit_events": len(permission_events),
+                "tool_requests": len(tool_requests),
                 "memory_activity": len(memory_activity),
                 "project_instructions": len(instructions),
                 "suppressed_project_instructions": len(suppressed_instructions),
@@ -261,6 +289,7 @@ def _conversation_audit_bundle(
                 "messages": "included",
                 "working_set_file_contents": "omitted",
                 "command_output": "included" if include_command_output else "omitted",
+                "tool_request_content": "omitted",
                 "memory_snapshots": "included" if include_memory_snapshots else "omitted",
                 "project_instruction_contents": "included" if include_instruction_contents else "omitted",
                 "skill_instructions": "included" if include_skill_instructions else "omitted",
@@ -286,6 +315,7 @@ def _conversation_audit_bundle(
         "working_set_files": files,
         "command_runs": command_runs,
         "permission_audit_events": permission_events,
+        "tool_requests": tool_requests,
         "memory_activity": memory_activity,
         "project_instructions": {
             "provider": instruction_result.provider,

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tool_requests (
   workspace TEXT,
   arguments_json TEXT NOT NULL,
   permission_json TEXT,
+  execution_json TEXT,
   reason TEXT,
   created_at TEXT NOT NULL,
   resolved_at TEXT
@@ -42,6 +43,7 @@ class ToolRequestStore:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.executescript(DDL)
+            self._ensure_columns(conn)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -55,6 +57,11 @@ class ToolRequestStore:
             raise
         finally:
             conn.close()
+
+    def _ensure_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tool_requests)").fetchall()}
+        if "execution_json" not in columns:
+            conn.execute("ALTER TABLE tool_requests ADD COLUMN execution_json TEXT")
 
     def create(
         self,
@@ -78,8 +85,8 @@ class ToolRequestStore:
             conn.execute(
                 """INSERT INTO tool_requests
                    (id, conversation_id, provider, tool_name, action, status, path, command,
-                    workspace, arguments_json, permission_json, reason, created_at, resolved_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    workspace, arguments_json, permission_json, execution_json, reason, created_at, resolved_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     request_id,
                     conversation_id,
@@ -92,6 +99,7 @@ class ToolRequestStore:
                     workspace,
                     json.dumps(arguments or {}, sort_keys=True),
                     permission_json,
+                    None,
                     reason,
                     created_at,
                     created_at if status in {"approved", "denied", "observed", "failed"} else None,
@@ -120,26 +128,42 @@ class ToolRequestStore:
                 ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
-    def resolve(self, request_id: str, status: Literal["approved", "denied"], reason: str | None = None) -> dict | None:
+    def resolve(
+        self,
+        request_id: str,
+        status: Literal["approved", "denied", "failed"],
+        reason: str | None = None,
+        execution: object | None = None,
+    ) -> dict | None:
         with self._conn() as conn:
             conn.execute(
                 """UPDATE tool_requests
-                   SET status = ?, reason = COALESCE(?, reason), resolved_at = ?
+                   SET status = ?, reason = COALESCE(?, reason), execution_json = COALESCE(?, execution_json), resolved_at = ?
                    WHERE id = ? AND status = 'pending'""",
-                (status, reason, _now(), request_id),
+                (
+                    status,
+                    reason,
+                    json.dumps(execution, sort_keys=True) if execution is not None else None,
+                    _now(),
+                    request_id,
+                ),
             )
         return self.get(request_id)
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         item = dict(row)
-        for key in ("arguments_json", "permission_json"):
+        for key in ("arguments_json", "permission_json", "execution_json"):
             raw = item.pop(key, None)
-            output_key = "arguments" if key == "arguments_json" else "permission"
+            output_key = {
+                "arguments_json": "arguments",
+                "permission_json": "permission",
+                "execution_json": "execution",
+            }[key]
             if not raw:
-                item[output_key] = None if key == "permission_json" else {}
+                item[output_key] = {} if key == "arguments_json" else None
                 continue
             try:
                 item[output_key] = json.loads(raw)
             except json.JSONDecodeError:
-                item[output_key] = None if key == "permission_json" else {}
+                item[output_key] = {} if key == "arguments_json" else None
         return item

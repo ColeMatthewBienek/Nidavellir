@@ -15,6 +15,7 @@ from nidavellir.agents.events import AgentActivityEvent, frontend_event
 from nidavellir.agents.safety import ProviderDangerousness
 from nidavellir.commands.events import subscribe_command_events, unsubscribe_command_events
 from nidavellir.memory.injector import get_context_prefix
+from nidavellir.permissions.tool_protocol import TOOL_PROTOCOL_INSTRUCTIONS, extract_tool_requests
 from nidavellir.prompt.assembly import assemble_prompt
 from nidavellir.prompt.models import PromptAssemblyResult, PromptSection
 from nidavellir.project_instructions.discovery import discover_project_instructions
@@ -470,6 +471,38 @@ async def _handle_message(
         except Exception:
             pass
 
+    async def capture_protocol_requests(text: str) -> None:
+        store = getattr(ws.app.state, "tool_request_store", None)
+        if store is None:
+            return
+        for request_payload in extract_tool_requests(text):
+            action = request_payload.get("action")
+            if action not in {"shell_command", "file_read", "file_write", "file_delete"}:
+                continue
+            record = store.create(
+                conversation_id=conversation_id,
+                provider=provider_id,
+                tool_name=str(request_payload.get("toolName") or request_payload.get("tool_name") or action),
+                action=action,
+                status="pending",
+                path=request_payload.get("path"),
+                command=request_payload.get("command"),
+                workspace=request_payload.get("workspace") or str(run_workdir),
+                arguments=request_payload.get("arguments") or {},
+                reason="provider requested Nidavellir-mediated tool execution",
+            )
+            try:
+                from nidavellir.resources.events import broadcast_resource_event
+                await broadcast_resource_event(ws.app, {
+                    "kind": "tool_requests",
+                    "action": "created",
+                    "conversation_id": conversation_id,
+                    "tool_request_id": record.get("id"),
+                    "message": "Provider requested a mediated tool",
+                })
+            except Exception:
+                pass
+
     async def heartbeat() -> None:
         elapsed = 0
         try:
@@ -513,6 +546,8 @@ async def _handle_message(
             f"{memory_context}\n\nCurrent user message:\nUser: {content}"
             if memory_context else content
         )
+        if mode in {"restricted", "ask"}:
+            outbound = f"{TOOL_PROTOCOL_INSTRUCTIONS}\n\n{outbound}"
         await agent.send(outbound)
         await send_activity({
             "type": "progress",
@@ -541,6 +576,7 @@ async def _handle_message(
             "type": "progress",
             "content": "Provider stream finished",
         })
+        await capture_protocol_requests("".join(response_parts))
         await ws.send_json({"type": "done"})
         return "".join(response_parts), agent, "completed"
     except asyncio.CancelledError:

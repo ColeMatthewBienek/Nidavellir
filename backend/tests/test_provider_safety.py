@@ -45,6 +45,29 @@ def test_provider_policy_api_updates_provider_payload(tmp_path, monkeypatch):
         assert claude["dangerousness"] == "free_rein"
         assert claude["effective_dangerousness"] == "free_rein"
 
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+        target = workspace / ".env"
+        created = client.post("/api/tool-requests", json={
+            "conversationId": "conv-tools",
+            "provider": "claude",
+            "toolName": "Write",
+            "action": "file_write",
+            "path": str(target),
+            "workspace": str(workspace),
+            "arguments": {"content": "TOKEN=redacted\n"},
+        })
+        assert created.status_code == 200
+        request_id = created.json()["id"]
+        assert created.json()["status"] == "pending"
+
+        approved = client.post(f"/api/tool-requests/{request_id}/approve", json={"reason": "test approval"})
+        assert approved.status_code == 200
+        body = approved.json()
+        assert body["status"] == "approved"
+        assert body["execution"]["type"] == "file_write"
+        assert target.read_text(encoding="utf-8") == "TOKEN=redacted\n"
+
 
 def test_tool_request_store_round_trips_pending_request(tmp_path):
     from nidavellir.permissions.tool_requests import ToolRequestStore
@@ -67,3 +90,20 @@ def test_tool_request_store_round_trips_pending_request(tmp_path):
     assert updated is not None
     assert updated["status"] == "denied"
     assert updated["reason"] == "nope"
+
+
+def test_tool_protocol_extracts_json_request():
+    from nidavellir.permissions.tool_protocol import extract_tool_requests
+
+    text = """
+    Need a command.
+    {"nidavellir_tool_request":{"toolName":"Bash","action":"shell_command","command":"npm test","arguments":{"timeoutSeconds":30}}}
+    """
+
+    requests = extract_tool_requests(text)
+    assert requests == [{
+        "toolName": "Bash",
+        "action": "shell_command",
+        "command": "npm test",
+        "arguments": {"timeoutSeconds": 30},
+    }]
