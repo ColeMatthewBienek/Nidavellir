@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar } from '../components/shared/TopBar';
 import { Btn } from '../components/shared/Btn';
+import { useAgentModels } from '../hooks/useAgentModels';
+import type { AgentModelDef } from '../lib/types';
+import { getProviderTheme } from '../lib/providerTheme';
 
 const API = 'http://localhost:7430';
 
@@ -16,6 +19,7 @@ const BOARD_COLUMNS = [
 
 const NODE_STATUSES = ['not_started', 'ready', 'running', 'blocked', 'failed', 'complete', 'skipped', 'cancelled'];
 const STEP_TYPES = ['manual', 'agent', 'command', 'review', 'gate', 'artifact', 'handoff'];
+const PROVIDER_ORDER = ['claude', 'codex', 'ollama', 'gemini'];
 
 const STATUS_COLORS: Record<string, string> = {
   backlog: 'var(--t1)',
@@ -48,6 +52,8 @@ interface OrchestrationTaskSummary {
   base_branch?: string | null;
   task_branch?: string | null;
   worktree_path?: string | null;
+  archived?: number;
+  deleted_at?: string | null;
   updated_at: string;
 }
 
@@ -158,6 +164,110 @@ interface OrchestrationEvent {
   created_at: string;
 }
 
+interface PlanInboxItem {
+  id: string;
+  raw_plan: string;
+  repo_path?: string | null;
+  base_branch?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  automation_mode: string;
+  max_concurrency: number;
+  priority?: number | null;
+  source: string;
+  constraints: string[];
+  acceptance_criteria: string[];
+  status: string;
+  locked_by?: string | null;
+  locked_at?: string | null;
+  final_spec_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PlannerDiscussionMessage {
+  id: string;
+  plan_inbox_item_id: string;
+  role: string;
+  kind: string;
+  content: string;
+  linked_artifact_id?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+interface PlanningCheckpoint {
+  id: string;
+  plan_inbox_item_id: string;
+  key: string;
+  title: string;
+  status: string;
+  summary: string;
+  source_message_ids: string[];
+  blocking_question?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const CHECKPOINT_REQUIREMENTS: Record<string, string[]> = {
+  intake: [
+    'Raw goal captured',
+    'Initial constraints or acceptance notes recorded',
+  ],
+  repo_target: [
+    'Repo path selected or new-project setup requested',
+    'Base branch or baseline strategy known',
+  ],
+  scope: [
+    'In-scope outcomes agreed',
+    'Non-goals and deferrals called out',
+  ],
+  acceptance: [
+    'Testable acceptance criteria listed',
+    'User-visible success condition defined',
+  ],
+  verification: [
+    'Commands or checks identified',
+    'Manual review expectations defined',
+  ],
+  risks: [
+    'Dependencies and ordering risks noted',
+    'Autonomy guardrails agreed',
+  ],
+  spec_draft: [
+    'Agentic-forward Markdown spec generated',
+    'Spec uses decomposer-ready structure',
+  ],
+  spec_approved: [
+    'User explicitly approves the spec',
+    'Ready to send to decomposition',
+  ],
+};
+
+interface PlanInboxDetail extends PlanInboxItem {
+  discussion_messages: PlannerDiscussionMessage[];
+  planning_checkpoints: PlanningCheckpoint[];
+}
+
+interface TaskInboxItem {
+  id: string;
+  plan_inbox_item_id?: string | null;
+  decomposition_run_id?: string | null;
+  candidate_task_id?: string | null;
+  title: string;
+  objective: string;
+  payload: Record<string, unknown>;
+  dependencies: string[];
+  status: string;
+  priority?: number | null;
+  locked_by?: string | null;
+  locked_at?: string | null;
+  materialized_task_id?: string | null;
+  materialized_node_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -183,21 +293,606 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
+function preferredPlannerModel(models: AgentModelDef[]) {
+  const available = models.filter((model) => model.available);
+  return available.find((model) => model.provider_id === 'claude')
+    ?? available.find((model) => model.provider_id === 'codex')
+    ?? available[0]
+    ?? models.find((model) => model.provider_id === 'claude')
+    ?? models.find((model) => model.provider_id === 'codex')
+    ?? models[0]
+    ?? null;
+}
+
+function ProviderModelSelector({
+  models,
+  provider,
+  model,
+  onChange,
+  disabled,
+}: {
+  models: AgentModelDef[];
+  provider: string;
+  model: string;
+  onChange: (values: { provider: string; model: string }) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [dropPos, setDropPos] = useState<{ top: number; left: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
+  const providers = Array.from(new Set(models.map((item) => item.provider_id))).sort((a, b) => {
+    const aIndex = PROVIDER_ORDER.indexOf(a);
+    const bIndex = PROVIDER_ORDER.indexOf(b);
+    return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex) || a.localeCompare(b);
+  });
+  const activeModel = models.find((item) => item.provider_id === provider && item.model_id === model);
+  const activeTheme = getProviderTheme(provider);
+  const buttonLabel = activeModel?.model_id
+    .replace(/^claude-/, '')
+    .replace(/-(\d+)-(\d+)$/, ' $1.$2')
+    ?? activeTheme.shortName;
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (buttonRef.current?.contains(target) || dropdownRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  const toggle = () => {
+    if (disabled) return;
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (rect) setDropPos({ top: rect.bottom + 6, left: rect.left });
+    setOpen((current) => !current);
+  };
+
+  const dropdown = open && dropPos && (
+    <div
+      ref={dropdownRef}
+      data-testid="planner-provider-dropdown"
+      style={{
+        position: 'fixed',
+        top: dropPos.top,
+        left: dropPos.left,
+        zIndex: 9999,
+        width: 252,
+        background: 'var(--bg1)',
+        border: '1px solid var(--bd)',
+        borderRadius: 8,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.55)',
+        overflow: 'hidden',
+      }}
+    >
+      {providers.length === 0 ? (
+        <div style={{ padding: '10px 12px', color: 'var(--t1)', fontSize: 11 }}>No models available</div>
+      ) : providers.map((providerId) => {
+        const theme = getProviderTheme(providerId);
+        return (
+          <div key={providerId}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px 4px' }}>
+              <span style={{ fontSize: 11, color: theme.color }}>{theme.icon}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: theme.color, textTransform: 'uppercase' }}>
+                {theme.shortName}
+              </span>
+            </div>
+            {models.filter((item) => item.provider_id === providerId).map((item) => {
+              const isActive = item.provider_id === provider && item.model_id === model;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  disabled={!item.available}
+                  onClick={() => {
+                    onChange({ provider: item.provider_id, model: item.model_id });
+                    setOpen(false);
+                  }}
+                  style={{
+                    width: '100%',
+                    border: 'none',
+                    borderLeft: isActive ? `2px solid ${theme.color}` : '2px solid transparent',
+                    background: isActive ? '#1f6feb18' : 'transparent',
+                    color: item.available ? 'var(--t0)' : 'var(--t1)',
+                    opacity: item.available ? 1 : 0.45,
+                    cursor: item.available ? 'pointer' : 'not-allowed',
+                    padding: '8px 12px',
+                    textAlign: 'left',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                  }}
+                >
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>
+                    {item.display_name}
+                  </span>
+                  {isActive && <span style={{ color: theme.color, fontSize: 10 }}>active</span>}
+                </button>
+              );
+            })}
+            <div style={{ height: 1, background: '#21262d', margin: '4px 8px' }} />
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-label="Planner model selector"
+        disabled={disabled || models.length === 0}
+        onClick={toggle}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: '4px 8px',
+          background: 'var(--bg2)',
+          border: `1px solid ${activeTheme.color}66`,
+          borderRadius: 5,
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          fontSize: 12,
+          color: activeTheme.color,
+          outline: 'none',
+          fontFamily: 'var(--mono)',
+          opacity: disabled ? 0.55 : 1,
+          maxWidth: 150,
+        }}
+      >
+        <span style={{ fontSize: 12 }}>{activeTheme.icon}</span>
+        <span style={{ maxWidth: 104, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{buttonLabel}</span>
+        <span style={{ opacity: 0.5, fontSize: 10 }}>▾</span>
+      </button>
+      {dropdown}
+    </>
+  );
+}
+
+function PlanInboxPanel({
+  items,
+  selectedItemId,
+  plannerProvider,
+  plannerModel,
+  onSelect,
+  onOpenPm,
+  onCreate,
+  loading,
+}: {
+  items: PlanInboxItem[];
+  selectedItemId?: string | null;
+  plannerProvider: string;
+  plannerModel: string;
+  onSelect: (itemId: string) => void;
+  onOpenPm: (itemId: string) => void;
+  onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string }) => void;
+  loading: boolean;
+}) {
+  const [rawPlan, setRawPlan] = useState('');
+  const [repoPath, setRepoPath] = useState('');
+  const [baseBranch, setBaseBranch] = useState('main');
+  const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
+  const disabled = !rawPlan.trim() || loading;
+  const repoPickerAvailable = Boolean(window.nidavellir?.pickDirectory);
+
+  const pickRepoPath = async () => {
+    const picked = await window.nidavellir?.pickDirectory?.();
+    if (picked) setRepoPath(picked);
+  };
+
+  return (
+    <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ borderBottom: '1px solid var(--bd)', padding: '9px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <span style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750 }}>Plan Inbox</span>
+        <span style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>{items.length}</span>
+      </div>
+      <div style={{ padding: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, alignItems: 'start' }}>
+        <textarea
+          aria-label="Plan inbox raw plan"
+          value={rawPlan}
+          onChange={(event) => setRawPlan(event.target.value)}
+          placeholder="Start with a spec, idea, or rough plan..."
+          style={{ width: '100%', boxSizing: 'border-box', minHeight: 74, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, resize: 'vertical', fontSize: 12 }}
+        />
+        <textarea
+          aria-label="Plan acceptance criteria"
+          value={acceptanceCriteria}
+          onChange={(event) => setAcceptanceCriteria(event.target.value)}
+          placeholder="Acceptance criteria, one per line"
+          style={{ width: '100%', boxSizing: 'border-box', minHeight: 74, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, resize: 'vertical', fontSize: 12 }}
+        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 6 }}>
+            <input
+              aria-label="Plan repo path"
+              value={repoPath}
+              onChange={(event) => setRepoPath(event.target.value)}
+              placeholder="Repo path"
+              style={{ minWidth: 0, width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
+            />
+            <Btn
+              small
+              disabled={!repoPickerAvailable}
+              onClick={pickRepoPath}
+              title={repoPickerAvailable ? 'Choose repository path' : 'Repository picker is available in the desktop app'}
+            >
+              Browse
+            </Btn>
+          </div>
+          <input
+            aria-label="Plan base branch"
+            value={baseBranch}
+            onChange={(event) => setBaseBranch(event.target.value)}
+            placeholder="Base branch"
+            style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
+          />
+        </div>
+        <Btn
+          small
+          primary
+          disabled={disabled}
+          onClick={() => {
+            onCreate({ rawPlan: rawPlan.trim(), repoPath: repoPath.trim(), baseBranch: baseBranch.trim(), acceptanceCriteria, provider: plannerProvider, model: plannerModel });
+            setRawPlan('');
+            setAcceptanceCriteria('');
+          }}
+        >
+          Start PM Chat
+        </Btn>
+      </div>
+      <div style={{ borderTop: '1px solid var(--bd)', padding: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 8, maxHeight: 160, overflow: 'auto' }}>
+        {items.length === 0 ? (
+          <div style={{ color: 'var(--t1)', fontSize: 12 }}>No intake items yet.</div>
+        ) : items.slice(0, 6).map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => {
+              onSelect(item.id);
+              onOpenPm(item.id);
+            }}
+            style={{
+              border: `1px solid ${selectedItemId === item.id ? 'var(--blu)' : 'var(--bd)'}`,
+              borderRadius: 7,
+              background: selectedItemId === item.id ? '#1f6feb18' : 'var(--bg0)',
+              color: 'inherit',
+              padding: 9,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              textAlign: 'left',
+              cursor: 'pointer',
+              minWidth: 0,
+              boxSizing: 'border-box',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+              <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 700, lineHeight: 1.35, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflowWrap: 'anywhere' }}>
+                {item.raw_plan}
+              </div>
+              <StatusPill status={item.status} />
+            </div>
+            <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
+            </div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CheckpointRail({
+  checkpoints,
+}: {
+  checkpoints: PlanningCheckpoint[];
+}) {
+  return (
+    <aside style={{ borderLeft: '1px solid var(--bd)', background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 300, minHeight: 0 }}>
+      <div style={{ borderBottom: '1px solid var(--bd)', padding: 12 }}>
+        <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 800 }}>Checkpoints</div>
+        <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.4, marginTop: 3 }}>Autosaved requirements for spec generation.</div>
+      </div>
+      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto', minHeight: 0 }}>
+        {checkpoints.length === 0 ? (
+          <div style={{ color: 'var(--t1)', fontSize: 12, lineHeight: 1.45 }}>
+            Loading checkpoint requirements...
+          </div>
+        ) : checkpoints.map((checkpoint) => {
+          const complete = checkpoint.status === 'agreed';
+          const blocked = checkpoint.status === 'blocked';
+          const proposed = checkpoint.status === 'proposed';
+          const requirements = CHECKPOINT_REQUIREMENTS[checkpoint.key] ?? ['Requirement defined by PM'];
+          return (
+          <div key={checkpoint.key} style={{ border: `1px solid ${complete ? '#3fb95066' : blocked ? '#f8514966' : proposed ? '#d2992266' : 'var(--bd)'}`, borderRadius: 7, background: complete ? '#23863614' : 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 7, height: 116, boxSizing: 'border-box', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+              <div style={{ color: complete ? 'var(--t1)' : 'var(--t0)', fontSize: 12, fontWeight: 700, lineHeight: 1.35, display: 'flex', gap: 8, alignItems: 'flex-start', textDecoration: complete ? 'line-through' : 'none', minWidth: 0 }}>
+                <span aria-hidden="true" style={{ color: complete ? 'var(--grn)' : blocked ? 'var(--red)' : proposed ? 'var(--ylw)' : 'var(--t1)', fontFamily: 'var(--mono)', flex: '0 0 auto' }}>
+                  {complete ? '[x]' : blocked ? '[!]' : proposed ? '[~]' : '[ ]'}
+                </span>
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{checkpoint.title}</span>
+              </div>
+              <StatusPill status={checkpoint.status} />
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 24, color: 'var(--t1)', fontSize: 11, lineHeight: 1.45, overflow: 'hidden' }}>
+              {requirements.map((requirement) => (
+                <li key={requirement} style={{ textDecoration: complete ? 'line-through' : 'none' }}>{requirement}</li>
+              ))}
+            </ul>
+            <div style={{ color: 'var(--t1)', fontSize: 10, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 'auto' }}>
+              {complete ? 'Satisfied by saved planning state.' : blocked ? 'Blocked by unresolved planning state.' : 'Waiting for PM/spec analysis.'}
+            </div>
+          </div>
+        );
+        })}
+      </div>
+    </aside>
+  );
+}
+
+function PlannerDiscussionPanel({
+  item,
+  models,
+  plannerProvider,
+  plannerModel,
+  onPlannerModelChange,
+  onSend,
+  onViewSpec,
+  loading,
+}: {
+  item: PlanInboxDetail | null;
+  models: AgentModelDef[];
+  plannerProvider: string;
+  plannerModel: string;
+  onPlannerModelChange: (values: { provider: string; model: string }) => void;
+  onSend: (content: string) => void;
+  onViewSpec: () => void;
+  loading: boolean;
+}) {
+  const [content, setContent] = useState('');
+  const disabled = !item || !content.trim() || loading;
+  const send = () => {
+    if (disabled) return;
+    onSend(content.trim());
+    setContent('');
+  };
+
+  return (
+    <section style={{ background: 'var(--bg1)', minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto auto minmax(0, 1fr) auto', flex: 1 }}>
+      <div style={{ borderBottom: '1px solid var(--bd)', padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ color: 'var(--t0)', fontSize: 14, fontWeight: 800 }}>Nidavellir PM</div>
+          <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.35, marginTop: 2 }}>
+            Refine the plan until it is ready to become an agentic-forward spec.
+          </div>
+        </div>
+        {item ? <StatusPill status={item.status} /> : <StatusPill status="blocked" />}
+      </div>
+      <div style={{ borderBottom: '1px solid var(--bd)', padding: '8px 12px' }}>
+        <ProviderModelSelector
+          models={models}
+          provider={plannerProvider}
+          model={plannerModel}
+          onChange={onPlannerModelChange}
+          disabled={loading}
+        />
+      </div>
+      <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>
+        {!item ? (
+          <div style={{ color: 'var(--t1)', fontSize: 13, lineHeight: 1.5 }}>Select or create a Plan Inbox item to start a planning conversation with Nidavellir PM.</div>
+        ) : (
+          <>
+            <div style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', padding: 10, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 10, alignItems: 'start', flex: '0 0 auto' }}>
+              <div style={{ color: 'var(--t1)', fontSize: 12, lineHeight: 1.45, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflowWrap: 'anywhere' }}>
+                {item.raw_plan}
+              </div>
+              <Btn small onClick={onViewSpec}>View Spec</Btn>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 4 }}>
+              {item.discussion_messages.length === 0 ? (
+                <div style={{ color: 'var(--t1)', fontSize: 12 }}>No discussion yet.</div>
+              ) : item.discussion_messages.map((message) => (
+                <div key={message.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: message.role === 'user' ? '#1f6feb14' : 'var(--bg0)', padding: 10, maxWidth: message.role === 'user' ? '86%' : '94%', alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
+                    <span style={{ color: message.role === 'user' ? 'var(--blu)' : 'var(--grn)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
+                      {message.role === 'user' ? 'You' : 'Nidavellir PM'} · {message.kind}
+                    </span>
+                    <span style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+                      {new Date(message.created_at).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+      <div style={{ borderTop: '1px solid var(--bd)', padding: 12, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 10, alignItems: 'end', background: 'var(--bg1)' }}>
+        <textarea
+          aria-label="Message Nidavellir PM"
+          value={content}
+          onChange={(event) => setContent(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              send();
+            }
+          }}
+          placeholder="Reply to the PM, clarify scope, or approve the refined direction..."
+          style={{ minWidth: 0, boxSizing: 'border-box', height: 86, maxHeight: 120, border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', color: 'var(--t0)', padding: 10, resize: 'vertical', fontSize: 13, lineHeight: 1.45 }}
+        />
+        <Btn
+          ariaLabel="Send message to Nidavellir PM"
+          disabled={disabled}
+          onClick={send}
+        >
+          Send
+        </Btn>
+      </div>
+    </section>
+  );
+}
+
+function PlannerModal({
+  item,
+  models,
+  plannerProvider,
+  plannerModel,
+  onPlannerModelChange,
+  onSend,
+  onViewSpec,
+  onClose,
+  loading,
+}: {
+  item: PlanInboxDetail | null;
+  models: AgentModelDef[];
+  plannerProvider: string;
+  plannerModel: string;
+  onPlannerModelChange: (values: { provider: string; model: string }) => void;
+  onSend: (content: string) => void;
+  onViewSpec: () => void;
+  onClose: () => void;
+  loading: boolean;
+}) {
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="planner-modal-title" style={{
+      position: 'fixed',
+      inset: 0,
+      zIndex: 60,
+      background: '#00000099',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 12,
+      boxSizing: 'border-box',
+    }}>
+      <div style={{ width: 'min(1180px, 100%)', height: 'calc(100vh - 24px)', maxHeight: 820, border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', minHeight: 0 }}>
+        <div style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ height: 44, borderBottom: '1px solid var(--bd)', padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, background: 'var(--bg1)' }}>
+            <div id="planner-modal-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800 }}>PM Planning Session</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ color: 'var(--t1)', fontSize: 11 }}>Autosaved</span>
+              <Btn small onClick={onClose} title="Close this session. Messages and checkpoint changes are already saved.">Close</Btn>
+            </div>
+          </div>
+          <PlannerDiscussionPanel
+            item={item}
+            models={models}
+            plannerProvider={plannerProvider}
+            plannerModel={plannerModel}
+            onPlannerModelChange={onPlannerModelChange}
+            onSend={onSend}
+            onViewSpec={onViewSpec}
+            loading={loading}
+          />
+        </div>
+        <CheckpointRail checkpoints={item?.planning_checkpoints ?? []} />
+      </div>
+    </div>
+  );
+}
+
+function SpecViewerModal({
+  item,
+  onClose,
+}: {
+  item: PlanInboxDetail | null;
+  onClose: () => void;
+}) {
+  if (!item) return null;
+  const approved = item.planning_checkpoints.filter((checkpoint) => checkpoint.status === 'agreed').map((checkpoint) => checkpoint.title);
+  const pending = item.planning_checkpoints.filter((checkpoint) => checkpoint.status !== 'agreed').map((checkpoint) => `${checkpoint.title}: ${checkpoint.status}`);
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="spec-viewer-title" style={{ position: 'fixed', inset: 0, zIndex: 70, background: '#000000aa', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18, boxSizing: 'border-box' }}>
+      <div style={{ width: 'min(760px, 100%)', maxHeight: 'calc(100vh - 36px)', border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr)' }}>
+        <div style={{ height: 44, borderBottom: '1px solid var(--bd)', padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div id="spec-viewer-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800 }}>Spec Snapshot</div>
+          <Btn small onClick={onClose}>Close</Btn>
+        </div>
+        <div style={{ overflow: 'auto', padding: 14 }}>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: 'var(--t0)', fontSize: 12, lineHeight: 1.55, fontFamily: 'var(--mono)' }}>
+{`# Working Spec Snapshot
+
+## Intake
+${item.raw_plan}
+
+## Acceptance Criteria
+${item.acceptance_criteria.length ? item.acceptance_criteria.map((criterion) => `- ${criterion}`).join('\n') : '- Not captured yet'}
+
+## Satisfied Gates
+${approved.length ? approved.map((title) => `- ${title}`).join('\n') : '- None yet'}
+
+## Pending Gates
+${pending.length ? pending.map((title) => `- ${title}`).join('\n') : '- None'}
+`}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskInboxPanel({ items }: { items: TaskInboxItem[] }) {
+  return (
+    <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 0, overflow: 'hidden' }}>
+      <div style={{ borderBottom: '1px solid var(--bd)', padding: '9px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <span style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750 }}>Task Inbox</span>
+        <span style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>{items.length}</span>
+      </div>
+      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 246, overflow: 'auto' }}>
+        {items.length === 0 ? (
+          <div style={{ color: 'var(--t1)', fontSize: 12 }}>No decomposed tasks yet.</div>
+        ) : items.slice(0, 7).map((item) => (
+          <div key={item.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+              <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 700, lineHeight: 1.35 }}>{item.title}</div>
+              <StatusPill status={item.status} />
+            </div>
+            {item.objective && (
+              <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.4, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                {item.objective}
+              </div>
+            )}
+            <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+              {item.dependencies.length} deps · {item.materialized_task_id ? 'materialized' : 'not materialized'}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function TaskCard({
   task,
   selected,
   onSelect,
   onMove,
+  onArchive,
 }: {
   task: OrchestrationTaskSummary;
   selected: boolean;
   onSelect: () => void;
   onMove: (status: string) => void;
+  onArchive: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
       style={{
         width: '100%',
         border: `1px solid ${selected ? 'var(--blu)' : 'var(--bd)'}`,
@@ -210,6 +905,7 @@ function TaskCard({
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
+        boxSizing: 'border-box',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
@@ -246,27 +942,42 @@ function TaskCard({
         <span style={{ color: task.worktree_path ? 'var(--grn)' : 'var(--t1)', fontSize: 10 }}>
           {task.worktree_path ? 'worktree linked' : 'no worktree'}
         </span>
-        <select
-          aria-label={`Move ${task.title}`}
-          value={task.status}
-          onClick={(event) => event.stopPropagation()}
-          onChange={(event) => onMove(event.target.value)}
-          style={{
-            maxWidth: 86,
-            border: '1px solid var(--bd)',
-            borderRadius: 5,
-            background: 'var(--bg0)',
-            color: 'var(--t0)',
-            fontSize: 10,
-            padding: '3px 5px',
-          }}
-        >
-          {BOARD_COLUMNS.map((column) => (
-            <option key={column.id} value={column.id}>{column.label}</option>
-          ))}
-        </select>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {task.status === 'cancelled' && (
+            <Btn
+              small
+              ariaLabel={`Remove ${task.title}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onArchive();
+              }}
+              title="Archive this cancelled task and hide it from the board"
+            >
+              Remove
+            </Btn>
+          )}
+          <select
+            aria-label={`Move ${task.title}`}
+            value={task.status}
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => onMove(event.target.value)}
+            style={{
+              maxWidth: 86,
+              border: '1px solid var(--bd)',
+              borderRadius: 5,
+              background: 'var(--bg0)',
+              color: 'var(--t0)',
+              fontSize: 10,
+              padding: '3px 5px',
+            }}
+          >
+            {BOARD_COLUMNS.map((column) => (
+              <option key={column.id} value={column.id}>{column.label}</option>
+            ))}
+          </select>
+        </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -1225,7 +1936,17 @@ function WorktreeModal({
 }
 
 export function PlanScreen() {
+  const { agentModels } = useAgentModels();
+  const preferredModel = useMemo(() => preferredPlannerModel(agentModels), [agentModels]);
+  const [plannerProvider, setPlannerProvider] = useState('claude');
+  const [plannerModel, setPlannerModel] = useState('claude-sonnet-4-6');
   const [tasks, setTasks] = useState<OrchestrationTaskSummary[]>([]);
+  const [planInboxItems, setPlanInboxItems] = useState<PlanInboxItem[]>([]);
+  const [taskInboxItems, setTaskInboxItems] = useState<TaskInboxItem[]>([]);
+  const [selectedPlanInboxId, setSelectedPlanInboxId] = useState<string | null>(null);
+  const [selectedPlanInboxItem, setSelectedPlanInboxItem] = useState<PlanInboxDetail | null>(null);
+  const [plannerModalOpen, setPlannerModalOpen] = useState(false);
+  const [specViewerOpen, setSpecViewerOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
@@ -1247,6 +1968,49 @@ export function PlanScreen() {
     return groups;
   }, [tasks]);
 
+  useEffect(() => {
+    if (!preferredModel) return;
+    setPlannerProvider((currentProvider) => {
+      if (currentProvider && agentModels.some((item) => item.provider_id === currentProvider)) return currentProvider;
+      return preferredModel.provider_id;
+    });
+    setPlannerModel((currentModel) => {
+      if (currentModel && agentModels.some((item) => item.provider_id === plannerProvider && item.model_id === currentModel)) return currentModel;
+      return preferredModel.model_id;
+    });
+  }, [agentModels, plannerProvider, preferredModel]);
+
+  const updatePlannerModel = (values: { provider: string; model: string }) => {
+    setPlannerProvider(values.provider);
+    setPlannerModel(values.model);
+  };
+
+  const loadInboxes = () => {
+    if (typeof fetch !== 'function') return;
+    const currentSelectedPlanId = selectedPlanInboxId;
+    Promise.all([
+      fetch(`${API}/api/orchestration/plan-inbox`).then(async (response) => {
+        if (!response.ok) throw new Error(`plan_inbox_${response.status}`);
+        return response.json() as Promise<PlanInboxItem[]>;
+      }),
+      fetch(`${API}/api/orchestration/task-inbox`).then(async (response) => {
+        if (!response.ok) throw new Error(`task_inbox_${response.status}`);
+        return response.json() as Promise<TaskInboxItem[]>;
+      }),
+    ])
+      .then(([plans, taskItems]) => {
+        setPlanInboxItems(plans);
+        setTaskInboxItems(taskItems);
+        const nextSelectedId = currentSelectedPlanId && plans.some((item) => item.id === currentSelectedPlanId)
+          ? currentSelectedPlanId
+          : plans[0]?.id ?? null;
+        setSelectedPlanInboxId(nextSelectedId);
+        if (nextSelectedId) loadPlanInboxDetail(nextSelectedId);
+        else setSelectedPlanInboxItem(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_inbox_failed'));
+  };
+
   const loadTasks = () => {
     if (typeof fetch !== 'function') return;
     setLoading(true);
@@ -1262,6 +2026,31 @@ export function PlanScreen() {
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_tasks_failed'))
       .finally(() => setLoading(false));
+  };
+
+  const reloadAll = () => {
+    loadInboxes();
+    loadTasks();
+  };
+
+  const loadPlanInboxDetail = (itemId: string) => {
+    if (typeof fetch !== 'function') return;
+    fetch(`${API}/api/orchestration/plan-inbox/${itemId}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_inbox_detail_${response.status}`);
+        return response.json() as Promise<PlanInboxDetail>;
+      })
+      .then((item) => {
+        setSelectedPlanInboxId(item.id);
+        setSelectedPlanInboxItem(item);
+        setPlanInboxItems((current) => [item, ...current.filter((existing) => existing.id !== item.id)]);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_detail_failed'));
+  };
+
+  const openPlannerModal = (itemId: string) => {
+    setPlannerModalOpen(true);
+    loadPlanInboxDetail(itemId);
   };
 
   const loadTask = (taskId: string) => {
@@ -1285,9 +2074,58 @@ export function PlanScreen() {
   };
 
   useEffect(() => {
-    loadTasks();
+    reloadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const createPlanInboxItem = (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string }) => {
+    const acceptanceCriteria = values.acceptanceCriteria
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    fetch(`${API}/api/orchestration/plan-inbox`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rawPlan: values.rawPlan,
+        repoPath: values.repoPath || null,
+        baseBranch: values.baseBranch || null,
+        provider: values.provider || null,
+        model: values.model || null,
+        automationMode: 'supervised',
+        maxConcurrency: 1,
+        acceptanceCriteria,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_inbox_create_${response.status}`);
+        return response.json() as Promise<PlanInboxItem>;
+      })
+      .then((item) => {
+        setPlanInboxItems((current) => [item, ...current.filter((existing) => existing.id !== item.id)]);
+        loadPlanInboxDetail(item.id);
+        setPlannerModalOpen(true);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_create_failed'));
+  };
+
+  const createPlannerDiscussionMessage = (content: string) => {
+    if (!selectedPlanInboxId) return;
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxId}/pm-turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, provider: plannerProvider || null, model: plannerModel || null }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`planner_pm_turn_${response.status}`);
+        return response.json() as Promise<{ messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail }>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'planner_pm_turn_failed'));
+  };
 
   const createTask = (title: string, description: string) => {
     fetch(`${API}/api/orchestration/tasks`, {
@@ -1323,6 +2161,23 @@ export function PlanScreen() {
         if (selectedTask?.id === updated.id) setSelectedTask(updated);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_move_failed'));
+  };
+
+  const archiveTask = (task: OrchestrationTaskSummary) => {
+    fetch(`${API}/api/orchestration/tasks/${task.id}/archive`, { method: 'POST' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_archive_${response.status}`);
+        return response.json() as Promise<OrchestrationTaskDetail>;
+      })
+      .then((archived) => {
+        setTasks((current) => current.filter((item) => item.id !== archived.id));
+        if (selectedTask?.id === archived.id) {
+          setSelectedTask(null);
+          setSelectedNodeId(null);
+          setEvents([]);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_archive_failed'));
   };
 
   const addNode = (values: {
@@ -1696,7 +2551,7 @@ export function PlanScreen() {
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopBar title="Plan" sub={`${tasks.length} tasks · ${readyCount} ready · ${runningCount} running`}>
-          <Btn small onClick={loadTasks} disabled={loading}>Reload</Btn>
+          <Btn small onClick={reloadAll} disabled={loading}>Reload</Btn>
           {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
         </TopBar>
@@ -1705,6 +2560,50 @@ export function PlanScreen() {
           <div style={{ color: 'var(--red)', fontSize: 12, padding: '8px 20px', borderBottom: '1px solid var(--bd)', background: '#f8514911' }}>
             {error}
           </div>
+        )}
+
+        <div style={{
+          borderBottom: '1px solid var(--bd)',
+          padding: 14,
+          display: 'flex',
+          gap: 12,
+          alignItems: 'flex-start',
+          overflow: 'auto',
+        }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 420px) minmax(260px, 360px)', gap: 12, minWidth: 'min(100%, 700px)', alignItems: 'start' }}>
+            <PlanInboxPanel
+              items={planInboxItems}
+              selectedItemId={selectedPlanInboxId}
+              plannerProvider={plannerProvider}
+              plannerModel={plannerModel}
+              onSelect={loadPlanInboxDetail}
+              onOpenPm={openPlannerModal}
+              onCreate={createPlanInboxItem}
+              loading={loading}
+            />
+            <TaskInboxPanel items={taskInboxItems} />
+          </div>
+        </div>
+
+        {plannerModalOpen && (
+          <PlannerModal
+            item={selectedPlanInboxItem}
+            models={agentModels}
+            plannerProvider={plannerProvider}
+            plannerModel={plannerModel}
+            onPlannerModelChange={updatePlannerModel}
+            onSend={createPlannerDiscussionMessage}
+            onViewSpec={() => setSpecViewerOpen(true)}
+            onClose={() => setPlannerModalOpen(false)}
+            loading={loading}
+          />
+        )}
+
+        {specViewerOpen && (
+          <SpecViewerModal
+            item={selectedPlanInboxItem}
+            onClose={() => setSpecViewerOpen(false)}
+          />
         )}
 
         <div style={{
@@ -1743,6 +2642,7 @@ export function PlanScreen() {
                     selected={selectedTask?.id === task.id}
                     onSelect={() => loadTask(task.id)}
                     onMove={(status) => moveTask(task, status)}
+                    onArchive={() => archiveTask(task)}
                   />
                 ))}
                 {(grouped[column.id] ?? []).length === 0 && (

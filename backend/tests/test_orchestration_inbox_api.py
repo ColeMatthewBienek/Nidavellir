@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from nidavellir.commands import CommandRunner, CommandRunStore
+from nidavellir.main import app
+from nidavellir.memory.store import MemoryStore
+from nidavellir.orchestration import OrchestrationStore
+from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
+from nidavellir.permissions.tool_requests import ToolRequestStore
+from nidavellir.skills.store import SkillStore
+from nidavellir.tokens.store import TokenUsageStore
+
+
+def setup_app(tmp_path: Path):
+    app.state.memory_store = MemoryStore(str(tmp_path / "memory.db"))
+    app.state.token_store = TokenUsageStore(str(tmp_path / "tokens.db"))
+    app.state.skill_store = SkillStore(str(tmp_path / "skills.db"))
+    app.state.permission_evaluator = PermissionEvaluator()
+    app.state.permission_audit_store = PermissionAuditStore(str(tmp_path / "permissions.db"))
+    app.state.command_store = CommandRunStore(str(tmp_path / "commands.db"))
+    app.state.command_runner = CommandRunner()
+    app.state.orchestration_store = OrchestrationStore(str(tmp_path / "orchestration.db"))
+    app.state.tool_request_store = ToolRequestStore(str(tmp_path / "tool_requests.db"))
+
+
+@pytest.mark.asyncio
+async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        created = await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Automate orchestration planning and task execution.",
+            "repoPath": str(tmp_path / "repo"),
+            "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "automationMode": "supervised",
+            "maxConcurrency": 1,
+            "priority": 1,
+            "constraints": ["Do not start execution before readiness."],
+            "acceptanceCriteria": ["Vague specs are blocked."],
+        })
+        assert created.status_code == 200
+        item = created.json()
+        assert item["status"] == "new"
+        assert item["constraints"] == ["Do not start execution before readiness."]
+        assert item["acceptance_criteria"] == ["Vague specs are blocked."]
+
+        claimed = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/claim", json={"lockedBy": "daemon-1"})
+        assert claimed.status_code == 200
+        assert claimed.json()["status"] == "claimed"
+        assert claimed.json()["locked_by"] == "daemon-1"
+        assert claimed.json()["locked_at"]
+
+        report = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/readiness-reports", json={
+            "verdict": "needs_clarification",
+            "report": {
+                "missing_fields": ["verification_strategy"],
+                "vague_fields": [{
+                    "field": "scope",
+                    "reason": "Too broad",
+                    "required_clarification": "Name the first execution slice.",
+                }],
+                "blocking_questions": [{
+                    "id": "q1",
+                    "question": "Which repo should be modified?",
+                    "why_it_matters": "Worktree execution needs a target repo.",
+                }],
+            },
+        })
+        assert report.status_code == 200
+        assert report.json()["verdict"] == "needs_clarification"
+        assert report.json()["report"]["missing_fields"] == ["verification_strategy"]
+
+        spec = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/specs", json={
+            "content": "# Goal\nAutomate orchestration.\n# Verification Strategy\nRun tests.",
+            "metadata": {"source": "planner"},
+            "status": "ready",
+        })
+        assert spec.status_code == 200
+        assert spec.json()["version"] == 1
+        assert spec.json()["status"] == "ready"
+
+        detail = await c.get(f"/api/orchestration/plan-inbox/{item['id']}")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["status"] == "spec_ready"
+        assert body["final_spec_id"] == spec.json()["id"]
+        assert body["specs"][0]["content"].startswith("# Goal")
+        assert body["readiness_reports"][0]["verdict"] == "needs_clarification"
+        assert body["discussion_messages"][0]["role"] == "user"
+        assert body["discussion_messages"][0]["content"] == "Automate orchestration planning and task execution."
+
+
+@pytest.mark.asyncio
+async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build autonomous orchestration.",
+            "repoPath": "/repo/nidavellir",
+            "baseBranch": "main",
+            "acceptanceCriteria": ["Planner gates cannot be bypassed from the UI."],
+        })).json()
+
+        seeded = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/discussion")
+        assert seeded.status_code == 200
+        assert seeded.json()[0]["role"] == "user"
+        assert seeded.json()[0]["kind"] == "message"
+        assert seeded.json()[0]["content"] == "Build autonomous orchestration."
+
+        checkpoints = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints")
+        assert checkpoints.status_code == 200
+        assert [item["key"] for item in checkpoints.json()][:3] == ["intake", "repo_target", "scope"]
+        assert checkpoints.json()[0]["status"] == "agreed"
+        assert checkpoints.json()[1]["status"] == "agreed"
+        assert checkpoints.json()[3]["status"] == "agreed"
+
+        question = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/discussion", json={
+            "role": "planner",
+            "kind": "question",
+            "content": "Which repo should autonomous worktrees target?",
+            "metadata": {"why_it_matters": "Worktree creation requires a Git baseline."},
+        })
+        assert question.status_code == 200
+        assert question.json()["role"] == "planner"
+        assert question.json()["kind"] == "question"
+
+        decision = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/discussion", json={
+            "role": "planner",
+            "kind": "decision",
+            "content": "Decomposer consumes only the approved agentic-forward spec, not raw intake.",
+        })
+        assert decision.status_code == 200
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "The repo is local and verification should run the orchestration API tests.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+        assert turn.status_code == 200
+        turn_body = turn.json()
+        assert turn_body["messages"][0]["role"] == "user"
+        assert turn_body["messages"][0]["metadata"]["provider"] == "codex"
+        assert turn_body["messages"][1]["metadata"]["model"] == "gpt-5.5"
+        assert turn_body["messages"][1]["role"] == "planner"
+        assert turn_body["messages"][1]["content"].startswith("As Nidavellir PM")
+
+        detail = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["status"] == "planning"
+        assert body["planning_checkpoints"][1]["status"] == "agreed"
+        assert body["planning_checkpoints"][3]["status"] == "agreed"
+        assert [message["kind"] for message in body["discussion_messages"]] == ["message", "question", "decision", "message", "question"]
+        assert body["discussion_messages"][2]["content"].startswith("Decomposer consumes")
+
+
+@pytest.mark.asyncio
+async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build queue-backed orchestration intake.",
+        })).json()
+        spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+            "content": "# Goal\nBuild queue-backed orchestration intake.",
+            "status": "ready",
+        })).json()
+        decomposition = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/decomposition-runs", json={
+            "specId": spec["id"],
+            "decomposerOutput": {"candidate_tasks": ["task-1"]},
+            "status": "created",
+        })).json()
+
+        task = await c.post("/api/orchestration/task-inbox", json={
+            "planInboxItemId": plan["id"],
+            "decompositionRunId": decomposition["id"],
+            "candidateTaskId": "task-1",
+            "title": "Add durable PlanInbox store methods and API endpoints",
+            "objective": "Persist raw user orchestration intake and expose CRUD endpoints.",
+            "payload": {
+                "single_objective": "PlanInbox persistence and API",
+                "affected_areas": ["backend/nidavellir/orchestration/store.py"],
+                "verification_steps": [{"type": "command", "command": "uv run pytest backend/tests/test_orchestration_inbox_api.py"}],
+            },
+            "dependencies": [],
+            "priority": 1,
+        })
+        assert task.status_code == 200
+        task_body = task.json()
+        assert task_body["status"] == "new"
+        assert task_body["payload"]["single_objective"] == "PlanInbox persistence and API"
+
+        claimed = await c.post(f"/api/orchestration/task-inbox/{task_body['id']}/claim", json={"lockedBy": "em-1"})
+        assert claimed.status_code == 200
+        assert claimed.json()["status"] == "claimed_by_em"
+
+        shape = await c.post(f"/api/orchestration/task-inbox/{task_body['id']}/shape-reports", json={
+            "verdict": "valid",
+            "report": {
+                "reasons": [],
+                "theme_like_indicators": [],
+            },
+        })
+        assert shape.status_code == 200
+        assert shape.json()["verdict"] == "valid"
+
+        review = await c.post(f"/api/orchestration/task-inbox/{task_body['id']}/em-reviews", json={
+            "verdict": "atomic",
+            "report": {
+                "bounded_worktree_scope": True,
+                "dependency_status": "explicit",
+                "blast_radius": "low",
+                "verification_independence": "independent",
+                "reasons": ["One backend slice with independent tests."],
+            },
+        })
+        assert review.status_code == 200
+        assert review.json()["verdict"] == "atomic"
+
+        detail = await c.get(f"/api/orchestration/task-inbox/{task_body['id']}")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["status"] == "accepted_atomic"
+        assert body["shape_reports"][0]["verdict"] == "valid"
+        assert body["em_reviews"][0]["verdict"] == "atomic"
+
+        rejected = (await c.post("/api/orchestration/task-inbox", json={
+            "title": "Refactor orchestration backend",
+            "objective": "Improve everything",
+        })).json()
+        invalid_shape = await c.post(f"/api/orchestration/task-inbox/{rejected['id']}/shape-reports", json={
+            "verdict": "invalid",
+            "report": {
+                "reasons": ["Task is a theme, not an executable unit."],
+                "required_rewrite": ["Split into persistence, API, daemon, and UI tasks."],
+                "theme_like_indicators": ["refactor", "backend"],
+            },
+        })
+        assert invalid_shape.status_code == 200
+        assert invalid_shape.json()["report"]["required_rewrite"] == ["Split into persistence, API, daemon, and UI tasks."]
+
+        em_reject = await c.post(f"/api/orchestration/task-inbox/{rejected['id']}/em-reviews", json={
+            "verdict": "not_atomic",
+            "report": {
+                "blast_radius": "high",
+                "required_split": [
+                    {"suggested_title": "Add PlanInbox persistence", "reason": "Separate data model from daemon execution."}
+                ],
+            },
+        })
+        assert em_reject.status_code == 200
+        assert (await c.get(f"/api/orchestration/task-inbox/{rejected['id']}")).json()["status"] == "needs_more_decomposition"

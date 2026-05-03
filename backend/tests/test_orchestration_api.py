@@ -156,6 +156,35 @@ async def test_orchestration_updates_nodes_and_removes_edges(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_orchestration_archives_cancelled_tasks_from_board_listing(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Cancelled clutter",
+            "status": "cancelled",
+        })).json()
+
+        listed = await c.get("/api/orchestration/tasks")
+        assert task["id"] in [item["id"] for item in listed.json()]
+
+        archived = await c.post(f"/api/orchestration/tasks/{task['id']}/archive")
+        assert archived.status_code == 200
+        assert archived.json()["archived"] == 1
+        assert archived.json()["deleted_at"] is not None
+
+        listed_after = await c.get("/api/orchestration/tasks")
+        assert task["id"] not in [item["id"] for item in listed_after.json()]
+
+        detail = await c.get(f"/api/orchestration/tasks/{task['id']}")
+        assert detail.status_code == 200
+        assert detail.json()["archived"] == 1
+
+        events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
+        assert "task_archived" in {event["type"] for event in events.json()}
+
+
+@pytest.mark.asyncio
 async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: Path):
     setup_app(tmp_path)
     repo = create_git_repo(tmp_path / "repo")
