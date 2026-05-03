@@ -87,6 +87,27 @@ def git_status(worktree_path: Path) -> dict:
     }
 
 
+def checkpoint_worktree(*, worktree_path: Path, message: str) -> dict:
+    worktree_path = worktree_path.expanduser().resolve()
+    if not worktree_path.exists() or not worktree_path.is_dir():
+        raise WorktreeError("worktree_missing")
+
+    status = git_status(worktree_path)
+    if status["dirty_count"] == 0:
+        raise WorktreeError("worktree_clean")
+
+    _run_git(["add", "-A"], cwd=worktree_path, timeout=30)
+    result = _run_git(["commit", "-m", message.strip() or "Checkpoint orchestration worktree"], cwd=worktree_path, timeout=60)
+    updated = git_status(worktree_path)
+    return {
+        "commit": updated["head_commit"],
+        "message": message.strip() or "Checkpoint orchestration worktree",
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "status": updated,
+    }
+
+
 def _parse_status_line(line: str) -> dict[str, str] | None:
     if len(line) < 4:
         return None
