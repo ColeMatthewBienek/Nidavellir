@@ -182,6 +182,60 @@ def preflight_worktree_merge(*, worktree_path: Path, target_ref: str, source_ref
     }
 
 
+def default_integration_worktree_path(repo_path: Path, branch_name: str) -> Path:
+    root = repo_root(repo_path)
+    return root.parent / ".nidavellir-worktrees" / "integrations" / slugify(branch_name).replace("/", "-")
+
+
+def create_integration_worktree(
+    *,
+    repo_path: Path,
+    worktree_path: Path,
+    branch_name: str,
+    target_ref: str,
+    source_ref: str,
+    message: str,
+) -> dict:
+    root = repo_root(repo_path)
+    preflight = preflight_worktree_merge(worktree_path=root, target_ref=target_ref, source_ref=source_ref)
+    if not preflight["can_merge"]:
+        raise WorktreeError(preflight["message"])
+
+    worktree_path = worktree_path.expanduser().resolve()
+    if worktree_path.exists() and any(worktree_path.iterdir()):
+        raise WorktreeError("worktree_path_not_empty")
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    base_commit = ref_commit(root, target_ref)
+    _run_git(["worktree", "add", "-b", branch_name, str(worktree_path), target_ref], cwd=root, timeout=30)
+    result = _run_git_raw(["merge", "--no-ff", source_ref, "-m", message.strip() or f"Merge {source_ref}"], cwd=worktree_path, timeout=60)
+    status = git_status(worktree_path)
+    if result.returncode != 0:
+        return {
+            "branch_name": branch_name,
+            "worktree_path": str(worktree_path),
+            "base_commit": base_commit,
+            "head_commit": status["head_commit"],
+            "status": status["status"],
+            "dirty_count": status["dirty_count"],
+            "dirty_summary": status["dirty_summary"],
+            "merged": False,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    return {
+        "branch_name": branch_name,
+        "worktree_path": str(worktree_path),
+        "base_commit": base_commit,
+        "head_commit": status["head_commit"],
+        "status": status["status"],
+        "dirty_count": status["dirty_count"],
+        "dirty_summary": status["dirty_summary"],
+        "merged": True,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
 def _changed_files(*, worktree_path: Path, base_ref: str, head_ref: str) -> list[dict[str, str]]:
     name_status = _run_git(["diff", "--name-status", f"{base_ref}..{head_ref}"], cwd=worktree_path).stdout
     files = []

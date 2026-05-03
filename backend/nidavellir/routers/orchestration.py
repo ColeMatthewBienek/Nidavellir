@@ -17,7 +17,9 @@ from nidavellir.orchestration.worktrees import (
     WorktreeError,
     checkpoint_worktree,
     create_git_worktree,
+    create_integration_worktree,
     current_branch,
+    default_integration_worktree_path,
     default_worktree_path,
     git_status,
     preflight_worktree_merge,
@@ -133,6 +135,12 @@ class WorktreeCreateRequest(BaseModel):
 
 
 class WorktreeCheckpointRequest(BaseModel):
+    message: str | None = None
+
+
+class WorktreeIntegrationRequest(BaseModel):
+    branchName: str | None = None
+    worktreePath: str | None = None
     message: str | None = None
 
 
@@ -989,6 +997,54 @@ def preflight_worktree_integration(worktree_id: str, request: Request) -> dict:
         },
     )
     return {"worktree": updated or worktree, "preflight": preflight}
+
+
+@router.post("/worktrees/{worktree_id}/integration-worktree")
+def stage_worktree_integration(worktree_id: str, request: Request, body: WorktreeIntegrationRequest | None = None) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    if worktree["status"] == "removed":
+        raise HTTPException(status_code=400, detail="worktree_removed")
+    target_ref = worktree.get("base_branch")
+    source_ref = worktree.get("branch_name")
+    if not target_ref or not source_ref:
+        raise HTTPException(status_code=400, detail="worktree_merge_refs_missing")
+    body = body or WorktreeIntegrationRequest()
+    branch_name = body.branchName or f"integration/{slugify(source_ref)}-{uuid.uuid4().hex[:8]}"
+    target_path = (
+        Path(body.worktreePath).expanduser().resolve()
+        if body.worktreePath
+        else default_integration_worktree_path(Path(worktree["repo_path"]), branch_name)
+    )
+    message = body.message or f"Integrate {source_ref}"
+    try:
+        integration = create_integration_worktree(
+            repo_path=Path(worktree["repo_path"]),
+            worktree_path=target_path,
+            branch_name=branch_name,
+            target_ref=target_ref,
+            source_ref=source_ref,
+            message=message,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    store.append_event(
+        task_id=worktree["task_id"],
+        node_id=worktree["node_id"],
+        type="worktree_integration_staged",
+        payload={
+            "source_worktree_id": worktree_id,
+            "source_branch": source_ref,
+            "target_branch": target_ref,
+            "integration_branch": integration["branch_name"],
+            "integration_worktree_path": integration["worktree_path"],
+            "merged": integration["merged"],
+        },
+    )
+    return {"source_worktree": worktree, "integration": integration}
 
 
 @router.delete("/worktrees/{worktree_id}")

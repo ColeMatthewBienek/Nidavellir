@@ -482,6 +482,21 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1/integration-worktree') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            source_worktree: detailWithWorktree.worktrees[0],
+            integration: {
+              branch_name: 'integration/orchestration-build-orchestration-data-model',
+              worktree_path: '/repo-worktrees/integrations/data-model',
+              head_commit: 'merge123',
+              merged: true,
+              status: 'clean',
+            },
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
         return Promise.resolve({ ok: true, json: async () => ({ ...detailWithWorktree.worktrees[0], status: 'removed' }) });
       }
@@ -508,11 +523,13 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     fireEvent.click(screen.getByRole('button', { name: 'Propose' }));
     fireEvent.click(screen.getByRole('button', { name: 'Preflight' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stage' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
 
     expect(await screen.findByText('Ready to merge - 1 commits - 1 files')).toBeTruthy();
     expect(await screen.findByText('Integrate orchestration work: Data Model')).toBeTruthy();
     expect(await screen.findByText('Merge preflight passed')).toBeTruthy();
+    expect(await screen.findByText('Integration branch staged')).toBeTruthy();
 
     await waitFor(() => {
       const refreshCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
@@ -533,11 +550,15 @@ describe('PlanScreen orchestration board', () => {
       const preflightCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).includes('/api/orchestration/worktrees/worktree-1/integration-preflight') && !options
       );
+      const stageCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/worktrees/worktree-1/integration-worktree') && options?.method === 'POST'
+      );
       expect(refreshCalls.length).toBe(1);
       expect(checkpointCalls.length).toBe(1);
       expect(reviewCalls.length).toBe(1);
       expect(proposalCalls.length).toBe(1);
       expect(preflightCalls.length).toBe(1);
+      expect(stageCalls.length).toBe(1);
       expect(removeCalls.length).toBe(1);
     });
   });
