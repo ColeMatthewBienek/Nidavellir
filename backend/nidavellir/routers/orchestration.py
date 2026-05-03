@@ -29,8 +29,10 @@ from nidavellir.orchestration.worktrees import (
     slugify,
 )
 from nidavellir.permissions.policy import PermissionDecision, PermissionEvaluationRequest
+from nidavellir.permissions.tool_protocol import TOOL_PROTOCOL_INSTRUCTIONS, extract_tool_requests
 from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
+from nidavellir.routers.tool_requests import _continuation_content
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -214,6 +216,88 @@ def _stringify_agent_event(item: object) -> str:
 
 def _step_by_id(task: dict, step_id: str) -> dict | None:
     return next((step for step in task.get("steps", []) if step.get("id") == step_id), None)
+
+
+def _tool_request_store(request: Request):
+    store = getattr(request.app.state, "tool_request_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="tool_request_store_not_available")
+    return store
+
+
+def _path_inside_workspace(path: str, workspace: Path) -> tuple[str | None, str | None]:
+    raw = Path(path).expanduser()
+    target = raw if raw.is_absolute() else workspace / raw
+    resolved = target.resolve(strict=False)
+    try:
+        resolved.relative_to(workspace)
+    except ValueError:
+        return None, f"path outside worktree: {resolved}"
+    return str(resolved), None
+
+
+def _prepare_orchestration_tool_requests(
+    *,
+    requests: list[dict[str, Any]],
+    cwd: Path,
+    task: dict,
+    node: dict,
+    step_id: str,
+    attempt_id: str,
+    worktree: dict,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    supported = {"shell_command", "file_read", "file_write", "file_delete"}
+    prepared: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    for index, item in enumerate(requests, start=1):
+        action = str(item.get("action") or "").strip()
+        if action not in supported:
+            invalid.append(f"request {index}: unsupported action {action or '<missing>'}")
+            continue
+
+        args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+        path = item.get("path") or args.get("path")
+        normalized_path: str | None = None
+        if action in {"file_read", "file_write", "file_delete"}:
+            if not path:
+                invalid.append(f"request {index}: path required for {action}")
+                continue
+            normalized_path, error = _path_inside_workspace(str(path), cwd)
+            if error:
+                invalid.append(f"request {index}: {error}")
+                continue
+
+        command = item.get("command") or args.get("command")
+        if action == "shell_command" and not command:
+            invalid.append(f"request {index}: command required for shell_command")
+            continue
+
+        arguments = {
+            **args,
+            "orchestration": {
+                "task_id": task["id"],
+                "node_id": node["id"],
+                "step_id": step_id,
+                "run_attempt_id": attempt_id,
+                "worktree_id": worktree["id"],
+                "worktree_path": str(cwd),
+            },
+        }
+        if normalized_path:
+            arguments["path"] = normalized_path
+        if command:
+            arguments["command"] = str(command)
+
+        prepared.append({
+            "provider": str(item.get("provider") or item.get("providerId") or ""),
+            "tool_name": str(item.get("toolName") or item.get("tool_name") or action),
+            "action": action,
+            "path": normalized_path,
+            "command": str(command) if command else None,
+            "workspace": str(cwd),
+            "arguments": arguments,
+        })
+    return prepared, invalid
 
 
 @router.get("/tasks")
@@ -556,6 +640,7 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
         "- Work only inside the provided worktree.\n"
         "- Do not switch branches or create/delete worktrees.\n"
         "- Report the files changed and tests run.\n\n"
+        f"{TOOL_PROTOCOL_INSTRUCTIONS}\n\n"
         f"Step instructions:\n{prompt}"
     )
 
@@ -598,6 +683,109 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
             if text:
                 transcript_parts.append(text)
         transcript = "".join(transcript_parts).strip()
+        tool_request_payloads = extract_tool_requests(transcript)
+        if tool_request_payloads:
+            prepared_requests, invalid_requests = _prepare_orchestration_tool_requests(
+                requests=tool_request_payloads,
+                cwd=cwd,
+                task=task,
+                node=node,
+                step_id=step_id,
+                attempt_id=attempt["id"],
+                worktree=worktree,
+            )
+            if invalid_requests:
+                error = "; ".join(invalid_requests)
+                updated_step = store.update_step_status(step_id, "failed", output_summary=error[:240])
+                attempt = store.update_run_attempt(attempt["id"], status="failed", error=error) or attempt
+                store.append_event(
+                    task_id=task["id"],
+                    node_id=node["id"],
+                    step_id=step_id,
+                    run_attempt_id=attempt["id"],
+                    type="agent_step_tool_request_rejected",
+                    payload={"errors": invalid_requests, "worktree_id": worktree["id"]},
+                )
+                return {
+                    "step": updated_step,
+                    "run_attempt": attempt,
+                    "worktree": worktree,
+                    "transcript": transcript,
+                    "tool_requests": [],
+                    "tool_request_errors": invalid_requests,
+                }
+
+            tool_store = _tool_request_store(request)
+            created_requests = []
+            for item in prepared_requests:
+                permission = evaluate_and_audit(
+                    request,
+                    PermissionEvaluationRequest(
+                        action=item["action"],  # type: ignore[arg-type]
+                        path=item.get("path"),
+                        command=item.get("command"),
+                        workspace=item["workspace"],
+                        conversation_id=conversation_id,
+                        actor="agent",
+                        metadata={
+                            "source": "orchestration.run_agent_step",
+                            "provider": provider,
+                            "tool_name": item["tool_name"],
+                            "step_id": step_id,
+                            "run_attempt_id": attempt["id"],
+                        },
+                    ),
+                )
+                created_requests.append(tool_store.create(
+                    conversation_id=conversation_id,
+                    provider=provider,
+                    tool_name=item["tool_name"],
+                    action=item["action"],
+                    status="denied" if permission.decision == PermissionDecision.DENY else "pending",
+                    path=item.get("path"),
+                    command=item.get("command"),
+                    workspace=item["workspace"],
+                    arguments=item["arguments"],
+                    permission=permission,
+                    reason=permission.reason,
+                ))
+            updated_step = store.update_step_status(
+                step_id,
+                "waiting_for_user",
+                output_summary=f"Waiting for tool result: {len(created_requests)} tool request(s).",
+            )
+            attempt = store.update_run_attempt(attempt["id"], status="waiting_for_user") or attempt
+            store.append_event(
+                task_id=task["id"],
+                node_id=node["id"],
+                step_id=step_id,
+                run_attempt_id=attempt["id"],
+                type="agent_step_waiting_for_tool",
+                payload={
+                    "tool_request_ids": [item["id"] for item in created_requests],
+                    "worktree_id": worktree["id"],
+                },
+            )
+            await broadcast_resource_event(request.app, {
+                "kind": "tool_requests",
+                "action": "created",
+                "conversation_id": conversation_id,
+                "message": "Orchestration agent step is waiting for tool approval",
+            })
+            await broadcast_resource_event(request.app, {
+                "kind": "orchestration",
+                "action": "agent_step_waiting_for_tool",
+                "conversation_id": conversation_id,
+                "message": "Orchestration agent step is waiting for tool approval",
+            })
+            return {
+                "step": updated_step,
+                "run_attempt": attempt,
+                "worktree": worktree,
+                "transcript": transcript,
+                "tool_requests": created_requests,
+            }
+
         summary = transcript.splitlines()[-1][:240] if transcript else "Agent step completed."
         updated_step = store.update_step_status(step_id, "complete", output_summary=summary)
         attempt = store.update_run_attempt(attempt["id"], status="completed") or attempt
@@ -655,6 +843,54 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
                 await agent.kill()
             except Exception:
                 pass
+
+
+@router.post("/steps/{step_id}/tool-requests/{request_id}/resume")
+async def resume_agent_step_with_tool_result(step_id: str, request_id: str, body: StepRunAgentRequest, request: Request) -> dict:
+    store = _store(request)
+    step = store.get_step(step_id)
+    if step is None:
+        raise HTTPException(status_code=404, detail="step_not_found")
+    item = _tool_request_store(request).get(request_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="tool_request_not_found")
+    if item["status"] not in {"executed", "denied", "failed"}:
+        raise HTTPException(status_code=400, detail="tool_request_not_resolved")
+    orchestration = (item.get("arguments") or {}).get("orchestration") or {}
+    if orchestration.get("step_id") != step_id:
+        raise HTTPException(status_code=400, detail="tool_request_step_mismatch")
+    node = store.get_node(step["node_id"])
+    if node is None:
+        raise HTTPException(status_code=404, detail="node_not_found")
+
+    original_prompt = _prompt_from_step(step, body.prompt)
+    resume_prompt = (
+        f"{original_prompt}\n\n"
+        "Nidavellir-mediated tool result:\n"
+        f"{_continuation_content(item)}\n\n"
+        "Continue the orchestration step from this result. If more workspace access is needed, "
+        "emit another Nidavellir tool request and wait."
+    )
+    continued = _tool_request_store(request).mark_continued(request_id) or item
+    store.append_event(
+        task_id=node["task_id"],
+        node_id=step["node_id"],
+        step_id=step_id,
+        run_attempt_id=orchestration.get("run_attempt_id"),
+        type="agent_step_tool_result_continued",
+        payload={"tool_request_id": request_id, "status": continued.get("status")},
+    )
+    result = await run_agent_step(
+        step_id,
+        StepRunAgentRequest(
+            prompt=resume_prompt,
+            provider=body.provider,
+            model=body.model,
+            conversationId=body.conversationId or item.get("conversation_id"),
+        ),
+        request,
+    )
+    return {"tool_request": continued, **result}
 
 
 @router.post("/tasks/{task_id}/run-ready")
@@ -720,7 +956,7 @@ async def run_ready_steps(task_id: str, body: TaskRunReadyRequest, request: Requ
             "result": result,
         })
         executed += 1
-        if result.get("step", {}).get("status") == "failed":
+        if result.get("step", {}).get("status") in {"failed", "waiting_for_user"}:
             break
 
     final_task = store.get_task(task_id)

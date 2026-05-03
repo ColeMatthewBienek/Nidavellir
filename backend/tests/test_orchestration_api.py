@@ -11,6 +11,7 @@ from nidavellir.main import app
 from nidavellir.memory.store import MemoryStore
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
+from nidavellir.permissions.tool_requests import ToolRequestStore
 from nidavellir.skills.store import SkillStore
 from nidavellir.tokens.store import TokenUsageStore
 
@@ -24,6 +25,7 @@ def setup_app(tmp_path: Path):
     app.state.command_store = CommandRunStore(str(tmp_path / "commands.db"))
     app.state.command_runner = CommandRunner()
     app.state.orchestration_store = OrchestrationStore(str(tmp_path / "orchestration.db"))
+    app.state.tool_request_store = ToolRequestStore(str(tmp_path / "tool_requests.db"))
 
 
 def create_git_repo(path: Path) -> Path:
@@ -311,9 +313,10 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
     worktree_path = tmp_path / "worktrees" / "agent-node"
 
     class FakeAgent:
-        def __init__(self, slot_id, workdir, model_id=None):
+        def __init__(self, slot_id, workdir, model_id=None, dangerousness="restricted"):
             self.workdir = Path(workdir)
             self.model_id = model_id
+            self.dangerousness = dangerousness
             self.prompt = ""
 
         async def start(self):
@@ -387,6 +390,119 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
         events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
         event_types = {event["type"] for event in events.json()}
         assert {"agent_step_started", "agent_step_finished", "run_attempt_created", "run_attempt_updated"} <= event_types
+
+
+@pytest.mark.asyncio
+async def test_orchestration_agent_tool_request_waits_for_user_inside_worktree(tmp_path: Path, monkeypatch):
+    setup_app(tmp_path)
+    repo = create_git_repo(tmp_path / "repo")
+    worktree_path = tmp_path / "worktrees" / "agent-tool-node"
+
+    class FakeAgent:
+        def __init__(self, slot_id, workdir, model_id=None, dangerousness="restricted"):
+            self.workdir = Path(workdir)
+            self.model_id = model_id
+            self.dangerousness = dangerousness
+            self.prompt = ""
+
+        async def start(self):
+            return None
+
+        async def send(self, text: str):
+            self.prompt = text
+
+        async def stream(self):
+            if "Nidavellir-mediated tool result" in self.prompt:
+                yield "Read package metadata and finished.\n"
+                return
+            yield (
+                "Need to inspect package metadata.\n"
+                '{"nidavellir_tool_request":{"toolName":"Read","action":"file_read",'
+                '"path":"package.json","workspace":"/tmp/ignored","arguments":{"maxChars":2000}}}\n'
+            )
+
+        async def kill(self):
+            return None
+
+    from nidavellir.agents import registry as agent_registry
+    from nidavellir.routers import orchestration as orchestration_router
+
+    monkeypatch.setitem(
+        agent_registry.PROVIDER_REGISTRY,
+        "fake-tool-agent",
+        agent_registry.ProviderManifest(
+            id="fake-tool-agent",
+            display_name="Fake Tool Agent",
+            binary="fake-tool-agent",
+            description="test fake",
+            agent_class=FakeAgent,
+            supports_worktree_isolation=True,
+        ),
+    )
+    monkeypatch.setattr(orchestration_router._agent_registry, "PROVIDER_REGISTRY", agent_registry.PROVIDER_REGISTRY)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Agent tool test",
+            "baseRepoPath": str(repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={
+            "title": "Agent Node",
+            "provider": "fake-tool-agent",
+            "model": "fake-model",
+        })).json()
+        await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/agent-tool-test/agent-node",
+            "worktreePath": str(worktree_path),
+        })
+        (worktree_path / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+        step = (await c.post(f"/api/orchestration/nodes/{node['id']}/steps", json={
+            "title": "Ask fake tool agent",
+            "type": "agent",
+            "config": {"prompt": "Read package.json"},
+        })).json()
+
+        result = await c.post(f"/api/orchestration/steps/{step['id']}/run-agent", json={
+            "conversationId": "conv-agent-tools",
+        })
+        assert result.status_code == 200
+        body = result.json()
+        assert body["step"]["status"] == "waiting_for_user"
+        assert body["run_attempt"]["status"] == "waiting_for_user"
+        assert len(body["tool_requests"]) == 1
+        tool_request = body["tool_requests"][0]
+        assert tool_request["status"] == "pending"
+        assert tool_request["action"] == "file_read"
+        assert tool_request["workspace"] == str(worktree_path)
+        assert tool_request["path"] == str(worktree_path / "package.json")
+        assert tool_request["arguments"]["orchestration"]["step_id"] == step["id"]
+        assert tool_request["arguments"]["orchestration"]["worktree_path"] == str(worktree_path)
+
+        listed = await c.get("/api/tool-requests", params={"conversationId": "conv-agent-tools"})
+        assert listed.status_code == 200
+        assert listed.json()[0]["id"] == tool_request["id"]
+
+        approved = await c.post(f"/api/tool-requests/{tool_request['id']}/approve", json={"reason": "test approval"})
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "executed"
+
+        resumed = await c.post(f"/api/orchestration/steps/{step['id']}/tool-requests/{tool_request['id']}/resume", json={
+            "conversationId": "conv-agent-tools",
+        })
+        assert resumed.status_code == 200
+        resumed_body = resumed.json()
+        assert resumed_body["tool_request"]["continued_at"]
+        assert resumed_body["step"]["status"] == "complete"
+        assert "finished" in resumed_body["transcript"]
+
+        events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
+        event_types = {event["type"] for event in events.json()}
+        assert "agent_step_waiting_for_tool" in event_types
+        assert "agent_step_tool_result_continued" in event_types
 
 
 @pytest.mark.asyncio
