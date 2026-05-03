@@ -262,6 +262,16 @@ export function ChatScreen() {
       setInput(detail.content);
       requestAnimationFrame(() => inputRef.current?.focus());
     };
+    const continueWithToolResult = (event: Event) => {
+      const detail = (event as CustomEvent<{ content?: string }>).detail;
+      const content = detail?.content?.trim();
+      if (!content) return;
+      window.dispatchEvent(new CustomEvent('nid:navigate', { detail: 'chat' }));
+      addMessage('user', content);
+      if (!sendMessage(content)) {
+        useAgentStore.getState().finalizeWithError('agent connection unavailable');
+      }
+    };
     const openAuditExport = () => {
       const conversationId = useAgentStore.getState().activeConversationId;
       if (!conversationId) return;
@@ -277,14 +287,16 @@ export function ChatScreen() {
     window.addEventListener('nid:invoke-skill', invokeSkill);
     window.addEventListener('nid:open-review', openReview);
     window.addEventListener('nid:command-output-to-chat', useCommandOutput);
+    window.addEventListener('nid:tool-result-continue', continueWithToolResult);
     window.addEventListener('nid:audit-export-open', openAuditExport);
     return () => {
       window.removeEventListener('nid:invoke-skill', invokeSkill);
       window.removeEventListener('nid:open-review', openReview);
       window.removeEventListener('nid:command-output-to-chat', useCommandOutput);
+      window.removeEventListener('nid:tool-result-continue', continueWithToolResult);
       window.removeEventListener('nid:audit-export-open', openAuditExport);
     };
-  }, []);
+  }, [addMessage]);
 
   const resizeInput = (value: string) => {
     const inputEl = inputRef.current;

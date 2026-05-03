@@ -10,7 +10,7 @@ from typing import Iterator, Literal
 
 from nidavellir.permissions.policy import PermissionEvaluationResult
 
-ToolRequestStatus = Literal["pending", "approved", "denied", "observed", "failed"]
+ToolRequestStatus = Literal["pending", "approved", "executed", "denied", "observed", "failed"]
 
 DDL = """
 CREATE TABLE IF NOT EXISTS tool_requests (
@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tool_requests (
   execution_json TEXT,
   reason TEXT,
   created_at TEXT NOT NULL,
-  resolved_at TEXT
+  resolved_at TEXT,
+  continued_at TEXT
 );
 """
 
@@ -62,6 +63,8 @@ class ToolRequestStore:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(tool_requests)").fetchall()}
         if "execution_json" not in columns:
             conn.execute("ALTER TABLE tool_requests ADD COLUMN execution_json TEXT")
+        if "continued_at" not in columns:
+            conn.execute("ALTER TABLE tool_requests ADD COLUMN continued_at TEXT")
 
     def create(
         self,
@@ -102,7 +105,7 @@ class ToolRequestStore:
                     None,
                     reason,
                     created_at,
-                    created_at if status in {"approved", "denied", "observed", "failed"} else None,
+                    created_at if status in {"approved", "executed", "denied", "observed", "failed"} else None,
                 ),
             )
         return self.get(request_id) or {}
@@ -131,7 +134,7 @@ class ToolRequestStore:
     def resolve(
         self,
         request_id: str,
-        status: Literal["approved", "denied", "failed"],
+        status: Literal["approved", "executed", "denied", "failed"],
         reason: str | None = None,
         execution: object | None = None,
     ) -> dict | None:
@@ -147,6 +150,14 @@ class ToolRequestStore:
                     _now(),
                     request_id,
                 ),
+            )
+        return self.get(request_id)
+
+    def mark_continued(self, request_id: str) -> dict | None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE tool_requests SET continued_at = ? WHERE id = ?",
+                (_now(), request_id),
             )
         return self.get(request_id)
 
