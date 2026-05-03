@@ -439,6 +439,31 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1/integration-proposal') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            worktree: { ...detailWithWorktree.worktrees[0], status: 'clean', dirty_count: 0 },
+            proposal: {
+              title: 'Integrate orchestration work: Data Model',
+              body: '## Orchestration Integration\n- Source branch: `orchestration/build-orchestration/data-model`\n- Target branch: `main`',
+              source_branch: 'orchestration/build-orchestration/data-model',
+              target_branch: 'main',
+              ready_to_merge: true,
+              head_commit: 'def456',
+              review: {
+                ready_to_merge: true,
+                commit_count: 1,
+                files: [{ path: 'README.md', status: 'M' }],
+                commits: [{ sha: 'def456', short_sha: 'def456', subject: 'Checkpoint node' }],
+                shortstat: '1 file changed, 1 insertion(+)',
+                status: 'clean',
+                dirty_count: 0,
+              },
+            },
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
         return Promise.resolve({ ok: true, json: async () => ({ ...detailWithWorktree.worktrees[0], status: 'removed' }) });
       }
@@ -463,9 +488,11 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     fireEvent.click(screen.getByRole('button', { name: 'Checkpoint' }));
     fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Propose' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
 
     expect(await screen.findByText('Ready to merge - 1 commits - 1 files')).toBeTruthy();
+    expect(await screen.findByText('Integrate orchestration work: Data Model')).toBeTruthy();
 
     await waitFor(() => {
       const refreshCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
@@ -480,9 +507,13 @@ describe('PlanScreen orchestration board', () => {
       const reviewCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).includes('/api/orchestration/worktrees/worktree-1/review') && !options
       );
+      const proposalCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/worktrees/worktree-1/integration-proposal') && !options
+      );
       expect(refreshCalls.length).toBe(1);
       expect(checkpointCalls.length).toBe(1);
       expect(reviewCalls.length).toBe(1);
+      expect(proposalCalls.length).toBe(1);
       expect(removeCalls.length).toBe(1);
     });
   });
