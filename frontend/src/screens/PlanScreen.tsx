@@ -117,6 +117,17 @@ interface WorktreeIntegrationProposal {
   review?: WorktreeReview;
 }
 
+interface WorktreeIntegrationPreflight {
+  can_merge: boolean;
+  message: string;
+  target_ref: string;
+  source_ref: string;
+  commits_to_merge: number;
+  target_ahead_count: number;
+  files: Array<{ path: string; status: string }>;
+  conflicts: Array<{ path: string; message: string }>;
+}
+
 interface OrchestrationReadiness {
   runnable: Array<{ node_id: string; step_id: string; step_type: string }>;
   blocked: Array<{ node_id: string; blocked_by: string[] }>;
@@ -346,6 +357,7 @@ function TaskDetail({
   onCheckpointWorktree,
   onReviewWorktree,
   onProposeIntegration,
+  onPreflightIntegration,
   onRemoveWorktree,
   onAddStep,
   onCompleteStep,
@@ -353,6 +365,7 @@ function TaskDetail({
   onRunAgentStep,
   worktreeReviews,
   worktreeProposals,
+  worktreePreflights,
 }: {
   task: OrchestrationTaskDetail;
   events: OrchestrationEvent[];
@@ -368,6 +381,7 @@ function TaskDetail({
   onCheckpointWorktree: (worktreeId: string) => void;
   onReviewWorktree: (worktreeId: string) => void;
   onProposeIntegration: (worktreeId: string) => void;
+  onPreflightIntegration: (worktreeId: string) => void;
   onRemoveWorktree: (worktreeId: string) => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
@@ -375,6 +389,7 @@ function TaskDetail({
   onRunAgentStep: (stepId: string) => void;
   worktreeReviews: Record<string, WorktreeReview>;
   worktreeProposals: Record<string, WorktreeIntegrationProposal>;
+  worktreePreflights: Record<string, WorktreeIntegrationPreflight>;
 }) {
   const selectedNode = task.nodes.find((node) => node.id === selectedNodeId) ?? task.nodes[0] ?? null;
   const selectedSteps = selectedNode
@@ -423,7 +438,7 @@ function TaskDetail({
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {taskWorktree ? (
-              <WorktreeCard worktree={taskWorktree} label="Task branch" review={worktreeReviews[taskWorktree.id]} proposal={worktreeProposals[taskWorktree.id]} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onReview={onReviewWorktree} onProposeIntegration={onProposeIntegration} onRemove={onRemoveWorktree} />
+              <WorktreeCard worktree={taskWorktree} label="Task branch" review={worktreeReviews[taskWorktree.id]} proposal={worktreeProposals[taskWorktree.id]} preflight={worktreePreflights[taskWorktree.id]} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onReview={onReviewWorktree} onProposeIntegration={onProposeIntegration} onPreflightIntegration={onPreflightIntegration} onRemove={onRemoveWorktree} />
             ) : (
               <div style={{ border: '1px dashed var(--bd)', borderRadius: 7, padding: 10, color: 'var(--t1)', fontSize: 12 }}>
                 No task worktree yet. Node worktrees can still be created directly from the base repo.
@@ -431,7 +446,7 @@ function TaskDetail({
             )}
             {selectedNode && (
               selectedNodeWorktree ? (
-                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} review={worktreeReviews[selectedNodeWorktree.id]} proposal={worktreeProposals[selectedNodeWorktree.id]} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onReview={onReviewWorktree} onProposeIntegration={onProposeIntegration} onRemove={onRemoveWorktree} />
+                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} review={worktreeReviews[selectedNodeWorktree.id]} proposal={worktreeProposals[selectedNodeWorktree.id]} preflight={worktreePreflights[selectedNodeWorktree.id]} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onReview={onReviewWorktree} onProposeIntegration={onProposeIntegration} onPreflightIntegration={onPreflightIntegration} onRemove={onRemoveWorktree} />
               ) : (
                 <button
                   type="button"
@@ -661,20 +676,24 @@ function WorktreeCard({
   label,
   review,
   proposal,
+  preflight,
   onRefresh,
   onCheckpoint,
   onReview,
   onProposeIntegration,
+  onPreflightIntegration,
   onRemove,
 }: {
   worktree: OrchestrationWorktree;
   label: string;
   review?: WorktreeReview;
   proposal?: WorktreeIntegrationProposal;
+  preflight?: WorktreeIntegrationPreflight;
   onRefresh: (worktreeId: string) => void;
   onCheckpoint: (worktreeId: string) => void;
   onReview: (worktreeId: string) => void;
   onProposeIntegration: (worktreeId: string) => void;
+  onPreflightIntegration: (worktreeId: string) => void;
   onRemove: (worktreeId: string) => void;
 }) {
   const canCheckpoint = worktree.status !== 'removed' && worktree.dirty_count > 0;
@@ -727,6 +746,13 @@ function WorktreeCard({
           </button>
           <button
             type="button"
+            onClick={() => onPreflightIntegration(worktree.id)}
+            style={{ border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t1)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
+          >
+            Preflight
+          </button>
+          <button
+            type="button"
             onClick={() => onRemove(worktree.id)}
             style={{ border: '1px solid var(--bd)', borderRadius: 5, background: '#f8514918', color: 'var(--red)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
           >
@@ -760,6 +786,24 @@ function WorktreeCard({
           <pre style={{ margin: 0, maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap', color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
             {proposal.body}
           </pre>
+        </div>
+      )}
+      {preflight && (
+        <div style={{ borderTop: '1px solid var(--bd)', paddingTop: 7, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ color: preflight.can_merge ? 'var(--grn)' : 'var(--red)', fontSize: 11, fontWeight: 700 }}>
+            {preflight.can_merge ? 'Merge preflight passed' : 'Merge preflight blocked'}
+          </div>
+          <div style={{ color: 'var(--t1)', fontSize: 11 }}>
+            {preflight.message}
+          </div>
+          <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>
+            {preflight.source_ref} -&gt; {preflight.target_ref} - {preflight.commits_to_merge} commits
+          </div>
+          {preflight.conflicts[0] && (
+            <div style={{ color: 'var(--red)', fontSize: 11 }}>
+              {preflight.conflicts.length} conflicts
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1098,6 +1142,7 @@ export function PlanScreen() {
   const [creatingWorktreeNodeId, setCreatingWorktreeNodeId] = useState<string | null | undefined>(undefined);
   const [worktreeReviews, setWorktreeReviews] = useState<Record<string, WorktreeReview>>({});
   const [worktreeProposals, setWorktreeProposals] = useState<Record<string, WorktreeIntegrationProposal>>({});
+  const [worktreePreflights, setWorktreePreflights] = useState<Record<string, WorktreeIntegrationPreflight>>({});
 
   const grouped = useMemo(() => {
     const groups: Record<string, OrchestrationTaskSummary[]> = {};
@@ -1474,6 +1519,21 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_proposal_failed'));
   };
 
+  const preflightIntegration = (worktreeId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/worktrees/${worktreeId}/integration-preflight`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_worktree_preflight_${response.status}`);
+        return response.json() as Promise<{ worktree: OrchestrationWorktree; preflight: WorktreeIntegrationPreflight }>;
+      })
+      .then((result) => {
+        setWorktreePreflights((current) => ({ ...current, [worktreeId]: result.preflight }));
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_preflight_failed'));
+  };
+
   const removeWorktree = (worktreeId: string) => {
     if (!selectedTask) return;
     fetch(`${API}/api/orchestration/worktrees/${worktreeId}`, { method: 'DELETE' })
@@ -1597,6 +1657,7 @@ export function PlanScreen() {
           onCheckpointWorktree={checkpointWorktree}
           onReviewWorktree={reviewWorktree}
           onProposeIntegration={proposeIntegration}
+          onPreflightIntegration={preflightIntegration}
           onRemoveWorktree={removeWorktree}
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
@@ -1604,6 +1665,7 @@ export function PlanScreen() {
           onRunAgentStep={runAgentStep}
           worktreeReviews={worktreeReviews}
           worktreeProposals={worktreeProposals}
+          worktreePreflights={worktreePreflights}
         />
       )}
 
