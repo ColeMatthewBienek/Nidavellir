@@ -16,6 +16,24 @@ from nidavellir.skills.store import SkillStore
 from nidavellir.tokens.store import TokenUsageStore
 
 
+class PlannerPmFakeAgent:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.killed = False
+
+    async def start(self) -> None:
+        return None
+
+    async def send(self, text: str) -> None:
+        self.sent.append(text)
+
+    async def stream(self):
+        yield "As Nidavellir PM, agent-backed planning reply."
+
+    async def kill(self) -> None:
+        self.killed = True
+
+
 def setup_app(tmp_path: Path):
     app.state.memory_store = MemoryStore(str(tmp_path / "memory.db"))
     app.state.token_store = TokenUsageStore(str(tmp_path / "tokens.db"))
@@ -99,8 +117,10 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
+async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
+    agent = PlannerPmFakeAgent()
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: agent)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         plan = (await c.post("/api/orchestration/plan-inbox", json={
@@ -152,9 +172,12 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
         assert turn_body["messages"][1]["metadata"]["model"] == "gpt-5.5"
         assert turn_body["messages"][1]["metadata"]["skill"] == "planner-pm"
         assert turn_body["messages"][1]["metadata"]["harness"] == "main_chat_prompt_assembly"
+        assert turn_body["messages"][1]["metadata"]["agent_status"] == "completed"
         assert "planner-pm" in turn_body["messages"][1]["metadata"]["injected_skill_ids"]
         assert "activated skills" in turn_body["messages"][1]["metadata"]["prompt_section_names"]
         assert turn_body["structured"]["harness"]["conversation_id"] == f"planner-pm:{plan['id']}"
+        assert turn_body["structured"]["agent"]["status"] == "completed"
+        assert "Planner PM skill" in agent.sent[0]
         assert turn_body["messages"][1]["metadata"]["active_gate"] == "scope"
         assert turn_body["structured"]["active_gate"] == "scope"
         assert turn_body["structured"]["checkpoint_updates"][0]["key"] == "verification"
@@ -171,12 +194,14 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
         assert body["planning_checkpoints"][3]["status"] == "agreed"
         assert body["planning_checkpoints"][4]["status"] == "agreed"
         assert [message["kind"] for message in body["discussion_messages"]] == ["message", "question", "decision", "message", "question"]
+        assert body["discussion_messages"][4]["content"] == "As Nidavellir PM, agent-backed planning reply."
         assert body["discussion_messages"][2]["content"].startswith("Decomposer consumes")
 
 
 @pytest.mark.asyncio
-async def test_pm_turn_generates_draft_spec_when_gate_evidence_is_complete(tmp_path: Path):
+async def test_pm_turn_generates_draft_spec_when_gate_evidence_is_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmFakeAgent())
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         plan = (await c.post("/api/orchestration/plan-inbox", json={

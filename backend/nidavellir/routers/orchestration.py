@@ -199,6 +199,7 @@ class PlannerPmTurnRequest(BaseModel):
     content: str = Field(min_length=1)
     provider: str | None = None
     model: str | None = None
+    agentMode: str = "provider"
 
 
 class PlanningCheckpointUpdateRequest(BaseModel):
@@ -438,6 +439,7 @@ def _planner_pm_current_content(user_content: str) -> str:
         "Use the Planner PM skill for this focused planning turn.",
         "The goal is an agentic-forward spec that can safely move to decomposition.",
         "Act as Nidavellir PM: co-create, critique, capture evidence, and block decomposition until required gates are satisfied.",
+        "Return only the next PM chat message to the user. Do not emit JSON; Nidavellir records checkpoint evidence separately.",
         f"User message:\n{user_content}",
     ])
 
@@ -474,7 +476,42 @@ def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request
         "injected_skill_ids": assembly.injected_skill_ids,
         "suppressed_skill_ids": assembly.suppressed_skill_ids,
         "estimated_tokens": assembly.estimated_tokens,
+        "_rendered_prompt": assembly.rendered_text,
     }
+
+
+async def _run_planner_pm_agent(plan: dict, harness_metadata: dict, request: Request) -> dict:
+    provider = harness_metadata["provider"]
+    manifest = _agent_registry.PROVIDER_REGISTRY.get(provider)
+    if manifest is None:
+        return {"status": "failed", "content": "", "error": "provider_not_found"}
+    agent = None
+    transcript_parts: list[str] = []
+    try:
+        safety_store = getattr(request.app.state, "provider_safety_store", None)
+        dangerousness = safety_store.get_policy(provider).effective_dangerousness if safety_store else "restricted"
+        agent = _agent_registry.make_agent(
+            provider,
+            slot_id=0,
+            workdir=_planner_pm_workdir(plan),
+            model_id=harness_metadata["model"],
+            dangerousness=dangerousness,
+        )
+        await agent.start()
+        await agent.send(harness_metadata["_rendered_prompt"])
+        async for item in agent.stream():
+            text = _stringify_agent_event(item)
+            if text:
+                transcript_parts.append(text)
+        return {"status": "completed", "content": "".join(transcript_parts).strip(), "error": None}
+    except Exception as exc:
+        return {"status": "failed", "content": "".join(transcript_parts).strip(), "error": str(exc)}
+    finally:
+        if agent is not None:
+            try:
+                await agent.kill()
+            except Exception:
+                pass
 
 
 def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: str) -> dict:
@@ -806,7 +843,7 @@ def create_planner_discussion_message(item_id: str, body: PlannerDiscussionMessa
 
 
 @router.post("/plan-inbox/{item_id}/pm-turn")
-def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
+async def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
     store = _store(request)
     plan = store.get_plan_inbox_item(item_id)
     if plan is None:
@@ -825,6 +862,9 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             },
         )
         structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
+        agent_result = {"status": "skipped", "content": "", "error": None}
+        if body.agentMode == "provider":
+            agent_result = await _run_planner_pm_agent(plan, harness_metadata, request)
         checkpoint_updates: list[dict] = []
         for update in structured["checkpoint_updates"]:
             checkpoint = store.update_planning_checkpoint(
@@ -861,12 +901,15 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             plan_inbox_item_id=item_id,
             role="planner",
             kind=structured["kind"],
-            content=structured["content"],
+            content=(agent_result.get("content") or structured["content"]).strip(),
             metadata={
                 "source": "nidavellir_pm",
                 "skill": "planner-pm",
                 "provider": harness_metadata["provider"],
                 "model": harness_metadata["model"],
+                "agent_mode": body.agentMode,
+                "agent_status": agent_result["status"],
+                "agent_error": agent_result["error"],
                 "harness": harness_metadata["harness"],
                 "harness_conversation_id": harness_metadata["conversation_id"],
                 "prompt_section_names": harness_metadata["prompt_section_names"],
@@ -890,7 +933,8 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
                 **structured,
                 "checkpoint_updates": checkpoint_updates,
                 "draft_spec": draft_spec,
-                "harness": harness_metadata,
+                "harness": {key: value for key, value in harness_metadata.items() if not key.startswith("_")},
+                "agent": agent_result,
             },
         }
     except Exception as err:
