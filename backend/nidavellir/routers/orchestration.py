@@ -882,6 +882,72 @@ def review_orchestration_worktree(worktree_id: str, request: Request) -> dict:
     return {"worktree": updated or worktree, "review": review}
 
 
+@router.get("/worktrees/{worktree_id}/integration-proposal")
+def propose_worktree_integration(worktree_id: str, request: Request) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    if worktree["status"] == "removed":
+        raise HTTPException(status_code=400, detail="worktree_removed")
+    task = store.get_task(worktree["task_id"])
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    node = store.get_node(worktree["node_id"]) if worktree.get("node_id") else None
+    base_ref = worktree.get("base_commit") or worktree.get("base_branch")
+    if not base_ref:
+        raise HTTPException(status_code=400, detail="worktree_base_ref_missing")
+    try:
+        review = review_worktree(
+            worktree_path=Path(worktree["worktree_path"]),
+            base_ref=base_ref,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    title_subject = node["title"] if node else task["title"]
+    title = f"Integrate orchestration work: {title_subject}"
+    commit_lines = "\n".join(f"- `{item['short_sha']}` {item['subject']}" for item in review["commits"][:10]) or "- No commits"
+    file_lines = "\n".join(f"- `{item['status']}` {item['path']}" for item in review["files"][:20]) or "- No changed files"
+    body = (
+        "## Orchestration Integration\n"
+        f"- Task: {task['title']}\n"
+        f"- Node: {(node or {}).get('title') or 'Task branch'}\n"
+        f"- Source branch: `{worktree['branch_name']}`\n"
+        f"- Target branch: `{worktree['base_branch']}`\n"
+        f"- Commit range: `{base_ref}..{review['head_commit']}`\n"
+        f"- Status: {'ready' if review['ready_to_merge'] else 'needs attention'}\n\n"
+        "## Commits\n"
+        f"{commit_lines}\n\n"
+        "## Files\n"
+        f"{file_lines}\n\n"
+        "## Diff Stat\n"
+        f"{review['shortstat'] or 'No diff'}\n"
+    )
+    proposal = {
+        "title": title,
+        "body": body,
+        "source_branch": worktree["branch_name"],
+        "target_branch": worktree["base_branch"],
+        "base_ref": base_ref,
+        "head_commit": review["head_commit"],
+        "ready_to_merge": review["ready_to_merge"],
+        "review": review,
+    }
+    store.append_event(
+        task_id=worktree["task_id"],
+        node_id=worktree["node_id"],
+        type="worktree_integration_proposed",
+        payload={
+            "worktree_id": worktree_id,
+            "source_branch": proposal["source_branch"],
+            "target_branch": proposal["target_branch"],
+            "ready_to_merge": proposal["ready_to_merge"],
+        },
+    )
+    return {"worktree": worktree, "proposal": proposal}
+
+
 @router.delete("/worktrees/{worktree_id}")
 def delete_worktree(worktree_id: str, request: Request, removeGitWorktree: bool = True) -> dict:
     store = _store(request)

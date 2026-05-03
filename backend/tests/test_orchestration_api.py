@@ -207,6 +207,15 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         assert review["commits"][0]["subject"] == "Checkpoint node A"
         assert review["files"][0]["path"] == "README.md"
 
+        proposed = await c.get(f"/api/orchestration/worktrees/{worktree['id']}/integration-proposal")
+        assert proposed.status_code == 200
+        proposal = proposed.json()["proposal"]
+        assert proposal["ready_to_merge"] is True
+        assert proposal["source_branch"] == "orchestration/worktree-test/node-a"
+        assert proposal["target_branch"] == "main"
+        assert "Checkpoint node A" in proposal["body"]
+        assert "README.md" in proposal["body"]
+
         (worktree_path / "README.md").write_text("# changed\n", encoding="utf-8")
         clean = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/refresh")
         assert clean.status_code == 200
@@ -220,7 +229,7 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         detail = (await c.get(f"/api/orchestration/tasks/{task['id']}")).json()
         assert detail["worktrees"][0]["status"] == "removed"
         event_types = {event["type"] for event in (await c.get(f"/api/orchestration/tasks/{task['id']}/events")).json()}
-        assert {"worktree_created", "worktree_updated", "worktree_checkpointed", "worktree_reviewed", "worktree_removed"} <= event_types
+        assert {"worktree_created", "worktree_updated", "worktree_checkpointed", "worktree_reviewed", "worktree_integration_proposed", "worktree_removed"} <= event_types
 
 
 @pytest.mark.asyncio
