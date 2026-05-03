@@ -21,6 +21,7 @@ from nidavellir.orchestration.worktrees import (
     default_worktree_path,
     git_status,
     remove_git_worktree,
+    review_worktree,
     repo_root,
     slugify,
 )
@@ -839,6 +840,46 @@ async def checkpoint_orchestration_worktree(worktree_id: str, body: WorktreeChec
         "message": "Orchestration worktree checkpoint committed",
     })
     return {"worktree": updated, "commit": result["commit"], "message": result["message"]}
+
+
+@router.get("/worktrees/{worktree_id}/review")
+def review_orchestration_worktree(worktree_id: str, request: Request) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    if worktree["status"] == "removed":
+        raise HTTPException(status_code=400, detail="worktree_removed")
+    base_ref = worktree.get("base_commit") or worktree.get("base_branch")
+    if not base_ref:
+        raise HTTPException(status_code=400, detail="worktree_base_ref_missing")
+    try:
+        review = review_worktree(
+            worktree_path=Path(worktree["worktree_path"]),
+            base_ref=base_ref,
+        )
+        updated = store.update_worktree(worktree_id, {
+            "head_commit": review["head_commit"],
+            "status": review["status"],
+            "dirty_count": review["dirty_count"],
+            "dirty_summary": review["dirty_summary"],
+        })
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    store.append_event(
+        task_id=worktree["task_id"],
+        node_id=worktree["node_id"],
+        type="worktree_reviewed",
+        payload={
+            "worktree_id": worktree_id,
+            "branch_name": worktree["branch_name"],
+            "commit_count": review["commit_count"],
+            "file_count": len(review["files"]),
+            "ready_to_merge": review["ready_to_merge"],
+        },
+    )
+    return {"worktree": updated or worktree, "review": review}
 
 
 @router.delete("/worktrees/{worktree_id}")

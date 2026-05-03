@@ -422,6 +422,23 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).includes('/api/orchestration/worktrees/worktree-1/review') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            worktree: { ...detailWithWorktree.worktrees[0], status: 'clean', dirty_count: 0 },
+            review: {
+              ready_to_merge: true,
+              commit_count: 1,
+              files: [{ path: 'README.md', status: 'M' }],
+              commits: [{ sha: 'def456', short_sha: 'def456', subject: 'Checkpoint node' }],
+              shortstat: '1 file changed, 1 insertion(+)',
+              status: 'clean',
+              dirty_count: 0,
+            },
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
         return Promise.resolve({ ok: true, json: async () => ({ ...detailWithWorktree.worktrees[0], status: 'removed' }) });
       }
@@ -445,7 +462,10 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('orchestration/build-orchestration/data-model')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     fireEvent.click(screen.getByRole('button', { name: 'Checkpoint' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+    expect(await screen.findByText('Ready to merge - 1 commits - 1 files')).toBeTruthy();
 
     await waitFor(() => {
       const refreshCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
@@ -457,8 +477,12 @@ describe('PlanScreen orchestration board', () => {
       const checkpointCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).includes('/api/orchestration/worktrees/worktree-1/checkpoint') && options?.method === 'POST'
       );
+      const reviewCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/worktrees/worktree-1/review') && !options
+      );
       expect(refreshCalls.length).toBe(1);
       expect(checkpointCalls.length).toBe(1);
+      expect(reviewCalls.length).toBe(1);
       expect(removeCalls.length).toBe(1);
     });
   });
