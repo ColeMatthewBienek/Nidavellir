@@ -146,6 +146,119 @@ class WorktreeIntegrationRequest(BaseModel):
     message: str | None = None
 
 
+class PlanInboxCreateRequest(BaseModel):
+    rawPlan: str = Field(min_length=1)
+    repoPath: str | None = None
+    baseBranch: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    automationMode: str = "supervised"
+    maxConcurrency: int = Field(default=1, ge=1)
+    priority: int | None = None
+    source: str = "plan_tab"
+    requestedBy: str | None = None
+    constraints: list[str] = Field(default_factory=list)
+    acceptanceCriteria: list[str] = Field(default_factory=list)
+    status: str = "new"
+
+
+class PlanInboxUpdateRequest(BaseModel):
+    rawPlan: str | None = None
+    repoPath: str | None = None
+    baseBranch: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    automationMode: str | None = None
+    maxConcurrency: int | None = Field(default=None, ge=1)
+    priority: int | None = None
+    source: str | None = None
+    requestedBy: str | None = None
+    constraints: list[str] | None = None
+    acceptanceCriteria: list[str] | None = None
+    status: str | None = None
+    lockedBy: str | None = None
+    lockedAt: str | None = None
+    finalSpecId: str | None = None
+
+
+class ClaimRequest(BaseModel):
+    lockedBy: str = Field(default="daemon", min_length=1)
+
+
+class PlannerDiscussionMessageCreateRequest(BaseModel):
+    role: str = "user"
+    kind: str = "message"
+    content: str = Field(min_length=1)
+    linkedArtifactId: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlannerPmTurnRequest(BaseModel):
+    content: str = Field(min_length=1)
+    provider: str | None = None
+    model: str | None = None
+
+
+class PlanningCheckpointUpdateRequest(BaseModel):
+    status: str | None = None
+    summary: str | None = None
+    sourceMessageIds: list[str] | None = None
+    blockingQuestion: str | None = None
+
+
+class AgenticSpecCreateRequest(BaseModel):
+    content: str = Field(min_length=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    status: str = "draft"
+
+
+class SpecReadinessReportCreateRequest(BaseModel):
+    verdict: str
+    report: dict[str, Any] = Field(default_factory=dict)
+    specId: str | None = None
+
+
+class DecompositionRunCreateRequest(BaseModel):
+    specId: str | None = None
+    decomposerOutput: dict[str, Any] = Field(default_factory=dict)
+    status: str = "created"
+
+
+class TaskInboxCreateRequest(BaseModel):
+    title: str = Field(min_length=1)
+    objective: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    dependencies: list[str] = Field(default_factory=list)
+    planInboxItemId: str | None = None
+    decompositionRunId: str | None = None
+    candidateTaskId: str | None = None
+    status: str = "new"
+    priority: int | None = None
+
+
+class TaskInboxUpdateRequest(BaseModel):
+    title: str | None = None
+    objective: str | None = None
+    payload: dict[str, Any] | None = None
+    dependencies: list[str] | None = None
+    status: str | None = None
+    priority: int | None = None
+    lockedBy: str | None = None
+    lockedAt: str | None = None
+    materializedTaskId: str | None = None
+    materializedNodeId: str | None = None
+
+
+class TaskShapeReportCreateRequest(BaseModel):
+    verdict: str
+    report: dict[str, Any] = Field(default_factory=dict)
+
+
+class EmReviewCreateRequest(BaseModel):
+    verdict: str
+    report: dict[str, Any] = Field(default_factory=dict)
+
+
 def _store(request: Request) -> OrchestrationStore:
     store = getattr(request.app.state, "orchestration_store", None)
     if store is None:
@@ -212,6 +325,35 @@ def _stringify_agent_event(item: object) -> str:
         content = event.get("content") or event.get("detail") or event.get("summary") or event.get("message")
         return f"[{event.get('type', 'activity')}] {content}\n" if content else ""
     return str(item)
+
+
+def _planner_pm_response(plan: dict, user_content: str) -> tuple[str, str]:
+    text = user_content.lower()
+    blockers: list[str] = []
+    if not plan.get("repo_path"):
+        blockers.append("target repo or new-project path")
+    if not plan.get("acceptance_criteria"):
+        blockers.append("testable acceptance criteria")
+    if "test" not in text and "verify" not in text and "verification" not in text:
+        blockers.append("verification strategy")
+
+    if any(token in text for token in ("approved", "agreed", "ship it", "that's it", "thats it")):
+        return (
+            "approval",
+            "Accepted. I have enough signal to draft the agentic-forward spec next. I will preserve the PM discussion decisions and make the decomposer consume the approved spec artifact, not the raw intake.",
+        )
+
+    if blockers:
+        return (
+            "question",
+            "As Nidavellir PM, I would not send this to decomposition yet. "
+            f"We still need: {', '.join(blockers)}. What should we lock for those before I draft the spec?",
+        )
+
+    return (
+        "question",
+        "As Nidavellir PM, the shape is getting close. Before I draft the spec, confirm the first autonomous execution slice and any explicit non-goals so the decomposer does not create broad theme tasks.",
+    )
 
 
 def _step_by_id(task: dict, step_id: str) -> dict | None:
@@ -300,6 +442,312 @@ def _prepare_orchestration_tool_requests(
     return prepared, invalid
 
 
+@router.get("/plan-inbox")
+def list_plan_inbox_items(request: Request, status: str | None = None) -> list[dict]:
+    try:
+        return _store(request).list_plan_inbox_items(status=status)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox")
+def create_plan_inbox_item(body: PlanInboxCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_plan_inbox_item(
+            raw_plan=body.rawPlan,
+            repo_path=body.repoPath,
+            base_branch=body.baseBranch,
+            provider=body.provider,
+            model=body.model,
+            automation_mode=body.automationMode,
+            max_concurrency=body.maxConcurrency,
+            priority=body.priority,
+            source=body.source,
+            requested_by=body.requestedBy,
+            constraints=body.constraints,
+            acceptance_criteria=body.acceptanceCriteria,
+            status=body.status,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.get("/plan-inbox/{item_id}")
+def get_plan_inbox_item(item_id: str, request: Request) -> dict:
+    item = _store(request).get_plan_inbox_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    return item
+
+
+@router.patch("/plan-inbox/{item_id}")
+def update_plan_inbox_item(item_id: str, body: PlanInboxUpdateRequest, request: Request) -> dict:
+    updates = {
+        "raw_plan": body.rawPlan,
+        "repo_path": body.repoPath,
+        "base_branch": body.baseBranch,
+        "provider": body.provider,
+        "model": body.model,
+        "automation_mode": body.automationMode,
+        "max_concurrency": body.maxConcurrency,
+        "priority": body.priority,
+        "source": body.source,
+        "requested_by": body.requestedBy,
+        "constraints": body.constraints,
+        "acceptance_criteria": body.acceptanceCriteria,
+        "status": body.status,
+        "locked_by": body.lockedBy,
+        "locked_at": body.lockedAt,
+        "final_spec_id": body.finalSpecId,
+    }
+    try:
+        item = _store(request).update_plan_inbox_item(item_id, {key: value for key, value in updates.items() if value is not None})
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if item is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    return item
+
+
+@router.post("/plan-inbox/{item_id}/claim")
+def claim_plan_inbox_item(item_id: str, body: ClaimRequest, request: Request) -> dict:
+    try:
+        item = _store(request).claim_plan_inbox_item(item_id, locked_by=body.lockedBy)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if item is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    return item
+
+
+@router.get("/plan-inbox/{item_id}/discussion")
+def list_planner_discussion_messages(item_id: str, request: Request) -> list[dict]:
+    try:
+        return _store(request).list_planner_discussion_messages(item_id)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox/{item_id}/discussion")
+def create_planner_discussion_message(item_id: str, body: PlannerDiscussionMessageCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_planner_discussion_message(
+            plan_inbox_item_id=item_id,
+            role=body.role,
+            kind=body.kind,
+            content=body.content,
+            linked_artifact_id=body.linkedArtifactId,
+            metadata=body.metadata,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox/{item_id}/pm-turn")
+def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
+    store = _store(request)
+    plan = store.get_plan_inbox_item(item_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    try:
+        user_message = store.create_planner_discussion_message(
+            plan_inbox_item_id=item_id,
+            role="user",
+            kind="message",
+            content=body.content,
+            metadata={"source": "pm_turn", "provider": body.provider, "model": body.model},
+        )
+        pm_kind, pm_content = _planner_pm_response(plan, body.content)
+        pm_message = store.create_planner_discussion_message(
+            plan_inbox_item_id=item_id,
+            role="planner",
+            kind=pm_kind,
+            content=pm_content,
+            metadata={"source": "nidavellir_pm", "provider": body.provider or plan.get("provider"), "model": body.model or plan.get("model")},
+        )
+        return {
+            "messages": [user_message, pm_message],
+            "plan": store.get_plan_inbox_item(item_id),
+        }
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.get("/plan-inbox/{item_id}/checkpoints")
+def list_planning_checkpoints(item_id: str, request: Request) -> list[dict]:
+    try:
+        return _store(request).list_planning_checkpoints(item_id)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.patch("/plan-inbox/{item_id}/checkpoints/{checkpoint_key}")
+def update_planning_checkpoint(item_id: str, checkpoint_key: str, body: PlanningCheckpointUpdateRequest, request: Request) -> dict:
+    try:
+        checkpoint = _store(request).update_planning_checkpoint(
+            plan_inbox_item_id=item_id,
+            key=checkpoint_key,
+            status=body.status,
+            summary=body.summary,
+            source_message_ids=body.sourceMessageIds,
+            blocking_question=body.blockingQuestion,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail="planning_checkpoint_not_found")
+    return checkpoint
+
+
+@router.post("/plan-inbox/{item_id}/specs")
+def create_agentic_spec(item_id: str, body: AgenticSpecCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_agentic_spec(
+            plan_inbox_item_id=item_id,
+            content=body.content,
+            metadata=body.metadata,
+            status=body.status,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox/{item_id}/readiness-reports")
+def create_spec_readiness_report(item_id: str, body: SpecReadinessReportCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_spec_readiness_report(
+            plan_inbox_item_id=item_id,
+            spec_id=body.specId,
+            verdict=body.verdict,
+            report=body.report,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox/{item_id}/decomposition-runs")
+def create_decomposition_run(item_id: str, body: DecompositionRunCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_decomposition_run(
+            plan_inbox_item_id=item_id,
+            spec_id=body.specId,
+            decomposer_output=body.decomposerOutput,
+            status=body.status,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.get("/task-inbox")
+def list_task_inbox_items(request: Request, status: str | None = None) -> list[dict]:
+    try:
+        return _store(request).list_task_inbox_items(status=status)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/task-inbox")
+def create_task_inbox_item(body: TaskInboxCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_task_inbox_item(
+            title=body.title,
+            objective=body.objective,
+            payload=body.payload,
+            dependencies=body.dependencies,
+            plan_inbox_item_id=body.planInboxItemId,
+            decomposition_run_id=body.decompositionRunId,
+            candidate_task_id=body.candidateTaskId,
+            status=body.status,
+            priority=body.priority,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.get("/task-inbox/{item_id}")
+def get_task_inbox_item(item_id: str, request: Request) -> dict:
+    item = _store(request).get_task_inbox_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="task_inbox_item_not_found")
+    return item
+
+
+@router.patch("/task-inbox/{item_id}")
+def update_task_inbox_item(item_id: str, body: TaskInboxUpdateRequest, request: Request) -> dict:
+    updates = {
+        "title": body.title,
+        "objective": body.objective,
+        "payload": body.payload,
+        "dependencies": body.dependencies,
+        "status": body.status,
+        "priority": body.priority,
+        "locked_by": body.lockedBy,
+        "locked_at": body.lockedAt,
+        "materialized_task_id": body.materializedTaskId,
+        "materialized_node_id": body.materializedNodeId,
+    }
+    try:
+        item = _store(request).update_task_inbox_item(item_id, {key: value for key, value in updates.items() if value is not None})
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if item is None:
+        raise HTTPException(status_code=404, detail="task_inbox_item_not_found")
+    return item
+
+
+@router.post("/task-inbox/{item_id}/claim")
+def claim_task_inbox_item(item_id: str, body: ClaimRequest, request: Request) -> dict:
+    try:
+        item = _store(request).claim_task_inbox_item(item_id, locked_by=body.lockedBy)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if item is None:
+        raise HTTPException(status_code=404, detail="task_inbox_item_not_found")
+    return item
+
+
+@router.post("/task-inbox/{item_id}/shape-reports")
+def create_task_shape_report(item_id: str, body: TaskShapeReportCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_task_shape_report(
+            task_inbox_item_id=item_id,
+            verdict=body.verdict,
+            report=body.report,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/task-inbox/{item_id}/em-reviews")
+def create_em_review(item_id: str, body: EmReviewCreateRequest, request: Request) -> dict:
+    try:
+        return _store(request).create_em_review(
+            task_inbox_item_id=item_id,
+            verdict=body.verdict,
+            report=body.report,
+        )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
 @router.get("/tasks")
 def list_tasks(request: Request) -> list[dict]:
     return _store(request).list_tasks()
@@ -352,6 +800,14 @@ def update_task(task_id: str, body: TaskUpdateRequest, request: Request) -> dict
     except Exception as err:
         _handle_store_error(err)
         raise
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    return task
+
+
+@router.post("/tasks/{task_id}/archive")
+def archive_task(task_id: str, request: Request) -> dict:
+    task = _store(request).archive_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task_not_found")
     return task

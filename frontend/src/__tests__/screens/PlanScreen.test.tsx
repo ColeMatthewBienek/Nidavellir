@@ -17,6 +17,15 @@ const task = {
   updated_at: '2026-05-02T00:00:00Z',
 };
 
+const cancelledTask = {
+  ...task,
+  id: 'task-cancelled',
+  title: 'Cancelled clutter',
+  description: 'Hide this from the board',
+  status: 'cancelled',
+  updated_at: '2026-05-02T00:01:00Z',
+};
+
 const detail = {
   ...task,
   nodes: [
@@ -114,12 +123,214 @@ const detailWithAgentStep = {
   }],
 };
 
+const planningCheckpoints = [
+  {
+    id: 'checkpoint-1',
+    plan_inbox_item_id: 'plan-1',
+    key: 'intake',
+    title: 'Intake captured',
+    status: 'agreed',
+    summary: 'Automate orchestration',
+    source_message_ids: [],
+    blocking_question: null,
+    created_at: '2026-05-03T00:00:00Z',
+    updated_at: '2026-05-03T00:00:00Z',
+  },
+  {
+    id: 'checkpoint-2',
+    plan_inbox_item_id: 'plan-1',
+    key: 'repo_target',
+    title: 'Repo target clarified',
+    status: 'missing',
+    summary: '',
+    source_message_ids: [],
+    blocking_question: null,
+    created_at: '2026-05-03T00:00:01Z',
+    updated_at: '2026-05-03T00:00:01Z',
+  },
+  {
+    id: 'checkpoint-3',
+    plan_inbox_item_id: 'plan-1',
+    key: 'verification',
+    title: 'Verification strategy agreed',
+    status: 'missing',
+    summary: '',
+    source_message_ids: [],
+    blocking_question: null,
+    created_at: '2026-05-03T00:00:02Z',
+    updated_at: '2026-05-03T00:00:02Z',
+  },
+];
+
 describe('PlanScreen orchestration board', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    delete window.nidavellir;
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).endsWith('/api/agents/models')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            models: [
+              {
+                id: 'claude:claude-sonnet-4-6',
+                provider_id: 'claude',
+                model_id: 'claude-sonnet-4-6',
+                display_name: 'Claude Sonnet 4.6',
+                description: 'Planner model',
+                cost_tier: 'subscription',
+                available: true,
+              },
+              {
+                id: 'codex:gpt-5.5',
+                provider_id: 'codex',
+                model_id: 'gpt-5.5',
+                display_name: 'GPT-5.5',
+                description: 'Codex model',
+                cost_tier: 'subscription',
+                available: true,
+              },
+            ],
+          }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox') && !options) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).endsWith('/api/orchestration/task-inbox') && !options) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'plan-1',
+            raw_plan: 'Automate orchestration',
+            repo_path: '/repo',
+            base_branch: 'main',
+            provider: null,
+            model: null,
+            automation_mode: 'supervised',
+            max_concurrency: 1,
+            priority: null,
+            source: 'plan_tab',
+            constraints: [],
+            acceptance_criteria: ['Vague specs are blocked'],
+            status: 'new',
+            locked_by: null,
+            locked_at: null,
+            final_spec_id: null,
+            created_at: '2026-05-03T00:00:00Z',
+            updated_at: '2026-05-03T00:00:00Z',
+            planning_checkpoints: planningCheckpoints,
+          }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'plan-1',
+            raw_plan: 'Automate orchestration',
+            repo_path: '/repo',
+            base_branch: 'main',
+            provider: null,
+            model: null,
+            automation_mode: 'supervised',
+            max_concurrency: 1,
+            priority: null,
+            source: 'plan_tab',
+            constraints: [],
+            acceptance_criteria: ['Vague specs are blocked'],
+            status: 'new',
+            locked_by: null,
+            locked_at: null,
+            final_spec_id: null,
+            created_at: '2026-05-03T00:00:00Z',
+            updated_at: '2026-05-03T00:00:00Z',
+            discussion_messages: [{
+              id: 'discussion-1',
+              plan_inbox_item_id: 'plan-1',
+              role: 'user',
+              kind: 'message',
+              content: 'Automate orchestration',
+              linked_artifact_id: null,
+              metadata: { source: 'raw_plan' },
+              created_at: '2026-05-03T00:00:00Z',
+            }],
+            planning_checkpoints: planningCheckpoints,
+          }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn') && options?.method === 'POST') {
+        const body = JSON.parse(String(options.body));
+        return Promise.resolve({
+          ok: true,
+          json: async () => {
+            const messages = [
+              {
+                id: 'discussion-2',
+                plan_inbox_item_id: 'plan-1',
+                role: 'user',
+                kind: 'message',
+                content: body.content,
+                linked_artifact_id: null,
+                metadata: {},
+                created_at: '2026-05-03T00:01:00Z',
+              },
+              {
+                id: 'discussion-3',
+                plan_inbox_item_id: 'plan-1',
+                role: 'planner',
+                kind: 'question',
+                content: 'As Nidavellir PM, what verification should we lock before I draft the spec?',
+                linked_artifact_id: null,
+                metadata: {},
+                created_at: '2026-05-03T00:02:00Z',
+              },
+            ];
+            return {
+              messages,
+              plan: {
+                id: 'plan-1',
+                raw_plan: 'Automate orchestration',
+                repo_path: '/repo',
+                base_branch: 'main',
+                provider: null,
+                model: null,
+                automation_mode: 'supervised',
+                max_concurrency: 1,
+                priority: null,
+                source: 'plan_tab',
+                constraints: [],
+                acceptance_criteria: ['Vague specs are blocked'],
+                status: 'planning',
+                locked_by: null,
+                locked_at: null,
+                final_spec_id: null,
+                created_at: '2026-05-03T00:00:00Z',
+                updated_at: '2026-05-03T00:02:00Z',
+                discussion_messages: [
+                  {
+                    id: 'discussion-1',
+                    plan_inbox_item_id: 'plan-1',
+                    role: 'user',
+                    kind: 'message',
+                    content: 'Automate orchestration',
+                    linked_artifact_id: null,
+                    metadata: { source: 'raw_plan' },
+                    created_at: '2026-05-03T00:00:00Z',
+                  },
+                  ...messages,
+                ],
+                planning_checkpoints: planningCheckpoints,
+              },
+            };
+          },
+        });
+      }
       if (String(url).endsWith('/api/orchestration/tasks') && !options) {
-        return Promise.resolve({ ok: true, json: async () => [task] });
+        return Promise.resolve({ ok: true, json: async () => [task, cancelledTask] });
       }
       if (String(url).endsWith('/api/orchestration/tasks') && options?.method === 'POST') {
         return Promise.resolve({
@@ -216,6 +427,12 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).includes('/api/orchestration/tasks/task-cancelled/archive') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ ...cancelledTask, archived: 1, deleted_at: '2026-05-03T00:00:00Z' }),
+        });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detail });
       }
@@ -261,6 +478,88 @@ describe('PlanScreen orchestration board', () => {
     });
   });
 
+  it('submits raw plans into the visible Plan Inbox', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Automate orchestration' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Plan repo path' }), { target: { value: '/repo' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Plan acceptance criteria' }), { target: { value: 'Vague specs are blocked' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.rawPlan).toBe('Automate orchestration');
+      expect(body.repoPath).toBe('/repo');
+      expect(body.provider).toBe('claude');
+      expect(body.model).toBe('claude-sonnet-4-6');
+      expect(body.acceptanceCriteria).toEqual(['Vague specs are blocked']);
+    });
+  });
+
+  it('uses the desktop directory picker for Plan Inbox repo paths', async () => {
+    const pickDirectory = vi.fn().mockResolvedValue('/picked/repo');
+    window.nidavellir = {
+      pickWorkingSetFiles: vi.fn().mockResolvedValue([]),
+      pickDirectory,
+    };
+
+    render(<PlanScreen />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Browse' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Plan repo path' })).toHaveValue('/picked/repo'));
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Autonomous agent workflow' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.repoPath).toBe('/picked/repo');
+    });
+    expect(pickDirectory).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports a back-and-forth with Nidavellir PM for the selected Plan Inbox item', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Automate orchestration' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('PM Planning Session')).toBeTruthy();
+    expect(await screen.findByText('Nidavellir PM')).toBeTruthy();
+    expect(screen.getByText('Checkpoints')).toBeTruthy();
+    expect((await screen.findAllByText('Automate orchestration')).length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), {
+      target: { value: 'Decomposer should consume only the approved spec.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message to Nidavellir PM' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.content).toBe('Decomposer should consume only the approved spec.');
+      expect(body.provider).toBe('claude');
+      expect(body.model).toBe('claude-sonnet-4-6');
+    });
+    expect(await screen.findByText('As Nidavellir PM, what verification should we lock before I draft the spec?')).toBeTruthy();
+
+    expect(screen.queryByLabelText('Checkpoint status Repo target clarified')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'View Spec' }));
+    expect(await screen.findByText('Spec Snapshot')).toBeTruthy();
+    expect(screen.getByText(/# Working Spec Snapshot/)).toBeTruthy();
+  });
+
   it('moves tasks and completes manual steps through the orchestration API', async () => {
     render(<PlanScreen />);
 
@@ -277,6 +576,21 @@ describe('PlanScreen orchestration board', () => {
       );
       expect(moveCalls.length).toBe(1);
       expect(completeCalls.length).toBe(1);
+    });
+  });
+
+  it('archives cancelled tasks from the board', async () => {
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Cancelled clutter')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Cancelled clutter' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/tasks/task-cancelled/archive') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      expect(screen.queryByText('Cancelled clutter')).toBeNull();
     });
   });
 
