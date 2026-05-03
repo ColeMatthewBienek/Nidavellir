@@ -225,6 +225,16 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         assert preflight["commits_to_merge"] == 1
         assert preflight["conflicts"] == []
 
+        staged = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/integration-worktree")
+        assert staged.status_code == 200
+        integration = staged.json()["integration"]
+        assert integration["merged"] is True
+        assert integration["status"] == "clean"
+        assert integration["branch_name"].startswith("integration/")
+        assert Path(integration["worktree_path"]).exists()
+        staged_log = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=integration["worktree_path"], check=True, capture_output=True, text=True)
+        assert "Integrate orchestration/worktree-test/node-a" in staged_log.stdout.strip()
+
         (worktree_path / "README.md").write_text("# changed\n", encoding="utf-8")
         clean = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/refresh")
         assert clean.status_code == 200
@@ -238,7 +248,7 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         detail = (await c.get(f"/api/orchestration/tasks/{task['id']}")).json()
         assert detail["worktrees"][0]["status"] == "removed"
         event_types = {event["type"] for event in (await c.get(f"/api/orchestration/tasks/{task['id']}/events")).json()}
-        assert {"worktree_created", "worktree_updated", "worktree_checkpointed", "worktree_reviewed", "worktree_integration_proposed", "worktree_integration_preflighted", "worktree_removed"} <= event_types
+        assert {"worktree_created", "worktree_updated", "worktree_checkpointed", "worktree_reviewed", "worktree_integration_proposed", "worktree_integration_preflighted", "worktree_integration_staged", "worktree_removed"} <= event_types
 
 
 @pytest.mark.asyncio
