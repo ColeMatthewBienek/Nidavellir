@@ -149,7 +149,7 @@ interface ToolRequestRecord {
   provider: string;
   tool_name: string;
   action: string;
-  status: 'pending' | 'approved' | 'denied' | 'observed' | 'failed';
+  status: 'pending' | 'approved' | 'executed' | 'denied' | 'observed' | 'failed';
   path?: string | null;
   command?: string | null;
   workspace?: string | null;
@@ -159,6 +159,7 @@ interface ToolRequestRecord {
   reason?: string | null;
   created_at: string;
   resolved_at?: string | null;
+  continued_at?: string | null;
 }
 
 interface CommentDraft {
@@ -2235,6 +2236,28 @@ function ApprovalsTab() {
       .catch((err) => setError(err instanceof Error ? err.message : `tool_request_${action}_failed`));
   };
 
+  const continueAgent = (item: ToolRequestRecord) => {
+    fetch(`http://localhost:7430/api/tool-requests/${item.id}/continuation`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`tool_request_continuation_${response.status}`);
+        return response.json() as Promise<{ content: string }>;
+      })
+      .then(({ content }) => {
+        window.dispatchEvent(new CustomEvent('nid:tool-result-continue', { detail: { content } }));
+        return fetch(`http://localhost:7430/api/tool-requests/${item.id}/continued`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ markContinued: true }),
+        });
+      })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const updated = await response.json() as ToolRequestRecord;
+        setItems((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'tool_request_continue_failed'));
+  };
+
   return (
     <div style={{
       flex: 1,
@@ -2286,7 +2309,7 @@ function ApprovalsTab() {
                   <div style={{ color: 'var(--t1)', fontSize: 11 }}>{item.provider} · {item.action}</div>
                 </div>
                 <span style={{
-                  color: item.status === 'pending' ? '#d29922' : item.status === 'approved' ? 'var(--green)' : item.status === 'denied' ? 'var(--red)' : 'var(--t1)',
+                  color: item.status === 'pending' ? '#d29922' : item.status === 'executed' || item.status === 'approved' ? 'var(--green)' : item.status === 'denied' || item.status === 'failed' ? 'var(--red)' : 'var(--t1)',
                   fontSize: 10,
                   textTransform: 'uppercase',
                   fontWeight: 750,
@@ -2350,6 +2373,23 @@ function ApprovalsTab() {
                     fontWeight: 700,
                   }}>Approve</button>
                 </div>
+              )}
+              {['executed', 'denied', 'failed'].includes(item.status) && !item.continued_at && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button type="button" onClick={() => continueAgent(item)} style={{
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: '#1f6feb26',
+                    color: 'var(--t0)',
+                    cursor: 'pointer',
+                    padding: '5px 8px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                  }}>Continue agent</button>
+                </div>
+              )}
+              {item.continued_at && (
+                <div style={{ color: 'var(--t1)', fontSize: 10 }}>Continuation sent</div>
               )}
             </div>
           ))}

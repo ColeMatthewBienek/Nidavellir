@@ -64,9 +64,18 @@ def test_provider_policy_api_updates_provider_payload(tmp_path, monkeypatch):
         approved = client.post(f"/api/tool-requests/{request_id}/approve", json={"reason": "test approval"})
         assert approved.status_code == 200
         body = approved.json()
-        assert body["status"] == "approved"
+        assert body["status"] == "executed"
         assert body["execution"]["type"] == "file_write"
         assert target.read_text(encoding="utf-8") == "TOKEN=redacted\n"
+
+        continuation = client.get(f"/api/tool-requests/{request_id}/continuation")
+        assert continuation.status_code == 200
+        assert "Nidavellir-mediated tool result" in continuation.json()["content"]
+        assert request_id in continuation.json()["content"]
+
+        continued = client.post(f"/api/tool-requests/{request_id}/continued", json={"markContinued": True})
+        assert continued.status_code == 200
+        assert continued.json()["continued_at"] is not None
 
 
 def test_tool_request_store_round_trips_pending_request(tmp_path):

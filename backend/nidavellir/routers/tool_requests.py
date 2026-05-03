@@ -32,6 +32,10 @@ class ToolRequestResolve(BaseModel):
     reason: str | None = None
 
 
+class ToolRequestContinuation(BaseModel):
+    markContinued: bool = True
+
+
 def _store(request: Request) -> ToolRequestStore:
     store = getattr(request.app.state, "tool_request_store", None)
     if store is None:
@@ -166,9 +170,67 @@ async def _execute_tool_request(item: dict, request: Request) -> dict:
     raise HTTPException(status_code=400, detail="tool_request_action_not_executable")
 
 
+def _stringify_for_continuation(value: object, *, max_chars: int = 24_000) -> str:
+    import json
+
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... [truncated {len(text) - max_chars} chars]"
+
+
+def _continuation_content(item: dict) -> str:
+    header = (
+        "Continue the prior task using this Nidavellir-mediated tool result. "
+        "Treat this as the authoritative result of the requested tool call."
+    )
+    payload = {
+        "tool_request_id": item.get("id"),
+        "provider": item.get("provider"),
+        "tool_name": item.get("tool_name"),
+        "action": item.get("action"),
+        "status": item.get("status"),
+        "reason": item.get("reason"),
+        "path": item.get("path"),
+        "command": item.get("command"),
+        "workspace": item.get("workspace"),
+        "execution": item.get("execution"),
+    }
+    return f"{header}\n\n```json\n{_stringify_for_continuation(payload)}\n```"
+
+
 @router.get("")
 def list_tool_requests(request: Request, conversationId: str | None = None, limit: int = 100) -> list[dict]:
     return _store(request).list(conversation_id=conversationId, limit=limit)
+
+
+@router.get("/{request_id}/continuation")
+def get_tool_request_continuation(request_id: str, request: Request) -> dict:
+    item = _store(request).get(request_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="tool_request_not_found")
+    if item["status"] not in {"executed", "denied", "failed"}:
+        raise HTTPException(status_code=400, detail="tool_request_not_resolved")
+    return {
+        "tool_request_id": request_id,
+        "conversation_id": item.get("conversation_id"),
+        "status": item.get("status"),
+        "content": _continuation_content(item),
+        "continued_at": item.get("continued_at"),
+    }
+
+
+@router.post("/{request_id}/continued")
+def mark_tool_request_continued(request_id: str, body: ToolRequestContinuation, request: Request) -> dict:
+    item = _store(request).get(request_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="tool_request_not_found")
+    if not body.markContinued:
+        return item
+    return _store(request).mark_continued(request_id) or item
 
 
 @router.post("")
@@ -252,7 +314,7 @@ async def approve_tool_request(request_id: str, body: ToolRequestResolve, reques
         raise
     resolved = _store(request).resolve(
         request_id,
-        "approved",
+        "executed",
         body.reason or "approved by user",
         execution,
     )
