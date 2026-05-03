@@ -365,6 +365,44 @@ async def test_async_extraction_failure_logs_diagnostics(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_async_extraction_parse_failure_is_warning_without_traceback(tmp_path, monkeypatch, caplog):
+    from nidavellir.routers import ws as ws_router
+
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(str(db_path))
+
+    cid = "conv"
+    store.create_conversation(cid)
+    store.append_message(cid, "u", "user", "remember the parser failure")
+    store.append_message(cid, "a", "agent", "ok")
+
+    async def invalid_json(*args, **kwargs):
+        raise ws_router.MemoryExtractionError(
+            "memory extraction returned invalid JSON",
+            {"stage": "parse_extraction_output", "stdout_sample": "not json"},
+        )
+
+    monkeypatch.setattr(ws_router, "extract_memories", invalid_json)
+
+    with caplog.at_level("WARNING"):
+        await ws_router._extract_and_store(
+            store=store,
+            conversation_id=cid,
+            workflow="chat",
+            model_id="claude-haiku-4-5",
+        )
+
+    event = store.get_events(event_type="extraction_failed")[0]
+    payload = json.loads(event["payload_json"])
+
+    assert payload["error"] == "memory extraction returned invalid JSON"
+    assert payload["stage"] == "parse_extraction_output"
+    assert payload["stdout_sample"] == "not json"
+    assert "traceback" not in payload
+    assert any(record.levelname == "WARNING" and record.message == "memory_extraction_failed" for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_extract_memories_reports_subprocess_failure(monkeypatch):
     from nidavellir.routers import ws as ws_router
 
@@ -387,3 +425,10 @@ async def test_extract_memories_reports_subprocess_failure(monkeypatch):
     assert err.value.payload["stderr_sample"] == "missing api key"
     assert err.value.payload["stdout_sample"] == "not json"
     assert err.value.payload["model"] == "claude-haiku-4-5"
+
+
+def test_memory_extraction_output_normalizer_accepts_wrapped_json():
+    from nidavellir.routers import ws as ws_router
+
+    assert ws_router._normalize_memory_extraction_output("```json\n[]\n```") == "[]"
+    assert ws_router._normalize_memory_extraction_output("Here are the memories:\n[]") == "[]"
