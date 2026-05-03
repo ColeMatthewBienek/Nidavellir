@@ -97,6 +97,16 @@ interface OrchestrationWorktree {
   dirty_summary: Array<{ path: string; status: string }>;
 }
 
+interface WorktreeReview {
+  ready_to_merge: boolean;
+  commit_count: number;
+  files: Array<{ path: string; status: string }>;
+  commits: Array<{ sha: string; short_sha: string; subject: string }>;
+  shortstat: string;
+  status: string;
+  dirty_count: number;
+}
+
 interface OrchestrationReadiness {
   runnable: Array<{ node_id: string; step_id: string; step_type: string }>;
   blocked: Array<{ node_id: string; blocked_by: string[] }>;
@@ -324,11 +334,13 @@ function TaskDetail({
   onCreateWorktree,
   onRefreshWorktree,
   onCheckpointWorktree,
+  onReviewWorktree,
   onRemoveWorktree,
   onAddStep,
   onCompleteStep,
   onRunCommandStep,
   onRunAgentStep,
+  worktreeReviews,
 }: {
   task: OrchestrationTaskDetail;
   events: OrchestrationEvent[];
@@ -342,11 +354,13 @@ function TaskDetail({
   onCreateWorktree: (nodeId?: string | null) => void;
   onRefreshWorktree: (worktreeId: string) => void;
   onCheckpointWorktree: (worktreeId: string) => void;
+  onReviewWorktree: (worktreeId: string) => void;
   onRemoveWorktree: (worktreeId: string) => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
   onRunCommandStep: (stepId: string) => void;
   onRunAgentStep: (stepId: string) => void;
+  worktreeReviews: Record<string, WorktreeReview>;
 }) {
   const selectedNode = task.nodes.find((node) => node.id === selectedNodeId) ?? task.nodes[0] ?? null;
   const selectedSteps = selectedNode
@@ -395,7 +409,7 @@ function TaskDetail({
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {taskWorktree ? (
-              <WorktreeCard worktree={taskWorktree} label="Task branch" onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onRemove={onRemoveWorktree} />
+              <WorktreeCard worktree={taskWorktree} label="Task branch" review={worktreeReviews[taskWorktree.id]} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onReview={onReviewWorktree} onRemove={onRemoveWorktree} />
             ) : (
               <div style={{ border: '1px dashed var(--bd)', borderRadius: 7, padding: 10, color: 'var(--t1)', fontSize: 12 }}>
                 No task worktree yet. Node worktrees can still be created directly from the base repo.
@@ -403,7 +417,7 @@ function TaskDetail({
             )}
             {selectedNode && (
               selectedNodeWorktree ? (
-                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onRemove={onRemoveWorktree} />
+                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} review={worktreeReviews[selectedNodeWorktree.id]} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onReview={onReviewWorktree} onRemove={onRemoveWorktree} />
               ) : (
                 <button
                   type="button"
@@ -631,14 +645,18 @@ function SectionTitle({ children }: { children: string }) {
 function WorktreeCard({
   worktree,
   label,
+  review,
   onRefresh,
   onCheckpoint,
+  onReview,
   onRemove,
 }: {
   worktree: OrchestrationWorktree;
   label: string;
+  review?: WorktreeReview;
   onRefresh: (worktreeId: string) => void;
   onCheckpoint: (worktreeId: string) => void;
+  onReview: (worktreeId: string) => void;
   onRemove: (worktreeId: string) => void;
 }) {
   const canCheckpoint = worktree.status !== 'removed' && worktree.dirty_count > 0;
@@ -677,6 +695,13 @@ function WorktreeCard({
           </button>
           <button
             type="button"
+            onClick={() => onReview(worktree.id)}
+            style={{ border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t1)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
+          >
+            Review
+          </button>
+          <button
+            type="button"
             onClick={() => onRemove(worktree.id)}
             style={{ border: '1px solid var(--bd)', borderRadius: 5, background: '#f8514918', color: 'var(--red)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
           >
@@ -684,6 +709,21 @@ function WorktreeCard({
           </button>
         </div>
       </div>
+      {review && (
+        <div style={{ borderTop: '1px solid var(--bd)', paddingTop: 7, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ color: review.ready_to_merge ? 'var(--grn)' : 'var(--yel)', fontSize: 11, fontWeight: 700 }}>
+            {review.ready_to_merge ? 'Ready to merge' : 'Needs attention'} - {review.commit_count} commits - {review.files.length} files
+          </div>
+          {review.shortstat && (
+            <div style={{ color: 'var(--t1)', fontSize: 11 }}>{review.shortstat}</div>
+          )}
+          {review.commits[0] && (
+            <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {review.commits[0].short_sha} {review.commits[0].subject}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1018,6 +1058,7 @@ export function PlanScreen() {
   const [editingNode, setEditingNode] = useState<OrchestrationNode | null | undefined>(undefined);
   const [addingStepNodeId, setAddingStepNodeId] = useState<string | null>(null);
   const [creatingWorktreeNodeId, setCreatingWorktreeNodeId] = useState<string | null | undefined>(undefined);
+  const [worktreeReviews, setWorktreeReviews] = useState<Record<string, WorktreeReview>>({});
 
   const grouped = useMemo(() => {
     const groups: Record<string, OrchestrationTaskSummary[]> = {};
@@ -1361,6 +1402,21 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_checkpoint_failed'));
   };
 
+  const reviewWorktree = (worktreeId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/worktrees/${worktreeId}/review`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_worktree_review_${response.status}`);
+        return response.json() as Promise<{ worktree: OrchestrationWorktree; review: WorktreeReview }>;
+      })
+      .then((result) => {
+        setWorktreeReviews((current) => ({ ...current, [worktreeId]: result.review }));
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_review_failed'));
+  };
+
   const removeWorktree = (worktreeId: string) => {
     if (!selectedTask) return;
     fetch(`${API}/api/orchestration/worktrees/${worktreeId}`, { method: 'DELETE' })
@@ -1482,11 +1538,13 @@ export function PlanScreen() {
           onCreateWorktree={(nodeId) => setCreatingWorktreeNodeId(nodeId ?? null)}
           onRefreshWorktree={refreshWorktree}
           onCheckpointWorktree={checkpointWorktree}
+          onReviewWorktree={reviewWorktree}
           onRemoveWorktree={removeWorktree}
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
           onRunCommandStep={runCommandStep}
           onRunAgentStep={runAgentStep}
+          worktreeReviews={worktreeReviews}
         />
       )}
 

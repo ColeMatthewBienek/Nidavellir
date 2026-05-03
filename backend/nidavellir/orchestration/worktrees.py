@@ -108,6 +108,46 @@ def checkpoint_worktree(*, worktree_path: Path, message: str) -> dict:
     }
 
 
+def review_worktree(*, worktree_path: Path, base_ref: str) -> dict:
+    worktree_path = worktree_path.expanduser().resolve()
+    if not worktree_path.exists() or not worktree_path.is_dir():
+        raise WorktreeError("worktree_missing")
+
+    status = git_status(worktree_path)
+    head = status["head_commit"]
+    commit_count = int(_run_git(["rev-list", "--count", f"{base_ref}..HEAD"], cwd=worktree_path).stdout.strip() or "0")
+    log = _run_git(["log", "--pretty=format:%H%x00%s", f"{base_ref}..HEAD"], cwd=worktree_path).stdout
+    commits = []
+    for line in log.splitlines():
+        if not line.strip():
+            continue
+        sha, _, subject = line.partition("\x00")
+        commits.append({"sha": sha, "short_sha": sha[:7], "subject": subject})
+
+    name_status = _run_git(["diff", "--name-status", f"{base_ref}..HEAD"], cwd=worktree_path).stdout
+    files = []
+    for line in name_status.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            files.append({"status": parts[0], "path": parts[-1]})
+
+    stat = _run_git(["diff", "--stat", f"{base_ref}..HEAD"], cwd=worktree_path).stdout
+    shortstat = _run_git(["diff", "--shortstat", f"{base_ref}..HEAD"], cwd=worktree_path).stdout.strip()
+    return {
+        "base_ref": base_ref,
+        "head_commit": head,
+        "status": status["status"],
+        "dirty_count": status["dirty_count"],
+        "dirty_summary": status["dirty_summary"],
+        "commit_count": commit_count,
+        "commits": commits[:50],
+        "files": files[:200],
+        "stat": stat.strip(),
+        "shortstat": shortstat,
+        "ready_to_merge": status["dirty_count"] == 0 and commit_count > 0,
+    }
+
+
 def _parse_status_line(line: str) -> dict[str, str] | None:
     if len(line) < 4:
         return None
