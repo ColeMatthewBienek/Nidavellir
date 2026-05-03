@@ -192,6 +192,17 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).includes('/api/orchestration/worktrees/worktree-1') && options?.method === 'DELETE') {
         return Promise.resolve({ ok: true, json: async () => ({ id: 'worktree-1', status: 'removed' }) });
       }
+      if (String(url).includes('/api/orchestration/tasks/task-1/run-ready') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: { ...detailWithWorktree, steps: [{ ...detailWithWorktree.steps[0], status: 'complete' }] },
+            executed: 1,
+            results: [{ step_id: 'step-1', step_type: 'command', status: 'complete' }],
+            pending_manual: [],
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detail });
       }
@@ -495,6 +506,20 @@ describe('PlanScreen orchestration board', () => {
     await waitFor(() => {
       const runCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).includes('/api/orchestration/steps/step-1/run-agent') && options?.method === 'POST'
+      );
+      expect(runCalls.length).toBe(1);
+    });
+  });
+
+  it('runs ready task steps from the Plan toolbar', async () => {
+    render(<PlanScreen />);
+
+    expect((await screen.findAllByText('Build orchestration')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Run Ready' }));
+
+    await waitFor(() => {
+      const runCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/tasks/task-1/run-ready') && options?.method === 'POST'
       );
       expect(runCalls.length).toBe(1);
     });

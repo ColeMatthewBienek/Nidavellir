@@ -113,6 +113,14 @@ class StepRunAgentRequest(BaseModel):
     conversationId: str | None = None
 
 
+class TaskRunReadyRequest(BaseModel):
+    conversationId: str | None = None
+    includeInChat: bool = False
+    timeoutSeconds: int = Field(default=120, ge=1, le=600)
+    maxSteps: int = Field(default=10, ge=1, le=50)
+    permissionOverride: str | None = None
+
+
 class WorktreeCreateRequest(BaseModel):
     nodeId: str | None = None
     repoPath: str | None = None
@@ -187,6 +195,10 @@ def _stringify_agent_event(item: object) -> str:
         content = event.get("content") or event.get("detail") or event.get("summary") or event.get("message")
         return f"[{event.get('type', 'activity')}] {content}\n" if content else ""
     return str(item)
+
+
+def _step_by_id(task: dict, step_id: str) -> dict | None:
+    return next((step for step in task.get("steps", []) if step.get("id") == step_id), None)
 
 
 @router.get("/tasks")
@@ -620,6 +632,90 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
                 await agent.kill()
             except Exception:
                 pass
+
+
+@router.post("/tasks/{task_id}/run-ready")
+async def run_ready_steps(task_id: str, body: TaskRunReadyRequest, request: Request) -> dict:
+    store = _store(request)
+    task = store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    results: list[dict] = []
+    pending_manual: list[dict] = []
+    executed = 0
+
+    while executed < body.maxSteps:
+        task = store.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="task_not_found")
+        runnable = task.get("readiness", {}).get("runnable", [])
+        next_item = None
+        pending_manual = []
+        for item in runnable:
+            step = _step_by_id(task, item["step_id"])
+            if step is None:
+                continue
+            if step["type"] in {"command", "agent"}:
+                next_item = item
+                break
+            pending_manual.append({
+                "node_id": item["node_id"],
+                "step_id": item["step_id"],
+                "step_type": step["type"],
+                "title": step["title"],
+            })
+        if next_item is None:
+            break
+
+        step = _step_by_id(task, next_item["step_id"])
+        if step is None:
+            break
+        if step["type"] == "command":
+            result = await run_command_step(
+                step["id"],
+                StepRunCommandRequest(
+                    conversationId=body.conversationId or task.get("conversation_id"),
+                    includeInChat=body.includeInChat,
+                    timeoutSeconds=body.timeoutSeconds,
+                    permissionOverride=body.permissionOverride,
+                ),
+                request,
+            )
+        else:
+            result = await run_agent_step(
+                step["id"],
+                StepRunAgentRequest(
+                    conversationId=body.conversationId or task.get("conversation_id"),
+                ),
+                request,
+            )
+        results.append({
+            "node_id": next_item["node_id"],
+            "step_id": step["id"],
+            "step_type": step["type"],
+            "status": result.get("step", {}).get("status"),
+            "result": result,
+        })
+        executed += 1
+        if result.get("step", {}).get("status") == "failed":
+            break
+
+    final_task = store.get_task(task_id)
+    store.append_event(
+        task_id=task_id,
+        type="run_ready_finished",
+        payload={
+            "executed": executed,
+            "pending_manual": pending_manual,
+            "max_steps": body.maxSteps,
+        },
+    )
+    return {
+        "task": final_task,
+        "executed": executed,
+        "results": results,
+        "pending_manual": pending_manual,
+    }
 
 
 @router.get("/tasks/{task_id}/worktrees")

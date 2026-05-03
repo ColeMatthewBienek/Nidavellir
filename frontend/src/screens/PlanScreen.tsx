@@ -1343,6 +1343,32 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_remove_failed'));
   };
 
+  const runReadySteps = () => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/tasks/${selectedTask.id}/run-ready`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationId: selectedTask.conversation_id ?? null,
+        maxSteps: 10,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_run_ready_${response.status}`);
+        return response.json();
+      })
+      .then((result) => {
+        loadTasks();
+        if (result.task?.id) {
+          setSelectedTask(result.task);
+          loadTask(result.task.id);
+        } else {
+          loadTask(selectedTask.id);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_run_ready_failed'));
+  };
+
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
 
@@ -1351,6 +1377,7 @@ export function PlanScreen() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopBar title="Plan" sub={`${tasks.length} tasks · ${readyCount} ready · ${runningCount} running`}>
           <Btn small onClick={loadTasks} disabled={loading}>Reload</Btn>
+          {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
         </TopBar>
 
