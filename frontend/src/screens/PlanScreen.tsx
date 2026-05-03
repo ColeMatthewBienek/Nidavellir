@@ -323,6 +323,7 @@ function TaskDetail({
   onDeleteEdge,
   onCreateWorktree,
   onRefreshWorktree,
+  onCheckpointWorktree,
   onRemoveWorktree,
   onAddStep,
   onCompleteStep,
@@ -340,6 +341,7 @@ function TaskDetail({
   onDeleteEdge: (edgeId: string) => void;
   onCreateWorktree: (nodeId?: string | null) => void;
   onRefreshWorktree: (worktreeId: string) => void;
+  onCheckpointWorktree: (worktreeId: string) => void;
   onRemoveWorktree: (worktreeId: string) => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
@@ -393,7 +395,7 @@ function TaskDetail({
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {taskWorktree ? (
-              <WorktreeCard worktree={taskWorktree} label="Task branch" onRefresh={onRefreshWorktree} onRemove={onRemoveWorktree} />
+              <WorktreeCard worktree={taskWorktree} label="Task branch" onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onRemove={onRemoveWorktree} />
             ) : (
               <div style={{ border: '1px dashed var(--bd)', borderRadius: 7, padding: 10, color: 'var(--t1)', fontSize: 12 }}>
                 No task worktree yet. Node worktrees can still be created directly from the base repo.
@@ -401,7 +403,7 @@ function TaskDetail({
             )}
             {selectedNode && (
               selectedNodeWorktree ? (
-                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} onRefresh={onRefreshWorktree} onRemove={onRemoveWorktree} />
+                <WorktreeCard worktree={selectedNodeWorktree} label={`${selectedNode.title} branch`} onRefresh={onRefreshWorktree} onCheckpoint={onCheckpointWorktree} onRemove={onRemoveWorktree} />
               ) : (
                 <button
                   type="button"
@@ -630,13 +632,16 @@ function WorktreeCard({
   worktree,
   label,
   onRefresh,
+  onCheckpoint,
   onRemove,
 }: {
   worktree: OrchestrationWorktree;
   label: string;
   onRefresh: (worktreeId: string) => void;
+  onCheckpoint: (worktreeId: string) => void;
   onRemove: (worktreeId: string) => void;
 }) {
+  const canCheckpoint = worktree.status !== 'removed' && worktree.dirty_count > 0;
   return (
     <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 7 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -654,6 +659,15 @@ function WorktreeCard({
           {worktree.dirty_count ? `${worktree.dirty_count} changed files` : 'clean'}
         </span>
         <div style={{ display: 'flex', gap: 6 }}>
+          {canCheckpoint && (
+            <button
+              type="button"
+              onClick={() => onCheckpoint(worktree.id)}
+              style={{ border: '1px solid #2f8f46', borderRadius: 5, background: '#2ea04320', color: 'var(--grn)', cursor: 'pointer', fontSize: 10, padding: '3px 7px' }}
+            >
+              Checkpoint
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onRefresh(worktree.id)}
@@ -1329,6 +1343,24 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_refresh_failed'));
   };
 
+  const checkpointWorktree = (worktreeId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/worktrees/${worktreeId}/checkpoint`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_worktree_checkpoint_${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_checkpoint_failed'));
+  };
+
   const removeWorktree = (worktreeId: string) => {
     if (!selectedTask) return;
     fetch(`${API}/api/orchestration/worktrees/${worktreeId}`, { method: 'DELETE' })
@@ -1449,6 +1481,7 @@ export function PlanScreen() {
           onDeleteEdge={deleteEdge}
           onCreateWorktree={(nodeId) => setCreatingWorktreeNodeId(nodeId ?? null)}
           onRefreshWorktree={refreshWorktree}
+          onCheckpointWorktree={checkpointWorktree}
           onRemoveWorktree={removeWorktree}
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}

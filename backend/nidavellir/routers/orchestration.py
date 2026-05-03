@@ -15,6 +15,7 @@ from nidavellir.agents.events import frontend_event
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.orchestration.worktrees import (
     WorktreeError,
+    checkpoint_worktree,
     create_git_worktree,
     current_branch,
     default_worktree_path,
@@ -127,6 +128,10 @@ class WorktreeCreateRequest(BaseModel):
     baseBranch: str | None = None
     branchName: str | None = None
     worktreePath: str | None = None
+
+
+class WorktreeCheckpointRequest(BaseModel):
+    message: str | None = None
 
 
 def _store(request: Request) -> OrchestrationStore:
@@ -788,6 +793,52 @@ def refresh_worktree(worktree_id: str, request: Request) -> dict:
     if updated is None:
         raise HTTPException(status_code=404, detail="worktree_not_found")
     return updated
+
+
+@router.post("/worktrees/{worktree_id}/checkpoint")
+async def checkpoint_orchestration_worktree(worktree_id: str, body: WorktreeCheckpointRequest, request: Request) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    if worktree["status"] == "removed":
+        raise HTTPException(status_code=400, detail="worktree_removed")
+    message = body.message or f"Checkpoint {worktree['branch_name']}"
+    try:
+        result = checkpoint_worktree(
+            worktree_path=Path(worktree["worktree_path"]),
+            message=message,
+        )
+        info = result["status"]
+        updated = store.update_worktree(worktree_id, {
+            "head_commit": info["head_commit"],
+            "status": info["status"],
+            "dirty_count": info["dirty_count"],
+            "dirty_summary": info["dirty_summary"],
+        })
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if updated is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    store.append_event(
+        task_id=worktree["task_id"],
+        node_id=worktree["node_id"],
+        type="worktree_checkpointed",
+        payload={
+            "worktree_id": worktree_id,
+            "branch_name": worktree["branch_name"],
+            "commit": result["commit"],
+            "message": result["message"],
+        },
+    )
+    await broadcast_resource_event(request.app, {
+        "kind": "orchestration",
+        "action": "worktree_checkpointed",
+        "conversation_id": None,
+        "message": "Orchestration worktree checkpoint committed",
+    })
+    return {"worktree": updated, "commit": result["commit"], "message": result["message"]}
 
 
 @router.delete("/worktrees/{worktree_id}")

@@ -188,7 +188,18 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         assert refreshed.json()["dirty_count"] == 1
         assert refreshed.json()["dirty_summary"][0]["path"] == "README.md"
 
-        (worktree_path / "README.md").write_text("# test\n", encoding="utf-8")
+        checkpointed = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/checkpoint", json={
+            "message": "Checkpoint node A",
+        })
+        assert checkpointed.status_code == 200
+        assert checkpointed.json()["message"] == "Checkpoint node A"
+        assert checkpointed.json()["worktree"]["status"] == "clean"
+        assert checkpointed.json()["worktree"]["dirty_count"] == 0
+        assert checkpointed.json()["commit"] != worktree["head_commit"]
+        log = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=worktree_path, check=True, capture_output=True, text=True)
+        assert log.stdout.strip() == "Checkpoint node A"
+
+        (worktree_path / "README.md").write_text("# changed\n", encoding="utf-8")
         clean = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/refresh")
         assert clean.status_code == 200
         assert clean.json()["status"] == "clean"
@@ -201,7 +212,7 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         detail = (await c.get(f"/api/orchestration/tasks/{task['id']}")).json()
         assert detail["worktrees"][0]["status"] == "removed"
         event_types = {event["type"] for event in (await c.get(f"/api/orchestration/tasks/{task['id']}/events")).json()}
-        assert {"worktree_created", "worktree_updated", "worktree_removed"} <= event_types
+        assert {"worktree_created", "worktree_updated", "worktree_checkpointed", "worktree_removed"} <= event_types
 
 
 @pytest.mark.asyncio
