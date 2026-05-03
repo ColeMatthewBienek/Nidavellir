@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.commands.events import broadcast_command_event
+from nidavellir.agents import registry as _agent_registry
+from nidavellir.agents.events import frontend_event
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.orchestration.worktrees import (
     WorktreeError,
@@ -104,6 +106,13 @@ class StepRunCommandRequest(BaseModel):
     permissionOverride: str | None = None
 
 
+class StepRunAgentRequest(BaseModel):
+    prompt: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    conversationId: str | None = None
+
+
 class WorktreeCreateRequest(BaseModel):
     nodeId: str | None = None
     repoPath: str | None = None
@@ -158,6 +167,26 @@ def _command_from_step(step: dict, command_override: str | None) -> str:
     if not command:
         raise HTTPException(status_code=400, detail="command_required")
     return command
+
+
+def _prompt_from_step(step: dict, prompt_override: str | None) -> str:
+    prompt = (prompt_override or step.get("config", {}).get("prompt") or step.get("description") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt_required")
+    return prompt
+
+
+def _stringify_agent_event(item: object) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return ""
+    to_frontend = getattr(item, "to_frontend", None)
+    if callable(to_frontend):
+        event = frontend_event(item)
+        content = event.get("content") or event.get("detail") or event.get("summary") or event.get("message")
+        return f"[{event.get('type', 'activity')}] {content}\n" if content else ""
+    return str(item)
 
 
 @router.get("/tasks")
@@ -458,6 +487,139 @@ async def run_command_step(step_id: str, body: StepRunCommandRequest, request: R
         "message": "Orchestration command step captured",
     })
     return {"step": updated_step, "run": run, "worktree": worktree}
+
+
+@router.post("/steps/{step_id}/run-agent")
+async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Request) -> dict:
+    store = _store(request)
+    step = store.get_step(step_id)
+    if step is None:
+        raise HTTPException(status_code=404, detail="step_not_found")
+    if step["type"] != "agent":
+        raise HTTPException(status_code=400, detail="step_not_agent")
+    node = store.get_node(step["node_id"])
+    if node is None:
+        raise HTTPException(status_code=404, detail="node_not_found")
+    task = store.get_task(node["task_id"])
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    worktree = store.find_worktree_for_node(task_id=task["id"], node_id=node["id"])
+    if worktree is None:
+        raise HTTPException(status_code=400, detail="worktree_required")
+    cwd = Path(worktree["worktree_path"]).expanduser().resolve()
+    if not cwd.exists() or not cwd.is_dir():
+        store.update_worktree(worktree["id"], {"status": "missing", "dirty_count": 0, "dirty_summary": []})
+        raise HTTPException(status_code=400, detail="worktree_missing")
+
+    provider = body.provider or node.get("provider") or step.get("config", {}).get("provider") or "codex"
+    model = body.model or node.get("model") or step.get("config", {}).get("model")
+    manifest = _agent_registry.PROVIDER_REGISTRY.get(provider)
+    if manifest is None:
+        raise HTTPException(status_code=400, detail="provider_not_found")
+    if not manifest.supports_worktree_isolation:
+        raise HTTPException(status_code=400, detail="provider_does_not_support_worktree_isolation")
+    prompt = _prompt_from_step(step, body.prompt)
+    conversation_id = body.conversationId or task.get("conversation_id")
+    handoff_prompt = (
+        "You are executing a Nidavellir orchestration agent step.\n"
+        f"Task: {task['title']}\n"
+        f"Node: {node['title']}\n"
+        f"Worktree: {cwd}\n\n"
+        "Rules:\n"
+        "- Work only inside the provided worktree.\n"
+        "- Do not switch branches or create/delete worktrees.\n"
+        "- Report the files changed and tests run.\n\n"
+        f"Step instructions:\n{prompt}"
+    )
+
+    attempt = store.create_run_attempt(
+        task_id=task["id"],
+        node_id=node["id"],
+        step_id=step_id,
+        conversation_id=conversation_id,
+        provider=provider,
+        model=model,
+        worktree_path=str(cwd),
+        status="running",
+    )
+    store.update_step_status(step_id, "running", output_summary="Agent running.")
+    store.append_event(
+        task_id=task["id"],
+        node_id=node["id"],
+        step_id=step_id,
+        run_attempt_id=attempt["id"],
+        type="agent_step_started",
+        payload={"provider": provider, "model": model, "worktree_id": worktree["id"]},
+    )
+
+    agent = None
+    transcript_parts: list[str] = []
+    try:
+        agent = _agent_registry.make_agent(provider, slot_id=0, workdir=cwd, model_id=model)
+        await agent.start()
+        await agent.send(handoff_prompt)
+        async for item in agent.stream():
+            text = _stringify_agent_event(item)
+            if text:
+                transcript_parts.append(text)
+        transcript = "".join(transcript_parts).strip()
+        summary = transcript.splitlines()[-1][:240] if transcript else "Agent step completed."
+        updated_step = store.update_step_status(step_id, "complete", output_summary=summary)
+        attempt = store.update_run_attempt(attempt["id"], status="completed") or attempt
+        try:
+            info = git_status(cwd)
+            worktree = store.update_worktree(worktree["id"], {
+                "head_commit": info["head_commit"],
+                "status": info["status"],
+                "dirty_count": info["dirty_count"],
+                "dirty_summary": info["dirty_summary"],
+            }) or worktree
+        except Exception:
+            worktree = store.update_worktree(worktree["id"], {"status": "error"}) or worktree
+        store.append_event(
+            task_id=task["id"],
+            node_id=node["id"],
+            step_id=step_id,
+            run_attempt_id=attempt["id"],
+            type="agent_step_finished",
+            payload={"provider": provider, "model": model, "status": "complete", "worktree_id": worktree["id"]},
+        )
+        await broadcast_resource_event(request.app, {
+            "kind": "orchestration",
+            "action": "agent_step_finished",
+            "conversation_id": conversation_id,
+            "message": "Orchestration agent step completed",
+        })
+        return {
+            "step": updated_step,
+            "run_attempt": attempt,
+            "worktree": worktree,
+            "transcript": transcript,
+        }
+    except Exception as exc:
+        error = str(exc)
+        updated_step = store.update_step_status(step_id, "failed", output_summary=error[:240])
+        attempt = store.update_run_attempt(attempt["id"], status="failed", error=error) or attempt
+        store.append_event(
+            task_id=task["id"],
+            node_id=node["id"],
+            step_id=step_id,
+            run_attempt_id=attempt["id"],
+            type="agent_step_failed",
+            payload={"provider": provider, "model": model, "error": error},
+        )
+        return {
+            "step": updated_step,
+            "run_attempt": attempt,
+            "worktree": worktree,
+            "transcript": "".join(transcript_parts).strip(),
+        }
+    finally:
+        if agent is not None:
+            try:
+                await agent.kill()
+            except Exception:
+                pass
 
 
 @router.get("/tasks/{task_id}/worktrees")

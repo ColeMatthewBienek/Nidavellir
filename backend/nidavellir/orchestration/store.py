@@ -523,6 +523,85 @@ class OrchestrationStore:
             ).fetchone()
         return self._worktree_row(fallback) if fallback else None
 
+    def create_run_attempt(
+        self,
+        *,
+        task_id: str,
+        node_id: str | None = None,
+        step_id: str | None = None,
+        conversation_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        worktree_path: str | None = None,
+        status: str = "queued",
+    ) -> dict:
+        attempt_id = str(uuid.uuid4())
+        now = _now()
+        started_at = now if status == "running" else None
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO orchestration_run_attempts
+                   (id, task_id, node_id, step_id, conversation_id, provider, model,
+                    worktree_path, status, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    attempt_id,
+                    task_id,
+                    node_id,
+                    step_id,
+                    conversation_id,
+                    provider,
+                    model,
+                    worktree_path,
+                    status,
+                    started_at,
+                ),
+            )
+        self.append_event(
+            task_id=task_id,
+            node_id=node_id,
+            step_id=step_id,
+            run_attempt_id=attempt_id,
+            type="run_attempt_created",
+            payload={"provider": provider, "model": model, "status": status},
+        )
+        return self.get_run_attempt(attempt_id) or {}
+
+    def update_run_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> dict | None:
+        attempt = self.get_run_attempt(attempt_id)
+        if not attempt:
+            return None
+        completed_at = _now() if status in {"completed", "failed", "cancelled"} else None
+        started_at = attempt.get("started_at") or (_now() if status == "running" else None)
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE orchestration_run_attempts
+                   SET status = ?, error = COALESCE(?, error), started_at = COALESCE(started_at, ?),
+                       completed_at = COALESCE(?, completed_at)
+                   WHERE id = ?""",
+                (status, error, started_at, completed_at, attempt_id),
+            )
+        self.append_event(
+            task_id=attempt["task_id"],
+            node_id=attempt["node_id"],
+            step_id=attempt["step_id"],
+            run_attempt_id=attempt_id,
+            type="run_attempt_updated",
+            payload={"status": status, "error": error},
+        )
+        return self.get_run_attempt(attempt_id)
+
+    def get_run_attempt(self, attempt_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM orchestration_run_attempts WHERE id = ?", (attempt_id,)).fetchone()
+        return dict(row) if row else None
+
     def create_worktree(
         self,
         *,

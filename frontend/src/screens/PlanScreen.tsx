@@ -327,6 +327,7 @@ function TaskDetail({
   onAddStep,
   onCompleteStep,
   onRunCommandStep,
+  onRunAgentStep,
 }: {
   task: OrchestrationTaskDetail;
   events: OrchestrationEvent[];
@@ -343,6 +344,7 @@ function TaskDetail({
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
   onRunCommandStep: (stepId: string) => void;
+  onRunAgentStep: (stepId: string) => void;
 }) {
   const selectedNode = task.nodes.find((node) => node.id === selectedNodeId) ?? task.nodes[0] ?? null;
   const selectedSteps = selectedNode
@@ -548,14 +550,19 @@ function TaskDetail({
                         {step.config.command}
                       </div>
                     )}
+                    {step.type === 'agent' && typeof step.config.prompt === 'string' && (
+                      <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {step.config.prompt}
+                      </div>
+                    )}
                     {step.output_summary && <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 6 }}>{step.output_summary}</div>}
                   </div>
                   {step.status === 'complete' ? (
                     <StatusPill status="complete" />
-                  ) : step.type === 'command' ? (
+                  ) : step.type === 'command' || step.type === 'agent' ? (
                     <button
                       type="button"
-                      onClick={() => onRunCommandStep(step.id)}
+                      onClick={() => step.type === 'command' ? onRunCommandStep(step.id) : onRunAgentStep(step.id)}
                       disabled={!selectedNodeWorktree && !taskWorktree}
                       style={{
                         border: '1px solid var(--bd)',
@@ -825,12 +832,13 @@ function StepModal({
   onCreate,
 }: {
   onClose: () => void;
-  onCreate: (values: { title: string; description: string; type: string; command: string }) => void;
+  onCreate: (values: { title: string; description: string; type: string; command: string; prompt: string }) => void;
 }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [type, setType] = useState('manual');
   const [command, setCommand] = useState('');
+  const [prompt, setPrompt] = useState('');
 
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="orchestration-step-title" style={{
@@ -874,6 +882,17 @@ function StepModal({
             />
           </>
         )}
+        {type === 'agent' && (
+          <>
+            <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Agent prompt</label>
+            <textarea
+              aria-label="Agent prompt"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              style={{ width: '100%', minHeight: 90, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, marginBottom: 12, resize: 'vertical' }}
+            />
+          </>
+        )}
         <label style={{ display: 'block', color: 'var(--t1)', fontSize: 11, marginBottom: 5 }}>Description</label>
         <textarea
           aria-label="Step description"
@@ -883,7 +902,13 @@ function StepModal({
         />
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <Btn onClick={onClose}>Cancel</Btn>
-          <Btn primary disabled={!title.trim() || (type === 'command' && !command.trim())} onClick={() => onCreate({ title: title.trim(), description: description.trim(), type, command: command.trim() })}>Create Step</Btn>
+          <Btn primary disabled={!title.trim() || (type === 'command' && !command.trim()) || (type === 'agent' && !prompt.trim())} onClick={() => onCreate({
+            title: title.trim(),
+            description: description.trim(),
+            type,
+            command: command.trim(),
+            prompt: prompt.trim(),
+          })}>Create Step</Btn>
         </div>
       </div>
     </div>
@@ -1181,7 +1206,7 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_edge_delete_failed'));
   };
 
-  const addStep = (nodeId: string, values: { title: string; description: string; type: string; command: string }) => {
+  const addStep = (nodeId: string, values: { title: string; description: string; type: string; command: string; prompt: string }) => {
     fetch(`${API}/api/orchestration/nodes/${nodeId}/steps`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1189,7 +1214,11 @@ export function PlanScreen() {
         title: values.title,
         description: values.description,
         type: values.type,
-        config: values.type === 'command' ? { command: values.command } : {},
+        config: values.type === 'command'
+          ? { command: values.command }
+          : values.type === 'agent'
+            ? { prompt: values.prompt }
+            : {},
       }),
     })
       .then(async (response) => {
@@ -1222,6 +1251,24 @@ export function PlanScreen() {
         loadTask(selectedTask.id);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_command_step_failed'));
+  };
+
+  const runAgentStep = (stepId: string) => {
+    if (!selectedTask) return;
+    fetch(`${API}/api/orchestration/steps/${stepId}/run-agent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: selectedTask.conversation_id ?? null }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_agent_step_${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_agent_step_failed'));
   };
 
   const completeStep = (stepId: string) => {
@@ -1379,6 +1426,7 @@ export function PlanScreen() {
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
           onRunCommandStep={runCommandStep}
+          onRunAgentStep={runAgentStep}
         />
       )}
 

@@ -253,6 +253,91 @@ async def test_orchestration_runs_command_steps_inside_node_worktree(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Path, monkeypatch):
+    setup_app(tmp_path)
+    repo = create_git_repo(tmp_path / "repo")
+    worktree_path = tmp_path / "worktrees" / "agent-node"
+
+    class FakeAgent:
+        def __init__(self, slot_id, workdir, model_id=None):
+            self.workdir = Path(workdir)
+            self.model_id = model_id
+            self.prompt = ""
+
+        async def start(self):
+            return None
+
+        async def send(self, text: str):
+            self.prompt = text
+            (self.workdir / "agent.txt").write_text("agent touched\n", encoding="utf-8")
+
+        async def stream(self):
+            yield "Changed agent.txt\n"
+
+        async def kill(self):
+            return None
+
+    from nidavellir.agents import registry as agent_registry
+    from nidavellir.routers import orchestration as orchestration_router
+
+    monkeypatch.setitem(
+        agent_registry.PROVIDER_REGISTRY,
+        "fake-agent",
+        agent_registry.ProviderManifest(
+            id="fake-agent",
+            display_name="Fake Agent",
+            binary="fake-agent",
+            description="test fake",
+            agent_class=FakeAgent,
+            supports_worktree_isolation=True,
+        ),
+    )
+    monkeypatch.setattr(orchestration_router._agent_registry, "PROVIDER_REGISTRY", agent_registry.PROVIDER_REGISTRY)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Agent worktree test",
+            "baseRepoPath": str(repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={
+            "title": "Agent Node",
+            "provider": "fake-agent",
+            "model": "fake-model",
+        })).json()
+        worktree = (await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/agent-worktree-test/agent-node",
+            "worktreePath": str(worktree_path),
+        })).json()
+        step = (await c.post(f"/api/orchestration/nodes/{node['id']}/steps", json={
+            "title": "Ask fake agent",
+            "type": "agent",
+            "config": {"prompt": "Touch agent.txt"},
+        })).json()
+
+        result = await c.post(f"/api/orchestration/steps/{step['id']}/run-agent", json={
+            "conversationId": "conv-agent",
+        })
+        assert result.status_code == 200
+        body = result.json()
+        assert body["step"]["status"] == "complete"
+        assert body["run_attempt"]["provider"] == "fake-agent"
+        assert body["run_attempt"]["model"] == "fake-model"
+        assert body["run_attempt"]["worktree_path"] == str(worktree_path)
+        assert body["worktree"]["id"] == worktree["id"]
+        assert body["worktree"]["status"] == "dirty"
+        assert body["worktree"]["dirty_summary"][0]["path"] == "agent.txt"
+        assert "Changed agent.txt" in body["transcript"]
+
+        events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
+        event_types = {event["type"] for event in events.json()}
+        assert {"agent_step_started", "agent_step_finished", "run_attempt_created", "run_attempt_updated"} <= event_types
+
+
+@pytest.mark.asyncio
 async def test_orchestration_rejects_invalid_status(tmp_path: Path):
     setup_app(tmp_path)
 
