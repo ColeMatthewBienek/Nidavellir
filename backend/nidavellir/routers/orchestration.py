@@ -347,6 +347,65 @@ def _next_open_planner_gate(plan: dict) -> str:
     return next((key for key in PLANNER_GATE_ORDER if _checkpoint_status(plan, key) != "agreed"), "spec_approved")
 
 
+def _next_open_planner_gate_after_updates(plan: dict, checkpoint_updates: list[dict]) -> str:
+    agreed_updates = {item["key"] for item in checkpoint_updates if item.get("status") == "agreed"}
+    return next(
+        (key for key in PLANNER_GATE_ORDER if key not in agreed_updates and _checkpoint_status(plan, key) != "agreed"),
+        "spec_approved",
+    )
+
+
+def _latest_spec(plan: dict) -> dict | None:
+    specs = plan.get("specs") or []
+    return specs[0] if specs else None
+
+
+def _build_agentic_spec_draft(plan: dict, spec_deltas: list[dict]) -> str:
+    acceptance = plan.get("acceptance_criteria") or []
+    constraints = plan.get("constraints") or []
+    checkpoints = plan.get("planning_checkpoints") or []
+    satisfied = [item["title"] for item in checkpoints if item.get("status") == "agreed"]
+    pending = [f"{item['title']}: {item.get('status')}" for item in checkpoints if item.get("status") != "agreed"]
+    deltas_by_section: dict[str, list[str]] = {}
+    for delta in spec_deltas:
+        deltas_by_section.setdefault(delta["section"], []).append(delta["content"])
+
+    def bullets(values: list[str], fallback: str) -> str:
+        return "\n".join(f"- {value}" for value in values) if values else f"- {fallback}"
+
+    return "\n".join([
+        "# Agentic Forward Spec",
+        "",
+        "## Goal",
+        str(plan.get("raw_plan") or "").strip(),
+        "",
+        "## Target Repository",
+        f"- Repo path: {plan.get('repo_path') or 'Not captured'}",
+        f"- Base branch: {plan.get('base_branch') or 'Not captured'}",
+        "",
+        "## Scope",
+        bullets(deltas_by_section.get("Scope", []), "Needs PM confirmation."),
+        "",
+        "## Acceptance Criteria",
+        bullets(acceptance, "Needs testable acceptance criteria."),
+        "",
+        "## Verification Strategy",
+        bullets(deltas_by_section.get("Verification Strategy", []), "Needs verification strategy."),
+        "",
+        "## Risks and Dependencies",
+        bullets(deltas_by_section.get("Risks and Dependencies", []), "Needs risk and dependency review."),
+        "",
+        "## Constraints",
+        bullets(constraints, "No additional constraints captured."),
+        "",
+        "## Satisfied Planning Gates",
+        bullets(satisfied, "No gates satisfied yet."),
+        "",
+        "## Pending Planning Gates",
+        bullets(pending, "No pending gates."),
+    ])
+
+
 def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: str) -> dict:
     text = user_content.lower()
     checkpoint_updates: list[dict] = []
@@ -426,6 +485,7 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
             "kind": kind,
             "content": content,
             "active_gate": active_gate,
+            "draft_spec": kind == "approval" and active_gate == "spec_draft" and _latest_spec(plan) is None,
             "checkpoint_updates": checkpoint_updates,
             "decisions": decisions,
             "assumptions": assumptions,
@@ -442,6 +502,7 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
                 f"The next gate is {active_gate}: {blockers[0]['question']}"
             ),
             "active_gate": active_gate,
+            "draft_spec": False,
             "checkpoint_updates": checkpoint_updates,
             "decisions": decisions,
             "assumptions": assumptions,
@@ -449,20 +510,29 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
             "spec_deltas": spec_deltas,
         }
 
-    active_gate = _next_open_planner_gate(plan)
+    active_gate = _next_open_planner_gate_after_updates(plan, checkpoint_updates)
     next_questions = {
         "scope": "What is the first autonomous execution slice, and what is explicitly out of scope?",
         "risks": "What dependencies, risk areas, or autonomy guardrails should the EM know before decomposition?",
         "spec_draft": "Should I draft the agentic-forward spec from the evidence captured so far?",
         "spec_approved": "After reviewing the spec, do you approve it for decomposition?",
     }
-    return {
-        "kind": "question",
-        "content": (
+    wants_draft = "draft" in text or "spec" in text
+    draft_spec = active_gate == "spec_draft" and wants_draft and _latest_spec(plan) is None
+    content = (
+        "As Nidavellir PM, I drafted the agentic-forward spec from the evidence captured so far. "
+        "Review it before approving decomposition."
+        if draft_spec
+        else (
             "As Nidavellir PM, the planning evidence is improving. "
             f"The next gate is {active_gate}: {next_questions.get(active_gate, 'What evidence should we capture for this gate?')}"
-        ),
+        )
+    )
+    return {
+        "kind": "message" if draft_spec else "question",
+        "content": content,
         "active_gate": active_gate,
+        "draft_spec": draft_spec,
         "checkpoint_updates": checkpoint_updates,
         "decisions": decisions,
         "assumptions": assumptions,
@@ -690,6 +760,27 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             )
             if checkpoint is not None:
                 checkpoint_updates.append(checkpoint)
+        draft_spec = None
+        if structured["draft_spec"]:
+            draft_spec = store.create_agentic_spec(
+                plan_inbox_item_id=item_id,
+                content=_build_agentic_spec_draft(plan, structured["spec_deltas"]),
+                metadata={
+                    "source": "planner-pm",
+                    "source_message_ids": [user_message["id"]],
+                    "active_gate": structured["active_gate"],
+                },
+                status="draft",
+            )
+            checkpoint = store.update_planning_checkpoint(
+                plan_inbox_item_id=item_id,
+                key="spec_draft",
+                status="agreed",
+                summary=f"Draft spec v{draft_spec['version']} generated by Planner PM.",
+                source_message_ids=[user_message["id"]],
+            )
+            if checkpoint is not None:
+                checkpoint_updates.append(checkpoint)
         pm_message = store.create_planner_discussion_message(
             plan_inbox_item_id=item_id,
             role="planner",
@@ -706,6 +797,7 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
                 "assumptions": structured["assumptions"],
                 "blockers": structured["blockers"],
                 "spec_deltas": structured["spec_deltas"],
+                "draft_spec_id": draft_spec["id"] if draft_spec else None,
             },
         )
         refreshed_plan = store.get_plan_inbox_item(item_id)
@@ -715,6 +807,7 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             "structured": {
                 **structured,
                 "checkpoint_updates": checkpoint_updates,
+                "draft_spec": draft_spec,
             },
         }
     except Exception as err:

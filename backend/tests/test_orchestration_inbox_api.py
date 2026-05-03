@@ -169,6 +169,40 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_pm_turn_generates_draft_spec_when_gate_evidence_is_complete(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build autonomous orchestration.",
+            "repoPath": "/repo/nidavellir",
+            "baseBranch": "main",
+            "acceptanceCriteria": ["Planner gates cannot be bypassed from the UI."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": (
+                "Scope: first autonomous slice is PM spec drafting only; non-goal is execution. "
+                "Verification: run orchestration API tests and typecheck. "
+                "Risks: dependency ordering and guardrails must be explicit. Please draft the spec."
+            ),
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        assert body["structured"]["active_gate"] == "spec_draft"
+        assert body["structured"]["draft_spec"]["status"] == "draft"
+        assert body["structured"]["draft_spec"]["content"].startswith("# Agentic Forward Spec")
+        assert "PM spec drafting only" in body["structured"]["draft_spec"]["content"]
+        assert {item["key"] for item in body["structured"]["checkpoint_updates"]} >= {"scope", "verification", "risks", "spec_draft"}
+        assert body["plan"]["specs"][0]["id"] == body["structured"]["draft_spec"]["id"]
+        assert body["plan"]["planning_checkpoints"][6]["status"] == "agreed"
+        assert body["messages"][1]["metadata"]["draft_spec_id"] == body["structured"]["draft_spec"]["id"]
+
+
+@pytest.mark.asyncio
 async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
     setup_app(tmp_path)
 

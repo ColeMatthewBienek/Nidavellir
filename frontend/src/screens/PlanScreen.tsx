@@ -209,6 +209,17 @@ interface PlanningCheckpoint {
   updated_at: string;
 }
 
+interface AgenticSpec {
+  id: string;
+  plan_inbox_item_id: string;
+  version: number;
+  content: string;
+  metadata: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 const CHECKPOINT_REQUIREMENTS: Record<string, string[]> = {
   intake: [
     'Raw goal captured',
@@ -247,6 +258,7 @@ const CHECKPOINT_REQUIREMENTS: Record<string, string[]> = {
 interface PlanInboxDetail extends PlanInboxItem {
   discussion_messages: PlannerDiscussionMessage[];
   planning_checkpoints: PlanningCheckpoint[];
+  specs: AgenticSpec[];
 }
 
 interface TaskInboxItem {
@@ -806,18 +818,10 @@ function SpecViewerModal({
   onClose: () => void;
 }) {
   if (!item) return null;
+  const latestSpec = item.specs?.[0] ?? null;
   const approved = item.planning_checkpoints.filter((checkpoint) => checkpoint.status === 'agreed').map((checkpoint) => checkpoint.title);
   const pending = item.planning_checkpoints.filter((checkpoint) => checkpoint.status !== 'agreed').map((checkpoint) => `${checkpoint.title}: ${checkpoint.status}`);
-  return (
-    <div role="dialog" aria-modal="true" aria-labelledby="spec-viewer-title" style={{ position: 'fixed', inset: 0, zIndex: 70, background: '#000000aa', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18, boxSizing: 'border-box' }}>
-      <div style={{ width: 'min(760px, 100%)', maxHeight: 'calc(100vh - 36px)', border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr)' }}>
-        <div style={{ height: 44, borderBottom: '1px solid var(--bd)', padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-          <div id="spec-viewer-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800 }}>Spec Snapshot</div>
-          <Btn small onClick={onClose}>Close</Btn>
-        </div>
-        <div style={{ overflow: 'auto', padding: 14 }}>
-          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: 'var(--t0)', fontSize: 12, lineHeight: 1.55, fontFamily: 'var(--mono)' }}>
-{`# Working Spec Snapshot
+  const fallbackContent = `# Working Spec Snapshot
 
 ## Intake
 ${item.raw_plan}
@@ -830,7 +834,17 @@ ${approved.length ? approved.map((title) => `- ${title}`).join('\n') : '- None y
 
 ## Pending Gates
 ${pending.length ? pending.map((title) => `- ${title}`).join('\n') : '- None'}
-`}
+`;
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="spec-viewer-title" style={{ position: 'fixed', inset: 0, zIndex: 70, background: '#000000aa', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18, boxSizing: 'border-box' }}>
+      <div style={{ width: 'min(760px, 100%)', maxHeight: 'calc(100vh - 36px)', border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto minmax(0, 1fr)' }}>
+        <div style={{ height: 44, borderBottom: '1px solid var(--bd)', padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div id="spec-viewer-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800 }}>{latestSpec ? `Spec Draft v${latestSpec.version}` : 'Spec Snapshot'}</div>
+          <Btn small onClick={onClose}>Close</Btn>
+        </div>
+        <div style={{ overflow: 'auto', padding: 14 }}>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: 'var(--t0)', fontSize: 12, lineHeight: 1.55, fontFamily: 'var(--mono)' }}>
+{latestSpec?.content ?? fallbackContent}
           </pre>
         </div>
       </div>
