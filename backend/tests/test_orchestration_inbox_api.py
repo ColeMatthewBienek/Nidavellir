@@ -11,6 +11,7 @@ from nidavellir.memory.store import MemoryStore
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
 from nidavellir.permissions.tool_requests import ToolRequestStore
+from nidavellir.skills.builtin import ensure_builtin_skills
 from nidavellir.skills.store import SkillStore
 from nidavellir.tokens.store import TokenUsageStore
 
@@ -19,6 +20,7 @@ def setup_app(tmp_path: Path):
     app.state.memory_store = MemoryStore(str(tmp_path / "memory.db"))
     app.state.token_store = TokenUsageStore(str(tmp_path / "tokens.db"))
     app.state.skill_store = SkillStore(str(tmp_path / "skills.db"))
+    ensure_builtin_skills(app.state.skill_store)
     app.state.permission_evaluator = PermissionEvaluator()
     app.state.permission_audit_store = PermissionAuditStore(str(tmp_path / "permissions.db"))
     app.state.command_store = CommandRunStore(str(tmp_path / "commands.db"))
@@ -149,6 +151,10 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
         assert turn_body["messages"][0]["metadata"]["provider"] == "codex"
         assert turn_body["messages"][1]["metadata"]["model"] == "gpt-5.5"
         assert turn_body["messages"][1]["metadata"]["skill"] == "planner-pm"
+        assert turn_body["messages"][1]["metadata"]["harness"] == "main_chat_prompt_assembly"
+        assert "planner-pm" in turn_body["messages"][1]["metadata"]["injected_skill_ids"]
+        assert "activated skills" in turn_body["messages"][1]["metadata"]["prompt_section_names"]
+        assert turn_body["structured"]["harness"]["conversation_id"] == f"planner-pm:{plan['id']}"
         assert turn_body["messages"][1]["metadata"]["active_gate"] == "scope"
         assert turn_body["structured"]["active_gate"] == "scope"
         assert turn_body["structured"]["checkpoint_updates"][0]["key"] == "verification"

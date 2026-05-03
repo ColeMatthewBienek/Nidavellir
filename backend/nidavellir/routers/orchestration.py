@@ -8,10 +8,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from nidavellir.commands import CommandRunner, CommandRunStore
-from nidavellir.commands.events import broadcast_command_event
+from nidavellir.agents.chat_harness import build_prompt_assembly
 from nidavellir.agents import registry as _agent_registry
 from nidavellir.agents.events import frontend_event
+from nidavellir.commands import CommandRunner, CommandRunStore
+from nidavellir.commands.events import broadcast_command_event
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.orchestration.worktrees import (
     WorktreeError,
@@ -33,6 +34,7 @@ from nidavellir.permissions.tool_protocol import TOOL_PROTOCOL_INSTRUCTIONS, ext
 from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 from nidavellir.routers.tool_requests import _continuation_content
+from nidavellir.workspace import effective_default_working_directory
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -406,6 +408,75 @@ def _build_agentic_spec_draft(plan: dict, spec_deltas: list[dict]) -> str:
     ])
 
 
+def _planner_pm_memory_context(plan: dict) -> str:
+    messages = plan.get("discussion_messages") or []
+    discussion = []
+    for message in messages[-12:]:
+        role = message.get("role", "unknown")
+        kind = message.get("kind", "message")
+        content = str(message.get("content") or "").strip()
+        if content:
+            discussion.append(f"- {role}/{kind}: {content}")
+    checkpoints = []
+    for checkpoint in plan.get("planning_checkpoints") or []:
+        summary = checkpoint.get("summary") or checkpoint.get("blocking_question") or ""
+        checkpoints.append(f"- {checkpoint.get('key')}: {checkpoint.get('status')} - {summary}".rstrip(" -"))
+    return "\n\n".join(part for part in [
+        f"Plan inbox item: {plan.get('id')}",
+        f"Raw intake:\n{plan.get('raw_plan') or ''}",
+        f"Repo path: {plan.get('repo_path') or 'not captured'}",
+        f"Base branch: {plan.get('base_branch') or 'not captured'}",
+        "Acceptance criteria:\n" + "\n".join(f"- {item}" for item in plan.get("acceptance_criteria") or []),
+        "Constraints:\n" + "\n".join(f"- {item}" for item in plan.get("constraints") or []),
+        "Planning checkpoints:\n" + "\n".join(checkpoints),
+        "Recent PM discussion:\n" + "\n".join(discussion),
+    ] if part.strip())
+
+
+def _planner_pm_current_content(user_content: str) -> str:
+    return "\n\n".join([
+        "Use the Planner PM skill for this focused planning turn.",
+        "The goal is an agentic-forward spec that can safely move to decomposition.",
+        "Act as Nidavellir PM: co-create, critique, capture evidence, and block decomposition until required gates are satisfied.",
+        f"User message:\n{user_content}",
+    ])
+
+
+def _planner_pm_workdir(plan: dict) -> Path:
+    repo_path = str(plan.get("repo_path") or "").strip()
+    if repo_path:
+        return Path(repo_path).expanduser()
+    return Path(effective_default_working_directory())
+
+
+def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request: Request, item_id: str) -> dict:
+    provider = body.provider or plan.get("provider") or "claude"
+    model = body.model or plan.get("model") or "claude-sonnet-4-6"
+    conversation_id = f"planner-pm:{item_id}"
+    assembly = build_prompt_assembly(
+        store=getattr(request.app.state, "memory_store", None),
+        skill_store=getattr(request.app.state, "skill_store", None),
+        conversation_id=conversation_id,
+        session_id=conversation_id,
+        provider_id=provider,
+        model_id=model,
+        current_content=_planner_pm_current_content(body.content),
+        memory_context=_planner_pm_memory_context(plan),
+        workdir=_planner_pm_workdir(plan),
+        command_store=getattr(request.app.state, "command_store", None),
+    )
+    return {
+        "harness": "main_chat_prompt_assembly",
+        "provider": provider,
+        "model": model,
+        "conversation_id": conversation_id,
+        "prompt_section_names": [section.name for section in assembly.sections],
+        "injected_skill_ids": assembly.injected_skill_ids,
+        "suppressed_skill_ids": assembly.suppressed_skill_ids,
+        "estimated_tokens": assembly.estimated_tokens,
+    }
+
+
 def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: str) -> dict:
     text = user_content.lower()
     checkpoint_updates: list[dict] = []
@@ -741,12 +812,17 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
     if plan is None:
         raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
     try:
+        harness_metadata = _planner_pm_harness_metadata(plan, body, request, item_id)
         user_message = store.create_planner_discussion_message(
             plan_inbox_item_id=item_id,
             role="user",
             kind="message",
             content=body.content,
-            metadata={"source": "pm_turn", "provider": body.provider, "model": body.model},
+            metadata={
+                "source": "pm_turn",
+                "provider": harness_metadata["provider"],
+                "model": harness_metadata["model"],
+            },
         )
         structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
         checkpoint_updates: list[dict] = []
@@ -789,8 +865,14 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             metadata={
                 "source": "nidavellir_pm",
                 "skill": "planner-pm",
-                "provider": body.provider or plan.get("provider"),
-                "model": body.model or plan.get("model"),
+                "provider": harness_metadata["provider"],
+                "model": harness_metadata["model"],
+                "harness": harness_metadata["harness"],
+                "harness_conversation_id": harness_metadata["conversation_id"],
+                "prompt_section_names": harness_metadata["prompt_section_names"],
+                "injected_skill_ids": harness_metadata["injected_skill_ids"],
+                "suppressed_skill_ids": harness_metadata["suppressed_skill_ids"],
+                "estimated_tokens": harness_metadata["estimated_tokens"],
                 "active_gate": structured["active_gate"],
                 "checkpoint_updates": [{"key": item["key"], "status": item["status"]} for item in checkpoint_updates],
                 "decisions": structured["decisions"],
@@ -808,6 +890,7 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
                 **structured,
                 "checkpoint_updates": checkpoint_updates,
                 "draft_spec": draft_spec,
+                "harness": harness_metadata,
             },
         }
     except Exception as err:
