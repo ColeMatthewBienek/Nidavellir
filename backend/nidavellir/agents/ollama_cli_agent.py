@@ -15,8 +15,14 @@ DEFAULT_OLLAMA_MODEL = "qwen3.6:27b"
 class OllamaCliAgent(CLIAgent):
     provider_type: ClassVar[str] = "ollama"
 
-    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
-        super().__init__(slot_id, workdir, model_id=model_id)
+    def __init__(
+        self,
+        slot_id: int,
+        workdir: Path,
+        model_id: str | None = None,
+        dangerousness: str = "restricted",
+    ) -> None:
+        super().__init__(slot_id, workdir, model_id=model_id, dangerousness=dangerousness)
         self._client: httpx.AsyncClient | None = None
         self._prompt: str | None = None
         self._last_done_payload: dict | None = None

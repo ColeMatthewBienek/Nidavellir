@@ -12,14 +12,18 @@ from .events import AgentActivityEvent
 class ClaudeAgent(CLIAgent):
     provider_type: ClassVar[str] = "claude"
 
-    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
-        super().__init__(slot_id, workdir, model_id=model_id)
+    def __init__(
+        self,
+        slot_id: int,
+        workdir: Path,
+        model_id: str | None = None,
+        dangerousness: str = "restricted",
+    ) -> None:
+        super().__init__(slot_id, workdir, model_id=model_id, dangerousness=dangerousness)
         self._process: asyncio.subprocess.Process | None = None
 
     @property
     def cmd(self) -> list[str]:
-        from nidavellir.agents.registry import PROVIDER_REGISTRY
-        manifest = PROVIDER_REGISTRY["claude"]
         base = [
             "claude",
             "--print",
@@ -30,7 +34,7 @@ class ClaudeAgent(CLIAgent):
         ]
         if self.model_id:
             base += ["--model", self.model_id]
-        for flag in manifest.extra_flags:
+        for flag in self.provider_safety_flags():
             if flag not in base:
                 base.append(flag)
         return base

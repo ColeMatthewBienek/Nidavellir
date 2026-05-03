@@ -54,9 +54,21 @@ def test_claude_cmd_model_flag_respects_all_three_tiers():
         assert cmd[cmd.index("--model") + 1] == model
 
 
-def test_claude_cmd_includes_dangerously_skip_permissions():
+def test_claude_cmd_is_restricted_by_default():
     from nidavellir.agents.claude_agent import ClaudeAgent
     agent = ClaudeAgent(slot_id=0, workdir=Path("/tmp"), model_id="claude-sonnet-4-6")
+    assert "--dangerously-skip-permissions" not in agent.cmd
+    assert "--tools" in agent.cmd
+
+
+def test_claude_cmd_free_rein_includes_dangerously_skip_permissions():
+    from nidavellir.agents.claude_agent import ClaudeAgent
+    agent = ClaudeAgent(
+        slot_id=0,
+        workdir=Path("/tmp"),
+        model_id="claude-sonnet-4-6",
+        dangerousness="free_rein",
+    )
     assert "--dangerously-skip-permissions" in agent.cmd
 
 
@@ -74,6 +86,14 @@ def test_codex_cmd_includes_model_flag():
     cmd = agent.cmd
     assert "-m" in cmd
     assert cmd[cmd.index("-m") + 1] == "gpt-5.4"
+    assert "--sandbox" in cmd
+    assert "read-only" in cmd
+
+
+def test_codex_cmd_free_rein_bypasses_approvals_and_sandbox():
+    from nidavellir.agents.codex_agent import CodexAgent
+    agent = CodexAgent(slot_id=0, workdir=Path("/tmp"), model_id="gpt-5.4", dangerousness="free_rein")
+    assert "--dangerously-bypass-approvals-and-sandbox" in agent.cmd
 
 
 def test_codex_cmd_mini_model():

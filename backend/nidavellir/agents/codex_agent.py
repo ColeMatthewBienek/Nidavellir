@@ -38,8 +38,14 @@ def _is_rust_log_line(line: str) -> bool:
 class CodexAgent(CLIAgent):
     provider_type: ClassVar[str] = "codex"
 
-    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
-        super().__init__(slot_id, workdir, model_id=model_id)
+    def __init__(
+        self,
+        slot_id: int,
+        workdir: Path,
+        model_id: str | None = None,
+        dangerousness: str = "restricted",
+    ) -> None:
+        super().__init__(slot_id, workdir, model_id=model_id, dangerousness=dangerousness)
         self._process: asyncio.subprocess.Process | None = None
         self._last_input_tokens:  int | None = None
         self._last_output_tokens: int | None = None
@@ -57,7 +63,7 @@ class CodexAgent(CLIAgent):
     @property
     def cmd(self) -> list[str]:
         model = self.model_id or DEFAULT_CODEX_MODEL
-        return ["codex", "exec", "--json", "-m", model]
+        return ["codex", "exec", "--json", "-m", model, *self.provider_safety_flags()]
 
     async def start(self) -> None:
         # Codex writes its interactive output (dividers, role labels, content) to

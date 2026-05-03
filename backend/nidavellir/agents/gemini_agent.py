@@ -9,8 +9,14 @@ from .base import CLIAgent
 class GeminiAgent(CLIAgent):
     provider_type: ClassVar[str] = "gemini"
 
-    def __init__(self, slot_id: int, workdir: Path, model_id: str | None = None) -> None:
-        super().__init__(slot_id, workdir, model_id=model_id)
+    def __init__(
+        self,
+        slot_id: int,
+        workdir: Path,
+        model_id: str | None = None,
+        dangerousness: str = "restricted",
+    ) -> None:
+        super().__init__(slot_id, workdir, model_id=model_id, dangerousness=dangerousness)
 
     @property
     def cmd(self) -> list[str]:

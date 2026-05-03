@@ -6,7 +6,7 @@ import { buildCompletionReport, formatDuration, parseDiffFiles, type CompletionR
 import type { CodeRef } from '@/lib/liveRefs';
 import { buildActivityTimeline, type ActivityTimelineBlock, type ActivityTimelineItem } from '@/lib/activityTimeline';
 
-type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'audit' | 'git';
+type RightSidebarTab = 'working-set' | 'summary' | 'review' | 'instructions' | 'commands' | 'approvals' | 'audit' | 'git';
 type InstructionViewMode = 'edit' | 'preview';
 type ReviewScope = 'last-turn' | 'unstaged' | 'staged' | 'branch';
 
@@ -20,6 +20,7 @@ const TABS: Array<{ id: RightSidebarTab; label: string }> = [
   { id: 'review', label: 'Review' },
   { id: 'instructions', label: 'Instructions' },
   { id: 'commands', label: 'Commands' },
+  { id: 'approvals', label: 'Approvals' },
   { id: 'audit', label: 'Audit' },
   { id: 'git', label: 'Git' },
 ];
@@ -140,6 +141,23 @@ interface CommandPreset {
   id: string;
   label: string;
   command: string;
+}
+
+interface ToolRequestRecord {
+  id: string;
+  conversation_id?: string | null;
+  provider: string;
+  tool_name: string;
+  action: string;
+  status: 'pending' | 'approved' | 'denied' | 'observed' | 'failed';
+  path?: string | null;
+  command?: string | null;
+  workspace?: string | null;
+  arguments?: Record<string, unknown> | null;
+  permission?: PermissionEvaluationResult | null;
+  reason?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
 }
 
 interface CommentDraft {
@@ -2179,6 +2197,151 @@ function CommandsTab() {
   );
 }
 
+function ApprovalsTab() {
+  const activeConversationId = useAgentStore((state) => state.activeConversationId);
+  const resourceRevision = useAgentStore((state) => state.resourceRevision);
+  const [items, setItems] = useState<ToolRequestRecord[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadItems = () => {
+    const params = new URLSearchParams();
+    if (activeConversationId) params.set('conversationId', activeConversationId);
+    fetch(`http://localhost:7430/api/tool-requests?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`tool_requests_${response.status}`);
+        return response.json() as Promise<ToolRequestRecord[]>;
+      })
+      .then(setItems)
+      .catch((err) => setError(err instanceof Error ? err.message : 'tool_requests_failed'));
+  };
+
+  useEffect(() => {
+    loadItems();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId, resourceRevision]);
+
+  const resolve = (id: string, action: 'approve' | 'deny') => {
+    fetch(`http://localhost:7430/api/tool-requests/${id}/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: action === 'approve' ? 'approved from Nidavellir UI' : 'denied from Nidavellir UI' }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`tool_request_${action}_${response.status}`);
+        return response.json() as Promise<ToolRequestRecord>;
+      })
+      .then((updated) => setItems((current) => current.map((item) => item.id === updated.id ? updated : item)))
+      .catch((err) => setError(err instanceof Error ? err.message : `tool_request_${action}_failed`));
+  };
+
+  return (
+    <div style={{
+      flex: 1,
+      overflowY: 'auto',
+      padding: 14,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <SidebarSectionTitle>Tool Requests</SidebarSectionTitle>
+      <div style={{ color: 'var(--t1)', fontSize: 12, lineHeight: 1.5 }}>
+        Provider tool calls that need Nidavellir approval land here before execution. Observed native calls are kept as audit evidence.
+      </div>
+      {error && <div style={{ color: 'var(--red)', fontSize: 12 }}>{error}</div>}
+      <button
+        type="button"
+        onClick={loadItems}
+        style={{
+          alignSelf: 'flex-start',
+          border: '1px solid var(--bd)',
+          borderRadius: 6,
+          background: 'var(--bg2)',
+          color: 'var(--t0)',
+          cursor: 'pointer',
+          padding: '5px 9px',
+          fontSize: 11,
+          fontWeight: 650,
+        }}
+      >
+        Reload
+      </button>
+      {items.length === 0 ? (
+        <div style={{ color: 'var(--t1)', fontSize: 12 }}>No tool requests yet.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {items.map((item) => (
+            <div key={item.id} style={{
+              border: `1px solid ${item.status === 'pending' ? '#d29922' : 'var(--bd)'}`,
+              borderRadius: 7,
+              background: 'var(--bg0)',
+              padding: 10,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 7,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750 }}>{item.tool_name}</div>
+                  <div style={{ color: 'var(--t1)', fontSize: 11 }}>{item.provider} · {item.action}</div>
+                </div>
+                <span style={{
+                  color: item.status === 'pending' ? '#d29922' : item.status === 'approved' ? 'var(--green)' : item.status === 'denied' ? 'var(--red)' : 'var(--t1)',
+                  fontSize: 10,
+                  textTransform: 'uppercase',
+                  fontWeight: 750,
+                }}>
+                  {item.status}
+                </span>
+              </div>
+              {Boolean(item.command || item.path || item.arguments?.args) && (
+                <pre style={{
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  color: 'var(--t0)',
+                  background: 'var(--bg2)',
+                  border: '1px solid var(--bd)',
+                  borderRadius: 5,
+                  padding: 8,
+                  fontSize: 11,
+                  lineHeight: 1.4,
+                  maxHeight: 120,
+                  overflow: 'auto',
+                }}>{item.command || item.path || String(item.arguments?.args ?? '')}</pre>
+              )}
+              {item.reason && <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>{item.reason}</div>}
+              {item.status === 'pending' && (
+                <div style={{ display: 'flex', gap: 7, justifyContent: 'flex-end' }}>
+                  <button type="button" onClick={() => resolve(item.id, 'deny')} style={{
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: 'transparent',
+                    color: 'var(--red)',
+                    cursor: 'pointer',
+                    padding: '5px 8px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                  }}>Deny</button>
+                  <button type="button" onClick={() => resolve(item.id, 'approve')} style={{
+                    border: '1px solid var(--bd)',
+                    borderRadius: 5,
+                    background: '#23863633',
+                    color: 'var(--t0)',
+                    cursor: 'pointer',
+                    padding: '5px 8px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                  }}>Approve</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RightSidebar({ onClose }: RightSidebarProps) {
   const [activeTab, setActiveTab] = useState<RightSidebarTab>('working-set');
   const [reviewScope, setReviewScope] = useState<ReviewScope>('last-turn');
@@ -2290,7 +2453,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
         aria-label="Right sidebar sections"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+          gridTemplateColumns: 'repeat(8, minmax(0, 1fr))',
           gap: 4,
           padding: 8,
           borderBottom: '1px solid var(--bd)',
@@ -2340,6 +2503,7 @@ export function RightSidebar({ onClose }: RightSidebarProps) {
       )}
       {activeTab === 'instructions' && <ProjectInstructionsTab />}
       {activeTab === 'commands' && <CommandsTab />}
+      {activeTab === 'approvals' && <ApprovalsTab />}
       {activeTab === 'audit' && <AuditTab />}
       {activeTab === 'git' && <GitTab selectedPath={selectedReviewRef?.path} onReviewFile={(path) => {
         setSelectedReviewRef({ kind: 'code', path, label: path });

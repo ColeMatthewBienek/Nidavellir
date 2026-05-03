@@ -3,9 +3,27 @@ import { TopBar } from "../components/shared/TopBar";
 import { Btn } from "../components/shared/Btn";
 import { useProviders } from "@/hooks/useProviders";
 import { getProviderTheme, ROLE_THEME } from "@/lib/providerTheme";
+import type { ProviderDangerousness } from "@/lib/types";
+import { useAgentStore } from "@/store/agentStore";
 
 export function SettingsScreen() {
   const { providers } = useProviders();
+  const setProviders = useAgentStore((state) => state.setProviders);
+
+  const updateDangerousness = (providerId: string, dangerousness: ProviderDangerousness) => {
+    fetch(`http://localhost:7430/api/agents/provider-policies/${providerId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dangerousness }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`provider_policy_${response.status}`);
+        return fetch("http://localhost:7430/api/agents/providers");
+      })
+      .then(async (response) => response.json() as Promise<{ providers: typeof providers }>)
+      .then((data) => setProviders(data.providers))
+      .catch((err) => console.warn("provider policy update failed", err));
+  };
 
   return (
     <div style={{ display: "flex", flex: 1, flexDirection: "column", overflow: "hidden" }}>
@@ -93,6 +111,38 @@ export function SettingsScreen() {
                   {/* Description */}
                   <p style={{ fontSize: 11, color: "var(--t1)", marginBottom: 10, lineHeight: 1.5 }}>{p.description}</p>
 
+                  <div style={{
+                    border: "1px solid var(--bd)",
+                    borderRadius: 6,
+                    padding: 10,
+                    background: "var(--bg1)",
+                    marginBottom: 10,
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) auto",
+                    gap: 10,
+                    alignItems: "center",
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t0)" }}>Dangerousness</div>
+                      <div style={{ fontSize: 10, color: "var(--t1)", lineHeight: 1.45, marginTop: 3 }}>
+                        {p.dangerousness_warning || (p.effective_dangerousness === "free_rein"
+                          ? "Provider-native permissions are bypassed. Use only when the workspace is trusted."
+                          : "Nidavellir constrains provider-native tools according to this mode.")}
+                      </div>
+                    </div>
+                    <select
+                      aria-label={`${p.display_name} dangerousness`}
+                      value={p.dangerousness ?? p.default_dangerousness ?? "restricted"}
+                      onChange={(event) => updateDangerousness(p.id, event.target.value as ProviderDangerousness)}
+                      style={{ background: "var(--bg2)", border: "1px solid var(--bd)", borderRadius: 5, padding: "5px 8px", fontSize: 12, color: "var(--t0)", outline: "none", cursor: "pointer" }}
+                    >
+                      <option value="restricted">Restricted</option>
+                      <option value="ask">Ask</option>
+                      <option value="trusted">Trusted</option>
+                      <option value="free_rein">Free rein</option>
+                    </select>
+                  </div>
+
                   {/* Roles */}
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10 }}>
                     <span style={{ fontSize: 10, color: "var(--t1)", marginRight: 2 }}>roles:</span>
@@ -118,6 +168,7 @@ export function SettingsScreen() {
                       { flag: p.supports_bash_execution,     label: "bash" },
                       { flag: p.supports_worktree_isolation, label: "worktree" },
                       { flag: p.emits_tool_use_blocks,       label: "tool-use" },
+                      { flag: Boolean(p.supports_mediated_tool_approval), label: "mediated" },
                       { flag: p.streams_incrementally,       label: "streaming" },
                       { flag: !p.requires_network,           label: "offline" },
                     ].map(({ flag, label }) => (
