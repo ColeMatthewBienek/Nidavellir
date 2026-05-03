@@ -338,6 +338,70 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_orchestration_run_ready_walks_runnable_command_steps(tmp_path: Path):
+    setup_app(tmp_path)
+    repo = create_git_repo(tmp_path / "repo")
+    first_worktree = tmp_path / "worktrees" / "first"
+    second_worktree = tmp_path / "worktrees" / "second"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Run ready test",
+            "baseRepoPath": str(repo),
+            "baseBranch": "main",
+        })).json()
+        first = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "First"})).json()
+        second = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "Second"})).json()
+        await c.post(f"/api/orchestration/tasks/{task['id']}/edges", json={
+            "fromNodeId": first["id"],
+            "toNodeId": second["id"],
+        })
+        await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": first["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/run-ready-test/first",
+            "worktreePath": str(first_worktree),
+        })
+        await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": second["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/run-ready-test/second",
+            "worktreePath": str(second_worktree),
+        })
+        first_step = (await c.post(f"/api/orchestration/nodes/{first['id']}/steps", json={
+            "title": "Write first marker",
+            "type": "command",
+            "config": {"command": "printf first > first.txt"},
+        })).json()
+        second_step = (await c.post(f"/api/orchestration/nodes/{second['id']}/steps", json={
+            "title": "Write second marker",
+            "type": "command",
+            "config": {"command": "printf second > second.txt"},
+        })).json()
+
+        result = await c.post(f"/api/orchestration/tasks/{task['id']}/run-ready", json={
+            "conversationId": "conv-run-ready",
+            "maxSteps": 5,
+        })
+        assert result.status_code == 200
+        body = result.json()
+        assert body["executed"] == 2
+        assert [item["step_id"] for item in body["results"]] == [first_step["id"], second_step["id"]]
+        assert (first_worktree / "first.txt").read_text(encoding="utf-8") == "first"
+        assert (second_worktree / "second.txt").read_text(encoding="utf-8") == "second"
+        statuses = {step["id"]: step["status"] for step in body["task"]["steps"]}
+        assert statuses[first_step["id"]] == "complete"
+        assert statuses[second_step["id"]] == "complete"
+        assert body["pending_manual"] == []
+
+        events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
+        event_types = {event["type"] for event in events.json()}
+        assert "run_ready_finished" in event_types
+
+
+@pytest.mark.asyncio
 async def test_orchestration_rejects_invalid_status(tmp_path: Path):
     setup_app(tmp_path)
 
