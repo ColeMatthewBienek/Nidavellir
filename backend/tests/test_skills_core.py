@@ -162,6 +162,22 @@ def test_builtin_humanspeak_replaces_verbose_imported_skill(tmp_path):
     assert "~/.claude/commands" in updated.instructions.core
 
 
+def test_builtin_planner_pm_skill_is_seeded_for_agent_role(tmp_path):
+    store = SkillStore(str(tmp_path / "skills.db"))
+
+    ensure_builtin_skills(store)
+
+    planner = next(skill for skill in store.list_skills() if skill.slug == "planner-pm")
+    assert planner.name == "Planner PM"
+    assert planner.scope.value == "agent_role"
+    assert planner.activation_mode.value == "automatic"
+    assert planner.enabled is True
+    assert planner.show_in_slash is True
+    assert "Walk the user gate by gate" in planner.instructions.core
+    assert "checkpoint rail is read-only" in planner.instructions.core
+    assert {trigger.type.value for trigger in planner.triggers} == {"agent_role", "keyword"}
+
+
 def test_activation_engine_is_deterministic_and_respects_enabled_mode_compatibility_budget():
     enabled = make_skill(enabled=True, priority=80)
     disabled = make_skill(id="disabled", slug="disabled", enabled=False)

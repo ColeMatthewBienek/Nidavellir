@@ -327,33 +327,148 @@ def _stringify_agent_event(item: object) -> str:
     return str(item)
 
 
-def _planner_pm_response(plan: dict, user_content: str) -> tuple[str, str]:
+PLANNER_GATE_ORDER = [
+    "intake",
+    "repo_target",
+    "scope",
+    "acceptance",
+    "verification",
+    "risks",
+    "spec_draft",
+    "spec_approved",
+]
+
+
+def _checkpoint_status(plan: dict, key: str) -> str:
+    return next((item.get("status", "missing") for item in plan.get("planning_checkpoints", []) if item.get("key") == key), "missing")
+
+
+def _next_open_planner_gate(plan: dict) -> str:
+    return next((key for key in PLANNER_GATE_ORDER if _checkpoint_status(plan, key) != "agreed"), "spec_approved")
+
+
+def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: str) -> dict:
     text = user_content.lower()
-    blockers: list[str] = []
-    if not plan.get("repo_path"):
-        blockers.append("target repo or new-project path")
+    checkpoint_updates: list[dict] = []
+    decisions: list[str] = []
+    assumptions: list[str] = []
+    blockers: list[dict] = []
+    spec_deltas: list[dict] = []
+
+    if any(token in text for token in ("scope", "non-goal", "non goal", "in scope", "out of scope", "first slice", "first autonomous")):
+        checkpoint_updates.append({
+            "key": "scope",
+            "status": "agreed",
+            "summary": "Scope/non-goals evidence captured in PM discussion.",
+            "source_message_ids": [user_message_id],
+        })
+        spec_deltas.append({"section": "Scope", "source_message_id": user_message_id, "content": user_content})
+    if any(token in text for token in ("test", "verify", "verification", "pytest", "typecheck", "smoke", "screenshot")):
+        checkpoint_updates.append({
+            "key": "verification",
+            "status": "agreed",
+            "summary": "Verification strategy evidence captured in PM discussion.",
+            "source_message_ids": [user_message_id],
+        })
+        spec_deltas.append({"section": "Verification Strategy", "source_message_id": user_message_id, "content": user_content})
+    if any(token in text for token in ("risk", "dependency", "depends", "migration", "credential", "secret", "destructive", "guardrail")):
+        checkpoint_updates.append({
+            "key": "risks",
+            "status": "agreed",
+            "summary": "Risks/dependencies evidence captured in PM discussion.",
+            "source_message_ids": [user_message_id],
+        })
+        spec_deltas.append({"section": "Risks and Dependencies", "source_message_id": user_message_id, "content": user_content})
+    if "decomposer" in text and "approved spec" in text:
+        decisions.append("Decomposer consumes the approved agentic-forward spec artifact, not raw intake.")
+
+    if not plan.get("repo_path") and not any(update["key"] == "repo_target" for update in checkpoint_updates):
+        blockers.append({
+            "gate": "repo_target",
+            "question": "Which existing repo path or new-project setup path should autonomous work target?",
+            "why_it_matters": "Worktree execution needs a reproducible Git baseline.",
+        })
     if not plan.get("acceptance_criteria"):
-        blockers.append("testable acceptance criteria")
-    if "test" not in text and "verify" not in text and "verification" not in text:
-        blockers.append("verification strategy")
+        blockers.append({
+            "gate": "acceptance",
+            "question": "What testable acceptance criteria should prove this is done?",
+            "why_it_matters": "The decomposer and EM need objective pass/fail signals.",
+        })
+    if _checkpoint_status(plan, "verification") != "agreed" and not any(update["key"] == "verification" for update in checkpoint_updates):
+        blockers.append({
+            "gate": "verification",
+            "question": "What verification should Nidavellir run or inspect before handoff?",
+            "why_it_matters": "The PM must validate independently instead of trusting agent self-report.",
+        })
 
     if any(token in text for token in ("approved", "agreed", "ship it", "that's it", "thats it")):
-        return (
-            "approval",
-            "Accepted. I have enough signal to draft the agentic-forward spec next. I will preserve the PM discussion decisions and make the decomposer consume the approved spec artifact, not the raw intake.",
-        )
+        if blockers:
+            active_gate = blockers[0]["gate"]
+            content = (
+                "I cannot approve this for decomposition yet. "
+                f"The next gate is {active_gate}: {blockers[0]['question']}"
+            )
+            kind = "question"
+        else:
+            active_gate = "spec_draft" if _checkpoint_status(plan, "spec_draft") != "agreed" else "spec_approved"
+            content = (
+                "Accepted. I have enough evidence to draft the agentic-forward spec next. "
+                "I will preserve the PM discussion decisions and keep decomposition pointed at the approved spec artifact."
+            )
+            kind = "approval"
+            checkpoint_updates.append({
+                "key": "spec_approved",
+                "status": "proposed",
+                "summary": "User approval signal captured; final approval waits for spec artifact evidence.",
+                "source_message_ids": [user_message_id],
+            })
+        return {
+            "kind": kind,
+            "content": content,
+            "active_gate": active_gate,
+            "checkpoint_updates": checkpoint_updates,
+            "decisions": decisions,
+            "assumptions": assumptions,
+            "blockers": blockers,
+            "spec_deltas": spec_deltas,
+        }
 
     if blockers:
-        return (
-            "question",
-            "As Nidavellir PM, I would not send this to decomposition yet. "
-            f"We still need: {', '.join(blockers)}. What should we lock for those before I draft the spec?",
-        )
+        active_gate = blockers[0]["gate"]
+        return {
+            "kind": "question",
+            "content": (
+                "As Nidavellir PM, I would not send this to decomposition yet. "
+                f"The next gate is {active_gate}: {blockers[0]['question']}"
+            ),
+            "active_gate": active_gate,
+            "checkpoint_updates": checkpoint_updates,
+            "decisions": decisions,
+            "assumptions": assumptions,
+            "blockers": blockers,
+            "spec_deltas": spec_deltas,
+        }
 
-    return (
-        "question",
-        "As Nidavellir PM, the shape is getting close. Before I draft the spec, confirm the first autonomous execution slice and any explicit non-goals so the decomposer does not create broad theme tasks.",
-    )
+    active_gate = _next_open_planner_gate(plan)
+    next_questions = {
+        "scope": "What is the first autonomous execution slice, and what is explicitly out of scope?",
+        "risks": "What dependencies, risk areas, or autonomy guardrails should the EM know before decomposition?",
+        "spec_draft": "Should I draft the agentic-forward spec from the evidence captured so far?",
+        "spec_approved": "After reviewing the spec, do you approve it for decomposition?",
+    }
+    return {
+        "kind": "question",
+        "content": (
+            "As Nidavellir PM, the planning evidence is improving. "
+            f"The next gate is {active_gate}: {next_questions.get(active_gate, 'What evidence should we capture for this gate?')}"
+        ),
+        "active_gate": active_gate,
+        "checkpoint_updates": checkpoint_updates,
+        "decisions": decisions,
+        "assumptions": assumptions,
+        "blockers": blockers,
+        "spec_deltas": spec_deltas,
+    }
 
 
 def _step_by_id(task: dict, step_id: str) -> dict | None:
@@ -563,17 +678,44 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             content=body.content,
             metadata={"source": "pm_turn", "provider": body.provider, "model": body.model},
         )
-        pm_kind, pm_content = _planner_pm_response(plan, body.content)
+        structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
+        checkpoint_updates: list[dict] = []
+        for update in structured["checkpoint_updates"]:
+            checkpoint = store.update_planning_checkpoint(
+                plan_inbox_item_id=item_id,
+                key=update["key"],
+                status=update["status"],
+                summary=update["summary"],
+                source_message_ids=update["source_message_ids"],
+            )
+            if checkpoint is not None:
+                checkpoint_updates.append(checkpoint)
         pm_message = store.create_planner_discussion_message(
             plan_inbox_item_id=item_id,
             role="planner",
-            kind=pm_kind,
-            content=pm_content,
-            metadata={"source": "nidavellir_pm", "provider": body.provider or plan.get("provider"), "model": body.model or plan.get("model")},
+            kind=structured["kind"],
+            content=structured["content"],
+            metadata={
+                "source": "nidavellir_pm",
+                "skill": "planner-pm",
+                "provider": body.provider or plan.get("provider"),
+                "model": body.model or plan.get("model"),
+                "active_gate": structured["active_gate"],
+                "checkpoint_updates": [{"key": item["key"], "status": item["status"]} for item in checkpoint_updates],
+                "decisions": structured["decisions"],
+                "assumptions": structured["assumptions"],
+                "blockers": structured["blockers"],
+                "spec_deltas": structured["spec_deltas"],
+            },
         )
+        refreshed_plan = store.get_plan_inbox_item(item_id)
         return {
             "messages": [user_message, pm_message],
-            "plan": store.get_plan_inbox_item(item_id),
+            "plan": refreshed_plan,
+            "structured": {
+                **structured,
+                "checkpoint_updates": checkpoint_updates,
+            },
         }
     except Exception as err:
         _handle_store_error(err)

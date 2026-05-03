@@ -148,6 +148,12 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
         assert turn_body["messages"][0]["role"] == "user"
         assert turn_body["messages"][0]["metadata"]["provider"] == "codex"
         assert turn_body["messages"][1]["metadata"]["model"] == "gpt-5.5"
+        assert turn_body["messages"][1]["metadata"]["skill"] == "planner-pm"
+        assert turn_body["messages"][1]["metadata"]["active_gate"] == "scope"
+        assert turn_body["structured"]["active_gate"] == "scope"
+        assert turn_body["structured"]["checkpoint_updates"][0]["key"] == "verification"
+        assert turn_body["structured"]["checkpoint_updates"][0]["source_message_ids"] == [turn_body["messages"][0]["id"]]
+        assert turn_body["structured"]["spec_deltas"][0]["section"] == "Verification Strategy"
         assert turn_body["messages"][1]["role"] == "planner"
         assert turn_body["messages"][1]["content"].startswith("As Nidavellir PM")
 
@@ -157,6 +163,7 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path):
         assert body["status"] == "planning"
         assert body["planning_checkpoints"][1]["status"] == "agreed"
         assert body["planning_checkpoints"][3]["status"] == "agreed"
+        assert body["planning_checkpoints"][4]["status"] == "agreed"
         assert [message["kind"] for message in body["discussion_messages"]] == ["message", "question", "decision", "message", "question"]
         assert body["discussion_messages"][2]["content"].startswith("Decomposer consumes")
 

@@ -15,6 +15,7 @@ from .store import SkillStore
 
 SKILL_BUILDER_ID = "skill-builder"
 HUMANSPEAK_SLUG = "humanspeak"
+PLANNER_PM_SLUG = "planner-pm"
 
 SKILL_BUILDER_MARKDOWN = """---
 name: skill-builder
@@ -123,6 +124,48 @@ This is a Nidavellir slash skill. Do not create, edit, reference, or remove prov
 - If the input is already clean, return it unchanged.
 """
 
+PLANNER_PM_MARKDOWN = """---
+name: planner-pm
+description: Nidavellir's first-class planning PM for autonomous coding workflows. Use for turning rough user intent into an approved, agentic-forward spec and walking the user through deterministic planning gates.
+---
+
+# Planner PM
+
+You are Nidavellir's Planner PM. Convert user intent into executable, testable, low-risk engineering work. You are a project manager, critic, and QA supervisor, not the default coding agent.
+
+## Operating Principles
+
+- Be clear, skeptical, concise, requirements-driven, evidence-oriented, and test-focused.
+- Walk the user gate by gate. Do not ask generic "what else?" questions.
+- Ask one focused clarification only when the next gate is blocked.
+- Require evidence before marking progress complete.
+- Preserve dirty worktrees and partial work; never discard them automatically.
+- Merge only after explicit approval.
+
+## Planning Gates
+
+Advance gates only when deterministic evidence exists. The checkpoint rail is read-only status; users cannot manually certify gates.
+
+1. Intake captured: raw goal and initial constraints exist.
+2. Repo target clarified: repo path or new-project setup path, base branch or baseline strategy.
+3. Scope agreed: in-scope outcomes and non-goals are explicit.
+4. Acceptance agreed: testable acceptance criteria and user-visible success conditions.
+5. Verification agreed: commands, smoke checks, screenshots, or review method.
+6. Risks and dependencies agreed: ordering, migrations, credentials, destructive operations, autonomy guardrails.
+7. Spec draft generated: decomposer-ready Markdown spec exists.
+8. Spec approved: user approval exists after all required evidence exists.
+
+## PM Turn Output
+
+Each PM turn should produce a short user-facing message, the active gate, one focused question when blocked, proposed decisions or assumptions, proposed checkpoint updates with evidence references, and spec deltas when the spec should change.
+
+Never mark a checkpoint complete because the user says "check it off". Identify the concrete message, repo fact, readiness report, spec section, or validation artifact that satisfies it.
+
+## Supervision Boundary
+
+The PM scopes, gates, supervises, validates, and reports. Coding agents implement only after approval and EM acceptance. Sandcastle-style runner mechanics are an execution substrate below the PM, not a replacement for the PM flow.
+"""
+
 
 def ensure_builtin_skills(store: SkillStore) -> None:
     if store.get_skill(SKILL_BUILDER_ID) is None:
@@ -145,6 +188,7 @@ def ensure_builtin_skills(store: SkillStore) -> None:
         )
         store.create_skill(skill, change_reason="builtin seed")
     _ensure_humanspeak_skill(store)
+    _ensure_planner_pm_skill(store)
 
 
 def _ensure_humanspeak_skill(store: SkillStore) -> None:
@@ -179,4 +223,45 @@ def _ensure_humanspeak_skill(store: SkillStore) -> None:
         scope=existing.scope.value,
         activation_mode=SkillActivationMode.MANUAL.value,
         triggers=[],
+    )
+
+
+def _ensure_planner_pm_skill(store: SkillStore) -> None:
+    existing = next((skill for skill in store.list_skills() if skill.slug == PLANNER_PM_SLUG), None)
+    if existing is None:
+        skill = NidavellirSkill(
+            id=PLANNER_PM_SLUG,
+            slug=PLANNER_PM_SLUG,
+            name="Planner PM",
+            description="Guide autonomous coding work through deterministic PM planning gates.",
+            scope=SkillScope.AGENT_ROLE,
+            activation_mode=SkillActivationMode.AUTOMATIC,
+            triggers=[
+                SkillTrigger(type="agent_role", value="planner_pm", weight=10.0),
+                SkillTrigger(type="keyword", value="agentic-forward spec", weight=3.0),
+            ],
+            instructions=SkillInstructions(core=PLANNER_PM_MARKDOWN),
+            required_capabilities=SkillCapabilityRequirements(long_context=True),
+            priority=90,
+            enabled=True,
+            show_in_slash=True,
+            version=1,
+            status=SkillStatus.VALIDATED,
+            source=SkillSource(format=SkillSourceFormat.NATIVE, origin="nidavellir", source_type="builtin"),
+        )
+        store.create_skill(skill, change_reason="builtin seed")
+        return
+    if existing.instructions.core.strip() == PLANNER_PM_MARKDOWN.strip():
+        return
+    store.update_skill_details(
+        existing.id,
+        name="Planner PM",
+        slug=PLANNER_PM_SLUG,
+        core_instructions=PLANNER_PM_MARKDOWN,
+        scope=SkillScope.AGENT_ROLE.value,
+        activation_mode=SkillActivationMode.AUTOMATIC.value,
+        triggers=[
+            {"type": "agent_role", "value": "planner_pm", "weight": 10.0},
+            {"type": "keyword", "value": "agentic-forward spec", "weight": 3.0},
+        ],
     )
