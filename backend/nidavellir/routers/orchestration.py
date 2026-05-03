@@ -770,6 +770,7 @@ def create_worktree(task_id: str, body: WorktreeCreateRequest, request: Request)
             node_id=body.nodeId,
             repo_path=git_info["repo_path"],
             worktree_path=git_info["worktree_path"],
+            kind="execution" if body.nodeId else "task",
             base_branch=base_branch,
             branch_name=branch_name,
             base_commit=git_info["base_commit"],
@@ -1028,6 +1029,20 @@ def stage_worktree_integration(worktree_id: str, request: Request, body: Worktre
             source_ref=source_ref,
             message=message,
         )
+        integration_worktree = store.create_worktree(
+            task_id=worktree["task_id"],
+            node_id=worktree["node_id"],
+            repo_path=worktree["repo_path"],
+            worktree_path=integration["worktree_path"],
+            kind="integration",
+            base_branch=target_ref,
+            branch_name=integration["branch_name"],
+            base_commit=integration["base_commit"],
+            head_commit=integration["head_commit"],
+            status=integration["status"],
+            dirty_count=integration["dirty_count"],
+            dirty_summary=integration["dirty_summary"],
+        )
     except Exception as err:
         _handle_store_error(err)
         raise
@@ -1044,7 +1059,7 @@ def stage_worktree_integration(worktree_id: str, request: Request, body: Worktre
             "merged": integration["merged"],
         },
     )
-    return {"source_worktree": worktree, "integration": integration}
+    return {"source_worktree": worktree, "integration_worktree": integration_worktree, "integration": integration}
 
 
 @router.delete("/worktrees/{worktree_id}")

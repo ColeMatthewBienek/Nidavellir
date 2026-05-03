@@ -177,6 +177,7 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         assert created.status_code == 200
         worktree = created.json()
         assert worktree["node_id"] == node["id"]
+        assert worktree["kind"] == "execution"
         assert worktree["status"] == "clean"
         assert worktree["dirty_count"] == 0
         assert worktree_path.exists()
@@ -228,9 +229,13 @@ async def test_orchestration_creates_refreshes_and_removes_worktrees(tmp_path: P
         staged = await c.post(f"/api/orchestration/worktrees/{worktree['id']}/integration-worktree")
         assert staged.status_code == 200
         integration = staged.json()["integration"]
+        integration_worktree = staged.json()["integration_worktree"]
         assert integration["merged"] is True
         assert integration["status"] == "clean"
         assert integration["branch_name"].startswith("integration/")
+        assert integration_worktree["kind"] == "integration"
+        assert integration_worktree["node_id"] == node["id"]
+        assert integration_worktree["branch_name"] == integration["branch_name"]
         assert Path(integration["worktree_path"]).exists()
         staged_log = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=integration["worktree_path"], check=True, capture_output=True, text=True)
         assert "Integrate orchestration/worktree-test/node-a" in staged_log.stdout.strip()

@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS orchestration_worktrees (
   node_id TEXT REFERENCES orchestration_nodes(id) ON DELETE CASCADE,
   repo_path TEXT NOT NULL,
   worktree_path TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'execution',
   base_branch TEXT NOT NULL,
   branch_name TEXT NOT NULL,
   base_commit TEXT,
@@ -134,6 +135,7 @@ NODE_STATUSES = {"not_started", "ready", "running", "blocked", "failed", "comple
 STEP_STATUSES = {"pending", "ready", "running", "waiting_for_user", "failed", "complete", "skipped", "cancelled"}
 STEP_TYPES = {"manual", "agent", "command", "review", "gate", "artifact", "handoff"}
 WORKTREE_STATUSES = {"created", "clean", "dirty", "missing", "removed", "error"}
+WORKTREE_KINDS = {"task", "execution", "integration"}
 
 
 def _now() -> str:
@@ -160,6 +162,13 @@ class OrchestrationStore:
         with self._conn() as conn:
             conn.execute("PRAGMA foreign_keys = ON")
             conn.executescript(DDL)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(orchestration_worktrees)").fetchall()}
+        if "kind" not in columns:
+            conn.execute("ALTER TABLE orchestration_worktrees ADD COLUMN kind TEXT NOT NULL DEFAULT 'execution'")
+            conn.execute("UPDATE orchestration_worktrees SET kind = 'task' WHERE node_id IS NULL")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -509,7 +518,7 @@ class OrchestrationStore:
         with self._conn() as conn:
             row = conn.execute(
                 """SELECT * FROM orchestration_worktrees
-                   WHERE task_id = ? AND node_id = ? AND status != 'removed'
+                   WHERE task_id = ? AND node_id = ? AND kind = 'execution' AND status != 'removed'
                    ORDER BY created_at DESC LIMIT 1""",
                 (task_id, node_id),
             ).fetchone()
@@ -517,7 +526,7 @@ class OrchestrationStore:
                 return self._worktree_row(row)
             fallback = conn.execute(
                 """SELECT * FROM orchestration_worktrees
-                   WHERE task_id = ? AND node_id IS NULL AND status != 'removed'
+                   WHERE task_id = ? AND node_id IS NULL AND kind = 'task' AND status != 'removed'
                    ORDER BY created_at DESC LIMIT 1""",
                 (task_id,),
             ).fetchone()
@@ -611,6 +620,7 @@ class OrchestrationStore:
         base_branch: str,
         branch_name: str,
         node_id: str | None = None,
+        kind: str = "execution",
         base_commit: str | None = None,
         head_commit: str | None = None,
         status: str = "created",
@@ -623,20 +633,22 @@ class OrchestrationStore:
             if node["task_id"] != task_id:
                 raise ValueError("worktree_node_must_belong_to_task")
         self._require_status(status, WORKTREE_STATUSES, "worktree_status")
+        self._require_status(kind, WORKTREE_KINDS, "worktree_kind")
         worktree_id = str(uuid.uuid4())
         now = _now()
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO orchestration_worktrees
-                   (id, task_id, node_id, repo_path, worktree_path, base_branch, branch_name,
+                   (id, task_id, node_id, repo_path, worktree_path, kind, base_branch, branch_name,
                     base_commit, head_commit, status, dirty_count, dirty_summary_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     worktree_id,
                     task_id,
                     node_id,
                     repo_path,
                     worktree_path,
+                    kind,
                     base_branch,
                     branch_name,
                     base_commit,
@@ -648,13 +660,13 @@ class OrchestrationStore:
                     now,
                 ),
             )
-        if node_id is None:
+        if kind == "task" and node_id is None:
             self.update_task(task_id, {"base_repo_path": repo_path, "base_branch": base_branch, "task_branch": branch_name, "worktree_path": worktree_path})
         self.append_event(
             task_id=task_id,
             node_id=node_id,
             type="worktree_created",
-            payload={"branch_name": branch_name, "worktree_path": worktree_path, "status": status},
+            payload={"branch_name": branch_name, "worktree_path": worktree_path, "kind": kind, "status": status},
         )
         return self.get_worktree(worktree_id) or {}
 
@@ -675,12 +687,14 @@ class OrchestrationStore:
         worktree = self.get_worktree(worktree_id)
         if not worktree:
             return None
-        allowed = {"head_commit", "status", "dirty_count", "dirty_summary", "worktree_path", "branch_name", "base_branch"}
+        allowed = {"head_commit", "status", "dirty_count", "dirty_summary", "worktree_path", "branch_name", "base_branch", "kind"}
         values = {key: value for key, value in updates.items() if key in allowed}
         if not values:
             return worktree
         if "status" in values:
             self._require_status(values["status"], WORKTREE_STATUSES, "worktree_status")
+        if "kind" in values:
+            self._require_status(values["kind"], WORKTREE_KINDS, "worktree_kind")
         assignments = []
         params: list[Any] = []
         for key, value in values.items():
