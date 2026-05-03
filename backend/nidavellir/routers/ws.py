@@ -254,11 +254,7 @@ async def extract_memories(
             },
         )
 
-    if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
+    raw = _normalize_memory_extraction_output(raw)
 
     if not raw:
         raise MemoryExtractionError(
@@ -325,6 +321,21 @@ async def extract_memories(
     return memories
 
 
+def _normalize_memory_extraction_output(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    if raw and not raw.startswith("["):
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start >= 0 and end > start:
+            raw = raw[start:end + 1].strip()
+    return raw
+
+
 async def _extract_and_store(
     *,
     store,
@@ -350,8 +361,32 @@ async def _extract_and_store(
         memories = await extract_memories(transcript, workflow, model_id)
         if memories:
             store.save_memories(memories)
-    except Exception as exc:
+    except MemoryExtractionError as exc:
         payload: dict[str, Any] = {
+            "stage": "store_extraction",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "conversation_id": conversation_id,
+            "workflow": workflow,
+            "model": model_id,
+            "message_count": len(messages),
+            "transcript_chars": len(transcript),
+        }
+        payload.update(exc.payload)
+        payload.setdefault("error", str(exc))
+        payload["error_type"] = type(exc).__name__
+        payload["conversation_id"] = conversation_id
+        payload["message_count"] = len(messages)
+        payload["transcript_chars"] = len(transcript)
+        _log.warning("memory_extraction_failed", extra={"diagnostics": payload})
+        store.log_event(
+            event_type="extraction_failed",
+            event_subject="extraction",
+            session_id=conversation_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        payload = {
             "stage": "store_extraction",
             "error": str(exc),
             "error_type": type(exc).__name__,
@@ -362,14 +397,6 @@ async def _extract_and_store(
             "transcript_chars": len(transcript),
             "traceback": _sample_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)), 2000),
         }
-        if isinstance(exc, MemoryExtractionError):
-            payload.update(exc.payload)
-            payload.setdefault("error", str(exc))
-            payload["error_type"] = type(exc).__name__
-            payload["conversation_id"] = conversation_id
-            payload["message_count"] = len(messages)
-            payload["transcript_chars"] = len(transcript)
-
         _log.exception("memory_extraction_failed", extra={"diagnostics": payload})
         store.log_event(
             event_type="extraction_failed",
