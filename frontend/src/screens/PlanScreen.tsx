@@ -21,6 +21,7 @@ const STATUS_COLORS: Record<string, string> = {
   backlog: 'var(--t1)',
   ready: 'var(--blu)',
   running: 'var(--yel)',
+  waiting_for_user: 'var(--yel)',
   review: 'var(--prp)',
   done: 'var(--grn)',
   blocked: 'var(--red)',
@@ -412,6 +413,7 @@ function TaskDetail({
   const taskWorktree = task.worktrees.find((worktree) => worktree.kind === 'task' || (!worktree.kind && !worktree.node_id));
   const selectedNodeWorktree = selectedNode ? task.worktrees.find((worktree) => worktree.node_id === selectedNode.id && worktree.kind === 'execution') : null;
   const integrationWorktrees = task.worktrees.filter((worktree) => worktree.kind === 'integration');
+  const waitingSteps = task.steps.filter((step) => step.status === 'waiting_for_user');
   const [edgeFrom, setEdgeFrom] = useState('');
   const [edgeTo, setEdgeTo] = useState('');
 
@@ -445,6 +447,36 @@ function TaskDetail({
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {waitingSteps.length > 0 && (
+          <section style={{
+            border: '1px solid #d2992255',
+            borderRadius: 7,
+            background: '#d2992214',
+            padding: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+          }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: 'var(--yel)', fontSize: 12, fontWeight: 750 }}>Waiting for approval</div>
+              <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 3 }}>
+                {waitingSteps.length} orchestration step{waitingSteps.length === 1 ? '' : 's'} paused on mediated tool results.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('nid:navigate', { detail: 'chat' }));
+                window.dispatchEvent(new CustomEvent('nid:workspace-tab', { detail: 'approvals' }));
+              }}
+              style={{ border: '1px solid #d2992255', borderRadius: 5, background: 'var(--bg0)', color: 'var(--yel)', cursor: 'pointer', fontSize: 11, padding: '5px 8px', fontWeight: 700, whiteSpace: 'nowrap' }}
+            >
+              Open Approvals
+            </button>
+          </section>
+        )}
+
         <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
             <SectionTitle>Worktrees</SectionTitle>
@@ -641,8 +673,8 @@ function TaskDetail({
                     )}
                     {step.output_summary && <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 6 }}>{step.output_summary}</div>}
                   </div>
-                  {step.status === 'complete' ? (
-                    <StatusPill status="complete" />
+                  {step.status === 'complete' || step.status === 'waiting_for_user' ? (
+                    <StatusPill status={step.status} />
                   ) : step.type === 'command' || step.type === 'agent' ? (
                     <button
                       type="button"
