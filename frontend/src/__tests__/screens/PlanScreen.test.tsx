@@ -83,6 +83,7 @@ const detailWithWorktree = {
     node_id: 'node-1',
     repo_path: '/repo',
     worktree_path: '/repo-worktrees/node-1',
+    kind: 'execution',
     base_branch: 'main',
     branch_name: 'orchestration/build-orchestration/data-model',
     base_commit: 'abc',
@@ -172,6 +173,7 @@ describe('PlanScreen orchestration board', () => {
             node_id: 'node-1',
             repo_path: '/repo',
             worktree_path: '/repo-worktrees/node-1',
+            kind: 'execution',
             base_branch: 'main',
             branch_name: 'orchestration/build-orchestration/data-model',
             base_commit: 'abc',
@@ -191,6 +193,7 @@ describe('PlanScreen orchestration board', () => {
             node_id: 'node-1',
             repo_path: '/repo',
             worktree_path: '/repo-worktrees/node-1',
+            kind: 'execution',
             base_branch: 'main',
             branch_name: 'orchestration/build-orchestration/data-model',
             status: 'dirty',
@@ -517,7 +520,7 @@ describe('PlanScreen orchestration board', () => {
     }));
     render(<PlanScreen />);
 
-    expect(await screen.findByText('orchestration/build-orchestration/data-model')).toBeTruthy();
+    expect(await screen.findByText('execution / orchestration/build-orchestration/data-model')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     fireEvent.click(screen.getByRole('button', { name: 'Checkpoint' }));
     fireEvent.click(screen.getByRole('button', { name: 'Review' }));

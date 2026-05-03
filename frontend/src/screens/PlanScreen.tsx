@@ -88,6 +88,7 @@ interface OrchestrationWorktree {
   node_id?: string | null;
   repo_path: string;
   worktree_path: string;
+  kind: string;
   base_branch: string;
   branch_name: string;
   base_commit?: string | null;
@@ -408,8 +409,9 @@ function TaskDetail({
     ? task.steps.filter((step) => step.node_id === selectedNode.id).sort((a, b) => a.order_index - b.order_index)
     : [];
   const nodeIsRunnable = selectedNode ? task.readiness.runnable.some((item) => item.node_id === selectedNode.id) : false;
-  const taskWorktree = task.worktrees.find((worktree) => !worktree.node_id);
-  const selectedNodeWorktree = selectedNode ? task.worktrees.find((worktree) => worktree.node_id === selectedNode.id) : null;
+  const taskWorktree = task.worktrees.find((worktree) => worktree.kind === 'task' || (!worktree.kind && !worktree.node_id));
+  const selectedNodeWorktree = selectedNode ? task.worktrees.find((worktree) => worktree.node_id === selectedNode.id && worktree.kind === 'execution') : null;
+  const integrationWorktrees = task.worktrees.filter((worktree) => worktree.kind === 'integration');
   const [edgeFrom, setEdgeFrom] = useState('');
   const [edgeTo, setEdgeTo] = useState('');
 
@@ -468,6 +470,31 @@ function TaskDetail({
                   + Create worktree for {selectedNode.title}
                 </button>
               )
+            )}
+            {integrationWorktrees.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ color: 'var(--t1)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
+                  Staged integrations
+                </div>
+                {integrationWorktrees.map((item) => (
+                  <WorktreeCard
+                    key={item.id}
+                    worktree={item}
+                    label="Integration branch"
+                    review={worktreeReviews[item.id]}
+                    proposal={worktreeProposals[item.id]}
+                    preflight={worktreePreflights[item.id]}
+                    stagedIntegration={stagedIntegrations[item.id]}
+                    onRefresh={onRefreshWorktree}
+                    onCheckpoint={onCheckpointWorktree}
+                    onReview={onReviewWorktree}
+                    onProposeIntegration={onProposeIntegration}
+                    onPreflightIntegration={onPreflightIntegration}
+                    onStageIntegration={onStageIntegration}
+                    onRemove={onRemoveWorktree}
+                  />
+                ))}
+              </div>
             )}
           </div>
         </section>
@@ -720,7 +747,7 @@ function WorktreeCard({
         <StatusPill status={worktree.status} />
       </div>
       <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {worktree.branch_name}
+        {worktree.kind} / {worktree.branch_name}
       </div>
       <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {worktree.worktree_path}
