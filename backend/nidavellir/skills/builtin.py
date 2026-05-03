@@ -14,6 +14,7 @@ from .models import (
 from .store import SkillStore
 
 SKILL_BUILDER_ID = "skill-builder"
+HUMANSPEAK_SLUG = "humanspeak"
 
 SKILL_BUILDER_MARKDOWN = """---
 name: skill-builder
@@ -89,25 +90,93 @@ curl -sS -X POST http://localhost:7430/api/skills/import/markdown \
 Use the exact final `SKILL.md` content as the `markdown` value. Apply the user's chosen flags. If the API is unavailable, provide the final markdown and settings for manual import.
 """
 
+HUMANSPEAK_MARKDOWN = """---
+name: humanspeak
+description: Rewrite text so it sounds natural and human-written while preserving meaning exactly.
+---
+
+# Humanspeak
+
+Rewrite the provided text so it reads like a human wrote it. Remove AI writing tells while preserving the original meaning, facts, level of certainty, and intended register.
+
+This is a Nidavellir slash skill. Do not create, edit, reference, or remove provider-native command files such as `~/.claude/commands/*.md`, `CLAUDE.md`, or `AGENTS.md` unless the user explicitly asks to manage those files.
+
+## Remove
+
+- Filler openers such as "Certainly", "Great question", "Of course", and "I'd be happy to"
+- Formulaic rewrite labels, change summaries, audit sections, or analysis headings
+- Meta-commentary about the rewrite process
+- Overused em dashes when commas, periods, or sentence splits are more natural
+- Generic transitions such as "In conclusion", "To summarize", "That said", and "With that in mind"
+- Inflated or over-formal wording when a plain word is more natural
+- Unnecessary hedging, throat-clearing, and scaffolding
+- Repetitive sentence cadence, rule-of-three phrasing, and tidy wrap-up language
+- Added bold formatting, markdown section labels, or decorative structure
+
+## Rules
+
+- Output only the rewritten text.
+- Do not include explanations, bullets, headings, labels, audit notes, or before/after commentary.
+- Do not use bold or italic formatting unless it was present in the source and must be preserved.
+- Do not summarize, expand, fact-check, soften, or intensify the source unless required for natural wording.
+- Keep the original tone: casual stays casual, technical stays technical, formal stays formal.
+- If the input is already clean, return it unchanged.
+"""
+
 
 def ensure_builtin_skills(store: SkillStore) -> None:
-    if store.get_skill(SKILL_BUILDER_ID) is not None:
+    if store.get_skill(SKILL_BUILDER_ID) is None:
+        skill = NidavellirSkill(
+            id=SKILL_BUILDER_ID,
+            slug=SKILL_BUILDER_ID,
+            name="Skill Builder",
+            description="Design, tune, validate, and import Nidavellir skills.",
+            scope=SkillScope.GLOBAL,
+            activation_mode=SkillActivationMode.MANUAL,
+            triggers=[SkillTrigger(type="keyword", value="build skill", weight=1.0)],
+            instructions=SkillInstructions(core=SKILL_BUILDER_MARKDOWN),
+            required_capabilities=SkillCapabilityRequirements(),
+            priority=50,
+            enabled=True,
+            show_in_slash=True,
+            version=1,
+            status=SkillStatus.VALIDATED,
+            source=SkillSource(format=SkillSourceFormat.NATIVE, origin="nidavellir", source_type="builtin"),
+        )
+        store.create_skill(skill, change_reason="builtin seed")
+    _ensure_humanspeak_skill(store)
+
+
+def _ensure_humanspeak_skill(store: SkillStore) -> None:
+    existing = next((skill for skill in store.list_skills() if skill.slug == HUMANSPEAK_SLUG), None)
+    if existing is None:
+        skill = NidavellirSkill(
+            id=HUMANSPEAK_SLUG,
+            slug=HUMANSPEAK_SLUG,
+            name="Humanspeak",
+            description="Rewrite text so it sounds natural and human-written.",
+            scope=SkillScope.GLOBAL,
+            activation_mode=SkillActivationMode.MANUAL,
+            triggers=[],
+            instructions=SkillInstructions(core=HUMANSPEAK_MARKDOWN),
+            required_capabilities=SkillCapabilityRequirements(),
+            priority=50,
+            enabled=True,
+            show_in_slash=True,
+            version=1,
+            status=SkillStatus.VALIDATED,
+            source=SkillSource(format=SkillSourceFormat.NATIVE, origin="nidavellir", source_type="builtin"),
+        )
+        store.create_skill(skill, change_reason="builtin seed")
         return
-    skill = NidavellirSkill(
-        id=SKILL_BUILDER_ID,
-        slug=SKILL_BUILDER_ID,
-        name="Skill Builder",
-        description="Design, tune, validate, and import Nidavellir skills.",
-        scope=SkillScope.GLOBAL,
-        activation_mode=SkillActivationMode.MANUAL,
-        triggers=[SkillTrigger(type="keyword", value="build skill", weight=1.0)],
-        instructions=SkillInstructions(core=SKILL_BUILDER_MARKDOWN),
-        required_capabilities=SkillCapabilityRequirements(),
-        priority=50,
-        enabled=True,
-        show_in_slash=True,
-        version=1,
-        status=SkillStatus.VALIDATED,
-        source=SkillSource(format=SkillSourceFormat.NATIVE, origin="nidavellir", source_type="builtin"),
+    if existing.instructions.core.strip() == HUMANSPEAK_MARKDOWN.strip():
+        return
+    store.update_skill_details(
+        existing.id,
+        name="Humanspeak",
+        slug=HUMANSPEAK_SLUG,
+        core_instructions=HUMANSPEAK_MARKDOWN,
+        scope=existing.scope.value,
+        activation_mode=SkillActivationMode.MANUAL.value,
+        triggers=[],
     )
-    store.create_skill(skill, change_reason="builtin seed")

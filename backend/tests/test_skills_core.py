@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from nidavellir.skills.activation import activate_skills
+from nidavellir.skills.builtin import ensure_builtin_skills
 from nidavellir.skills.compilers.generic import GenericSkillCompiler
 from nidavellir.skills.compatibility import compatibility_for_skill
 from nidavellir.skills.models import (
@@ -132,6 +133,33 @@ def test_skill_store_persists_versions_enablement_and_activation_logs(tmp_path):
         injected=True,
     )
     assert store.list_activations()[0]["skill_id"] == skill.id
+
+
+def test_builtin_humanspeak_replaces_verbose_imported_skill(tmp_path):
+    store = SkillStore(str(tmp_path / "skills.db"))
+    old = make_skill(
+        id="humanizer-remove-ai-writing-patterns",
+        slug="humanspeak",
+        name="Humanspeak: remove AI writing patterns",
+        activation_mode=SkillActivationMode.MANUAL,
+        triggers=[],
+        instructions=SkillInstructions(core="**Draft rewrite:**\n\n**What makes this AI-generated:**"),
+        enabled=True,
+        show_in_slash=True,
+    )
+    store.create_skill(old)
+
+    ensure_builtin_skills(store)
+
+    updated = store.get_skill(old.id)
+    assert updated is not None
+    assert updated.slug == "humanspeak"
+    assert updated.name == "Humanspeak"
+    assert updated.enabled is True
+    assert updated.show_in_slash is True
+    assert "Output only the rewritten text." in updated.instructions.core
+    assert "Draft rewrite" not in updated.instructions.core
+    assert "~/.claude/commands" in updated.instructions.core
 
 
 def test_activation_engine_is_deterministic_and_respects_enabled_mode_compatibility_budget():

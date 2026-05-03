@@ -237,6 +237,46 @@ describe('MessageList activity feed', () => {
     window.removeEventListener('nid:skills-changed', changed);
   });
 
+  it('does not revalidate skill-builder drafts on unrelated rerenders', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/api/skills/validate/markdown')) {
+        return Response.json({ ok: true, warnings: [], errors: [] });
+      }
+      return Response.json({}, { status: 404 });
+    }));
+    useAgentStore.getState().addMessage('agent', [
+      'Ready.',
+      '',
+      '```json',
+      '{"name":"Review Helper","slug":"review-helper","scope":"global","activationMode":"manual","triggers":[],"enabled":true,"showInSlash":true}',
+      '```',
+      '',
+      '```markdown',
+      '---',
+      'name: review-helper',
+      'description: Review code.',
+      '---',
+      '',
+      '# Review Helper',
+      '',
+      'Review code.',
+      '```',
+    ].join('\n'));
+    useAgentStore.getState().finalizeLastAgentMessage();
+
+    const view = render(<MessageList />);
+    expect(await screen.findByLabelText('Skill builder confirmation')).toBeTruthy();
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    view.rerender(<MessageList />);
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('replaces running activity with the final answer and summary when the turn completes', () => {
     useAgentStore.getState().addMessage('agent', 'Implemented the process change.');
     useAgentStore.getState().appendStreamEvents([

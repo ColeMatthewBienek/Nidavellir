@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgentStore } from "@/store/agentStore";
 import type { Message } from "@/store/agentStore";
 import type { StreamEvent } from "@/lib/streamTypes";
@@ -574,7 +574,11 @@ function renderParts(parts: string[]) {
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user';
   const completionReport = !isUser ? buildCompletionReport(message) : null;
-  const skillDraft = !isUser && !message.streaming ? parseSkillBuilderDraft(answerTextFromMessage(message)) : null;
+  const answerText = useMemo(() => answerTextFromMessage(message), [message.content, message.events]);
+  const skillDraft = useMemo(
+    () => (!isUser && !message.streaming ? parseSkillBuilderDraft(answerText) : null),
+    [answerText, isUser, message.streaming],
+  );
   const timestamp = message.timestamp
     ? message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '';
