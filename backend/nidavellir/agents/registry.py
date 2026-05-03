@@ -12,6 +12,7 @@ ProviderRole = Literal["planner", "em_reviewer", "executor", "chat", "qa_reviewe
 CostTier     = Literal["local", "subscription", "api_metered", "free"]
 LatencyTier  = Literal["low", "medium", "high"]
 OutputFormat = Literal["ansi_rich", "ansi_simple", "markdown", "plain"]
+ProviderDangerousness = Literal["restricted", "ask", "trusted", "free_rein"]
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,13 @@ class ProviderManifest:
     supports_bash_execution:    bool      = False
     supports_file_write:        bool      = False
     supports_worktree_isolation: bool     = False
-    extra_flags:                list[str] = field(default_factory=list)
+    supports_mediated_tool_approval: bool = False
+    default_dangerousness: ProviderDangerousness = "restricted"
+    restricted_flags:          list[str] = field(default_factory=list)
+    ask_flags:                 list[str] = field(default_factory=list)
+    trusted_flags:             list[str] = field(default_factory=list)
+    free_rein_flags:           list[str] = field(default_factory=list)
+    extra_flags:               list[str] = field(default_factory=list)
 
     # ── Cost & Resources ──────────────────────────────────────────────────────
     cost_tier:        CostTier    = "subscription"
@@ -86,6 +93,10 @@ class ProviderManifest:
             "supports_bash_execution":     self.supports_bash_execution,
             "supports_file_write":         self.supports_file_write,
             "supports_worktree_isolation": self.supports_worktree_isolation,
+            "supports_mediated_tool_approval": self.supports_mediated_tool_approval,
+            "default_dangerousness":        self.default_dangerousness,
+            "effective_dangerousness":      self.default_dangerousness,
+            "dangerousness_modes":          ["restricted", "ask", "trusted", "free_rein"],
             "cost_tier":                   self.cost_tier,
             "requires_network":            self.requires_network,
             "latency_tier":                self.latency_tier,
@@ -122,7 +133,12 @@ def _build_registry() -> dict[str, ProviderManifest]:
                 supports_bash_execution=True,
                 supports_file_write=True,
                 supports_worktree_isolation=True,
-                extra_flags=["--dangerously-skip-permissions"],
+                supports_mediated_tool_approval=False,
+                default_dangerousness="restricted",
+                restricted_flags=["--tools", ""],
+                ask_flags=["--permission-mode", "default"],
+                trusted_flags=["--permission-mode", "acceptEdits"],
+                free_rein_flags=["--dangerously-skip-permissions"],
                 cost_tier="subscription",
                 requires_network=True,
                 latency_tier="medium",
@@ -149,7 +165,12 @@ def _build_registry() -> dict[str, ProviderManifest]:
                 supports_bash_execution=True,
                 supports_file_write=True,
                 supports_worktree_isolation=True,
-                extra_flags=[],
+                supports_mediated_tool_approval=False,
+                default_dangerousness="restricted",
+                restricted_flags=["--sandbox", "read-only"],
+                ask_flags=["--sandbox", "workspace-write"],
+                trusted_flags=["--sandbox", "workspace-write"],
+                free_rein_flags=["--dangerously-bypass-approvals-and-sandbox"],
                 cost_tier="subscription",
                 requires_network=True,
                 latency_tier="medium",
@@ -176,7 +197,8 @@ def _build_registry() -> dict[str, ProviderManifest]:
                 supports_bash_execution=True,
                 supports_file_write=True,
                 supports_worktree_isolation=True,
-                extra_flags=[],
+                supports_mediated_tool_approval=False,
+                default_dangerousness="restricted",
                 cost_tier="subscription",
                 requires_network=True,
                 latency_tier="medium",
@@ -204,7 +226,8 @@ def _build_registry() -> dict[str, ProviderManifest]:
                 supports_bash_execution=False,
                 supports_file_write=False,
                 supports_worktree_isolation=False,
-                extra_flags=[],
+                supports_mediated_tool_approval=False,
+                default_dangerousness="restricted",
                 cost_tier="local",
                 requires_network=False,
                 latency_tier="low",
@@ -224,10 +247,16 @@ def make_agent(
     slot_id: int,
     workdir: Path,
     model_id: str | None = None,
+    dangerousness: ProviderDangerousness | None = None,
 ) -> "CLIAgent":
     manifest = PROVIDER_REGISTRY.get(provider_type)
     if manifest is None:
         raise ValueError(
             f"Unknown provider: {provider_type!r}. Valid: {VALID_PROVIDERS}"
         )
-    return manifest.agent_class(slot_id=slot_id, workdir=workdir, model_id=model_id)
+    return manifest.agent_class(
+        slot_id=slot_id,
+        workdir=workdir,
+        model_id=model_id,
+        dangerousness=dangerousness or manifest.default_dangerousness,
+    )

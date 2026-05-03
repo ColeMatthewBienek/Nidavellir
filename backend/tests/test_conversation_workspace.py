@@ -188,7 +188,7 @@ async def test_agent_turn_uses_conversation_working_directory(tmp_path, monkeypa
         async def kill(self): pass
         def get_usage(self): return None
 
-    def fake_make_agent(provider_id, slot_id, workdir, model_id=None):
+    def fake_make_agent(provider_id, slot_id, workdir, model_id=None, dangerousness=None):
         seen["workdir"] = Path(workdir)
         return FakeAgent()
 
@@ -238,7 +238,7 @@ async def test_agent_turn_falls_back_to_server_default_workspace_for_legacy_conv
         async def kill(self): pass
         def get_usage(self): return None
 
-    def fake_make_agent(provider_id, slot_id, workdir, model_id=None):
+    def fake_make_agent(provider_id, slot_id, workdir, model_id=None, dangerousness=None):
         seen["workdir"] = Path(workdir)
         return FakeAgent()
 

@@ -11,7 +11,8 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 import nidavellir.agents.registry as _agent_registry
-from nidavellir.agents.events import frontend_event
+from nidavellir.agents.events import AgentActivityEvent, frontend_event
+from nidavellir.agents.safety import ProviderDangerousness
 from nidavellir.commands.events import subscribe_command_events, unsubscribe_command_events
 from nidavellir.memory.injector import get_context_prefix
 from nidavellir.prompt.assembly import assemble_prompt
@@ -414,6 +415,7 @@ async def _handle_message(
     memory_context: str = "",
     workdir: Path | None = None,
     workdir_explicit: bool = False,
+    conversation_id: str | None = None,
     on_agent_started=None,
 ) -> tuple[str, object, str]:
     """Runs one full agent turn.
@@ -427,6 +429,46 @@ async def _handle_message(
 
     async def send_activity(event: dict) -> None:
         await ws.send_json({"type": "activity", "event": event})
+
+    def provider_dangerousness() -> ProviderDangerousness:
+        store = getattr(ws.app.state, "provider_safety_store", None)
+        if store is None:
+            return "restricted"
+        return store.get_policy(provider_id).effective_dangerousness
+
+    async def observe_tool_request(item: object) -> None:
+        if not isinstance(item, AgentActivityEvent) or item.type != "tool_start":
+            return
+        store = getattr(ws.app.state, "tool_request_store", None)
+        if store is None:
+            return
+        mode = provider_dangerousness()
+        tool_name = (item.name or "tool").lower()
+        action = "shell_command"
+        if tool_name in {"read", "glob", "grep", "ls"}:
+            action = "file_read"
+        elif tool_name in {"edit", "write", "multiedit", "notebookedit"}:
+            action = "file_write"
+        record = store.create(
+            conversation_id=conversation_id,
+            provider=provider_id,
+            tool_name=item.name or "tool",
+            action=action,
+            status="observed" if mode in {"trusted", "free_rein"} else "pending",
+            arguments={"args": item.args, "raw": item.raw, "dangerousness": mode},
+            reason="provider emitted native tool use",
+        )
+        try:
+            from nidavellir.resources.events import broadcast_resource_event
+            await broadcast_resource_event(ws.app, {
+                "kind": "tool_requests",
+                "action": "created",
+                "conversation_id": conversation_id,
+                "tool_request_id": record.get("id"),
+                "message": "Provider tool request captured",
+            })
+        except Exception:
+            pass
 
     async def heartbeat() -> None:
         elapsed = 0
@@ -451,13 +493,20 @@ async def _handle_message(
             "content": f"Starting {provider_id} in {run_workdir}",
             "metadata": {"working_directory": str(run_workdir.resolve(strict=False))},
         })
-        agent = _agent_registry.make_agent(provider_id, slot_id=0, workdir=run_workdir, model_id=model_id)
+        mode = provider_dangerousness()
+        agent = _agent_registry.make_agent(
+            provider_id,
+            slot_id=0,
+            workdir=run_workdir,
+            model_id=model_id,
+            dangerousness=mode,
+        )
         await agent.start()
         if on_agent_started is not None:
             on_agent_started(agent)
         await send_activity({
             "type": "progress",
-            "content": "Provider process started",
+            "content": f"Provider process started ({mode} mode)",
         })
 
         outbound = (
@@ -473,6 +522,7 @@ async def _handle_message(
 
         async for item in agent.stream():
             if isinstance(item, dict) or hasattr(item, "to_frontend"):
+                await observe_tool_request(item)
                 await send_activity(frontend_event(item))
                 continue
             chunk = str(item)
@@ -1057,6 +1107,7 @@ async def handle_message_with_identity(
         memory_context="",
         workdir=workdir,
         workdir_explicit=workdir_explicit,
+        conversation_id=conversation_id,
         on_agent_started=on_agent_started,
     )
 
@@ -1315,6 +1366,7 @@ async def chat_websocket(ws: WebSocket) -> None:
                             response, agent, _outcome = await _handle_message(
                                 broadcaster, content, provider_id, model_id or None,
                                 memory_context="",
+                                conversation_id=conversation_id,
                                 on_agent_started=lambda agent: setattr(record, "live_agent", agent),
                             )
                             token_store = getattr(ws.app.state, "token_store", None)

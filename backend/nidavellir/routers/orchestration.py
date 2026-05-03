@@ -582,7 +582,15 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
     agent = None
     transcript_parts: list[str] = []
     try:
-        agent = _agent_registry.make_agent(provider, slot_id=0, workdir=cwd, model_id=model)
+        safety_store = getattr(request.app.state, "provider_safety_store", None)
+        dangerousness = safety_store.get_policy(provider).effective_dangerousness if safety_store else "restricted"
+        agent = _agent_registry.make_agent(
+            provider,
+            slot_id=0,
+            workdir=cwd,
+            model_id=model,
+            dangerousness=dangerousness,
+        )
         await agent.start()
         await agent.send(handoff_prompt)
         async for item in agent.stream():

@@ -105,6 +105,8 @@ def test_capability_flags_types():
     assert isinstance(m.requires_network, bool)
     assert isinstance(m.supports_parallel_slots, bool)
     assert isinstance(m.extra_flags, list)
+    assert isinstance(m.supports_mediated_tool_approval, bool)
+    assert m.default_dangerousness in {"restricted", "ask", "trusted", "free_rein"}
     assert isinstance(m.supports_live_steering, bool)
     assert isinstance(m.supports_queued_steering, bool)
     assert isinstance(m.supports_redirect_steering, bool)
@@ -125,7 +127,10 @@ def test_claude_capability_flags():
     assert m.emits_tool_use_blocks is True
     assert m.requires_network is True
     assert m.supports_parallel_slots is True
-    assert "--dangerously-skip-permissions" in m.extra_flags
+    assert m.default_dangerousness == "restricted"
+    assert "--dangerously-skip-permissions" in m.free_rein_flags
+    assert "--tools" in m.restricted_flags
+    assert m.supports_mediated_tool_approval is False
     assert m.supports_live_steering is False
     assert m.supports_queued_steering is True
     assert m.supports_redirect_steering is True

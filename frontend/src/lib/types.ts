@@ -10,6 +10,7 @@ export type ProviderRole =
 export type CostTier    = "local" | "subscription" | "api_metered" | "free";
 export type LatencyTier = "low" | "medium" | "high";
 export type OutputFormat = "ansi_rich" | "ansi_simple" | "markdown" | "plain";
+export type ProviderDangerousness = "restricted" | "ask" | "trusted" | "free_rein";
 
 export interface ProviderInfo {
   id:           string;
@@ -41,6 +42,12 @@ export interface ProviderInfo {
   supports_bash_execution:     boolean;
   supports_file_write:         boolean;
   supports_worktree_isolation: boolean;
+  supports_mediated_tool_approval?: boolean;
+  default_dangerousness?:      ProviderDangerousness;
+  dangerousness?:              ProviderDangerousness;
+  effective_dangerousness?:    ProviderDangerousness;
+  dangerousness_modes?:        ProviderDangerousness[];
+  dangerousness_warning?:      string | null;
 
   // Cost / resources
   cost_tier:        CostTier;
