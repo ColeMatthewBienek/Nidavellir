@@ -148,6 +148,72 @@ def review_worktree(*, worktree_path: Path, base_ref: str) -> dict:
     }
 
 
+def preflight_worktree_merge(*, worktree_path: Path, target_ref: str, source_ref: str) -> dict:
+    worktree_path = worktree_path.expanduser().resolve()
+    if not worktree_path.exists() or not worktree_path.is_dir():
+        raise WorktreeError("worktree_missing")
+
+    status = git_status(worktree_path)
+    target_commit = ref_commit(worktree_path, target_ref)
+    source_commit = ref_commit(worktree_path, source_ref)
+    merge_base = _run_git(["merge-base", target_ref, source_ref], cwd=worktree_path).stdout.strip()
+    commits_to_merge = int(_run_git(["rev-list", "--count", f"{target_ref}..{source_ref}"], cwd=worktree_path).stdout.strip() or "0")
+    target_ahead_count = int(_run_git(["rev-list", "--count", f"{source_ref}..{target_ref}"], cwd=worktree_path).stdout.strip() or "0")
+    files = _changed_files(worktree_path=worktree_path, base_ref=target_ref, head_ref=source_ref)
+    result = _run_git_raw(["merge-tree", "--write-tree", "--messages", target_ref, source_ref], cwd=worktree_path, timeout=60)
+    output = (result.stdout or result.stderr).strip()
+    conflicts = _parse_merge_tree_conflicts(output)
+    can_merge = result.returncode == 0 and status["dirty_count"] == 0 and commits_to_merge > 0
+    return {
+        "target_ref": target_ref,
+        "source_ref": source_ref,
+        "target_commit": target_commit,
+        "source_commit": source_commit,
+        "merge_base": merge_base,
+        "status": status["status"],
+        "dirty_count": status["dirty_count"],
+        "dirty_summary": status["dirty_summary"],
+        "commits_to_merge": commits_to_merge,
+        "target_ahead_count": target_ahead_count,
+        "files": files[:200],
+        "can_merge": can_merge,
+        "conflicts": conflicts[:100],
+        "message": _preflight_message(can_merge=can_merge, status=status, commits_to_merge=commits_to_merge, conflicts=conflicts),
+    }
+
+
+def _changed_files(*, worktree_path: Path, base_ref: str, head_ref: str) -> list[dict[str, str]]:
+    name_status = _run_git(["diff", "--name-status", f"{base_ref}..{head_ref}"], cwd=worktree_path).stdout
+    files = []
+    for line in name_status.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            files.append({"status": parts[0], "path": parts[-1]})
+    return files
+
+
+def _parse_merge_tree_conflicts(output: str) -> list[dict[str, str]]:
+    conflicts = []
+    for line in output.splitlines():
+        if not line.startswith("CONFLICT"):
+            continue
+        match = re.search(r" in (.+)$", line)
+        conflicts.append({"path": match.group(1) if match else "", "message": line})
+    return conflicts
+
+
+def _preflight_message(*, can_merge: bool, status: dict, commits_to_merge: int, conflicts: list[dict[str, str]]) -> str:
+    if can_merge:
+        return "Merge preflight passed."
+    if status["dirty_count"] > 0:
+        return "Source worktree has uncommitted changes."
+    if commits_to_merge == 0:
+        return "No source commits to merge."
+    if conflicts:
+        return f"Merge preflight found {len(conflicts)} conflict files."
+    return "Merge preflight failed."
+
+
 def _parse_status_line(line: str) -> dict[str, str] | None:
     if len(line) < 4:
         return None
@@ -177,3 +243,18 @@ def _run_git(args: list[str], *, cwd: Path, timeout: int = 10) -> subprocess.Com
         detail = (result.stderr or result.stdout or "git_failed").strip().splitlines()[-1]
         raise WorktreeError(detail[:240])
     return result
+
+
+def _run_git_raw(args: list[str], *, cwd: Path, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WorktreeError("git_timeout") from exc
+    except FileNotFoundError as exc:
+        raise WorktreeError("git_not_available") from exc

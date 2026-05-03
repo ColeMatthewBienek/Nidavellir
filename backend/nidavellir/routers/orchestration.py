@@ -20,6 +20,7 @@ from nidavellir.orchestration.worktrees import (
     current_branch,
     default_worktree_path,
     git_status,
+    preflight_worktree_merge,
     remove_git_worktree,
     review_worktree,
     repo_root,
@@ -946,6 +947,48 @@ def propose_worktree_integration(worktree_id: str, request: Request) -> dict:
         },
     )
     return {"worktree": worktree, "proposal": proposal}
+
+
+@router.get("/worktrees/{worktree_id}/integration-preflight")
+def preflight_worktree_integration(worktree_id: str, request: Request) -> dict:
+    store = _store(request)
+    worktree = store.get_worktree(worktree_id)
+    if worktree is None:
+        raise HTTPException(status_code=404, detail="worktree_not_found")
+    if worktree["status"] == "removed":
+        raise HTTPException(status_code=400, detail="worktree_removed")
+    target_ref = worktree.get("base_branch")
+    source_ref = worktree.get("branch_name")
+    if not target_ref or not source_ref:
+        raise HTTPException(status_code=400, detail="worktree_merge_refs_missing")
+    try:
+        preflight = preflight_worktree_merge(
+            worktree_path=Path(worktree["worktree_path"]),
+            target_ref=target_ref,
+            source_ref=source_ref,
+        )
+        updated = store.update_worktree(worktree_id, {
+            "head_commit": preflight["source_commit"],
+            "status": preflight["status"],
+            "dirty_count": preflight["dirty_count"],
+            "dirty_summary": preflight["dirty_summary"],
+        })
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    store.append_event(
+        task_id=worktree["task_id"],
+        node_id=worktree["node_id"],
+        type="worktree_integration_preflighted",
+        payload={
+            "worktree_id": worktree_id,
+            "source_branch": source_ref,
+            "target_branch": target_ref,
+            "can_merge": preflight["can_merge"],
+            "conflict_count": len(preflight["conflicts"]),
+        },
+    )
+    return {"worktree": updated or worktree, "preflight": preflight}
 
 
 @router.delete("/worktrees/{worktree_id}")
