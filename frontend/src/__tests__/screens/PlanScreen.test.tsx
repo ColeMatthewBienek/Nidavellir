@@ -26,6 +26,25 @@ const cancelledTask = {
   updated_at: '2026-05-02T00:01:00Z',
 };
 
+const taskInboxItem = {
+  id: 'task-inbox-1',
+  plan_inbox_item_id: 'plan-1',
+  decomposition_run_id: 'decomp-1',
+  candidate_task_id: 'candidate-1',
+  title: 'Implement Planner PM handoff',
+  objective: 'Materialize accepted atomic task with repo target.',
+  payload: { base_repo_path: '/repo', base_branch: 'main', implementation_cwd: '/repo' },
+  dependencies: [],
+  status: 'accepted_atomic',
+  priority: 1,
+  locked_by: null,
+  locked_at: null,
+  materialized_task_id: null,
+  materialized_node_id: null,
+  created_at: '2026-05-03T00:00:00Z',
+  updated_at: '2026-05-03T00:00:00Z',
+};
+
 const detail = {
   ...task,
   nodes: [
@@ -198,7 +217,28 @@ describe('PlanScreen orchestration board', () => {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
       if (String(url).endsWith('/api/orchestration/task-inbox') && !options) {
-        return Promise.resolve({ ok: true, json: async () => [] });
+        return Promise.resolve({ ok: true, json: async () => [taskInboxItem] });
+      }
+      if (String(url).endsWith('/api/orchestration/task-inbox/task-inbox-1/materialize') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: {
+              ...detail,
+              id: 'task-materialized',
+              title: taskInboxItem.title,
+              description: taskInboxItem.objective,
+              base_repo_path: '/repo',
+              base_branch: 'main',
+            },
+            task_inbox_item: {
+              ...taskInboxItem,
+              status: 'materialized',
+              materialized_task_id: 'task-materialized',
+              updated_at: '2026-05-03T00:01:00Z',
+            },
+          }),
+        });
       }
       if (String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST') {
         return Promise.resolve({
@@ -651,6 +691,23 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View Spec' }));
     expect(await screen.findByText('Spec Snapshot')).toBeTruthy();
     expect(screen.getByText(/# Working Spec Snapshot/)).toBeTruthy();
+  });
+
+  it('materializes accepted atomic task inbox items into executable tasks', async () => {
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Implement Planner PM handoff')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Materialize' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/task-inbox/task-inbox-1/materialize') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+    });
+    expect(await screen.findByText('materialized')).toBeTruthy();
+    expect(await screen.findByText('/repo')).toBeTruthy();
+    expect(await screen.findByText('No task worktree yet. Node worktrees can still be created directly from the base repo.')).toBeTruthy();
   });
 
   it('moves tasks and completes manual steps through the orchestration API', async () => {

@@ -1822,6 +1822,8 @@ def materialize_task_inbox_item(item_id: str, body: TaskInboxMaterializeRequest,
         if existing is None:
             raise HTTPException(status_code=404, detail="materialized_task_not_found")
         return {"task": existing, "task_inbox_item": item}
+    if item.get("status") != "accepted_atomic":
+        raise HTTPException(status_code=400, detail="task_inbox_item_not_atomic")
     target = _task_inbox_implementation_target(store, item)
     base_repo_path = body.baseRepoPath or target.get("base_repo_path")
     base_branch = body.baseBranch or target.get("base_branch")
