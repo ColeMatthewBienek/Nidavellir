@@ -502,6 +502,59 @@ def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
     return base
 
 
+def _planner_pm_locked_gate_evidence(plan: dict, content: str, source_message_id: str) -> dict:
+    text = content.lower()
+    checkpoint_updates: list[dict] = []
+    spec_deltas: list[dict] = []
+    repo_evidence = _extract_repo_target_evidence(content)
+
+    def append_update(key: str, summary: str) -> None:
+        if _checkpoint_status(plan, key) == "agreed":
+            return
+        if any(item.get("key") == key for item in checkpoint_updates):
+            return
+        checkpoint_updates.append({
+            "key": key,
+            "status": "agreed",
+            "summary": summary,
+            "source_message_ids": [source_message_id],
+        })
+
+    def gate_locked(gate_pattern: str) -> bool:
+        segments = [segment.strip() for segment in re.split(r"[\n.]+", text) if segment.strip()]
+        return any(re.search(gate_pattern, segment) and re.search(r"\blocked\b", segment) for segment in segments)
+
+    if gate_locked(r"\brepo(?:sitory)? target\b"):
+        repo_summary = repo_evidence.get("repo_path") if repo_evidence else plan.get("repo_path")
+        base_branch = (repo_evidence or {}).get("base_branch") or plan.get("base_branch")
+        if base_branch:
+            repo_summary = f"{repo_summary} @ {base_branch}" if repo_summary else f"Base branch: {base_branch}"
+        append_update("repo_target", repo_summary or "Repo target locked by PM discussion.")
+    if gate_locked(r"\bscope(?: gate)?\b"):
+        append_update("scope", "Scope and non-goals locked by PM discussion.")
+        spec_deltas.append({"section": "Scope", "source_message_id": source_message_id, "content": content})
+    if gate_locked(r"\bacceptance(?: criteria)?\b"):
+        append_update("acceptance", "Acceptance criteria locked by PM discussion.")
+        spec_deltas.append({"section": "Acceptance Criteria", "source_message_id": source_message_id, "content": content})
+    if gate_locked(r"\bverification(?: strategy| plan)?\b"):
+        append_update("verification", "Verification strategy locked by PM discussion.")
+        spec_deltas.append({"section": "Verification Strategy", "source_message_id": source_message_id, "content": content})
+    if gate_locked(r"\b(?:risks?|dependencies)\b"):
+        append_update("risks", "Risks and dependencies locked by PM discussion.")
+        spec_deltas.append({"section": "Risks and Dependencies", "source_message_id": source_message_id, "content": content})
+    return {
+        "kind": "message",
+        "content": content,
+        "active_gate": _next_open_planner_gate_after_updates(plan, checkpoint_updates),
+        "draft_spec": False,
+        "checkpoint_updates": checkpoint_updates,
+        "decisions": [],
+        "assumptions": [],
+        "blockers": [],
+        "spec_deltas": spec_deltas,
+    }
+
+
 def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request: Request, item_id: str) -> dict:
     provider = body.provider or plan.get("provider") or "claude"
     model = body.model or plan.get("model") or "claude-sonnet-4-6"
@@ -975,7 +1028,7 @@ async def _execute_planner_pm_turn(
         if agent_content:
             structured = _merge_planner_structured_evidence(
                 structured,
-                _planner_pm_structured_turn(plan, agent_content, user_message["id"]),
+                _planner_pm_locked_gate_evidence(plan, agent_content, user_message["id"]),
             )
         checkpoint_updates: list[dict] = []
         for update in structured["checkpoint_updates"]:
