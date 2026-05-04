@@ -41,12 +41,12 @@ class PlannerPmFakeAgent:
 class PlannerPmGateLockAgent(PlannerPmFakeAgent):
     async def stream(self):
         yield (
-            "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`.\n\n"
+            "Repo target is now locked: new repo, not initialized yet, at `/tmp/NewProject`.\n\n"
             "Scope gate locked: V1 scope is the smallest useful PM planning slice. "
             "Out of scope: autonomous task execution.\n"
             "<nidavellir-pm-actions>"
             "{\"actions\":["
-            "{\"type\":\"lock_gate\",\"gate\":\"repo_target\",\"summary\":\"Repo target locked.\",\"evidence\":\"PM selected new repo path.\",\"repo_path\":\"/projects/NewProject\",\"base_branch\":\"main\"},"
+            "{\"type\":\"lock_gate\",\"gate\":\"repo_target\",\"summary\":\"Repo target locked.\",\"evidence\":\"PM selected new repo path.\",\"repo_path\":\"/tmp/NewProject\",\"base_branch\":\"main\"},"
             "{\"type\":\"lock_gate\",\"gate\":\"scope\",\"summary\":\"Scope and non-goals locked.\",\"evidence\":\"User confirmed the V1 PM planning slice.\",\"in_scope\":[\"PM planning slice\"],\"non_goals\":[\"autonomous task execution\"]}"
             "]}"
             "</nidavellir-pm-actions>"
@@ -81,15 +81,38 @@ class PlannerPmInvalidSidecarAgent(PlannerPmFakeAgent):
         )
 
 
-def test_planner_pm_new_repo_workdir_resolves_and_creates_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_planner_pm_relative_repo_name_stays_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     default_repo = tmp_path / "nidavellir"
     default_repo.mkdir()
     monkeypatch.setattr(orchestration_router, "effective_default_working_directory", lambda: str(default_repo))
 
     workdir = orchestration_router._planner_pm_workdir({"repo_path": "security-workstation"})
 
-    assert workdir == tmp_path / "security-workstation"
+    assert workdir == default_repo
+    assert not (tmp_path / "security-workstation").exists()
+
+
+def test_planner_pm_absolute_new_repo_workdir_resolves_and_creates_target(tmp_path: Path):
+    target = tmp_path / "security-workstation"
+
+    workdir = orchestration_router._planner_pm_workdir({"repo_path": str(target)})
+
+    assert workdir == target
     assert workdir.is_dir()
+
+
+def test_planner_pm_repo_gate_requires_resolved_path():
+    action = orchestration_router._planner_gate_confirmation_action(
+        {},
+        {
+            "role": "planner",
+            "metadata": {"active_gate": "repo_target"},
+            "content": "Repo target is a new standalone repo: `security-workstation`. Base branch: `main`.",
+        },
+        "Lock it",
+    )
+
+    assert action is None
 
 
 def setup_app(tmp_path: Path):
@@ -323,6 +346,7 @@ async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, m
 @pytest.mark.asyncio
 async def test_pm_turn_locks_repo_target_from_user_evidence(tmp_path: Path):
     setup_app(tmp_path)
+    target = tmp_path / "NewProject"
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         plan = (await c.post("/api/orchestration/plan-inbox", json={
@@ -331,17 +355,17 @@ async def test_pm_turn_locks_repo_target_from_user_evidence(tmp_path: Path):
         })).json()
 
         turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
-            "content": "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`. Use `main` as the initial branch.",
+            "content": f"Repo target is now locked: new repo, not initialized yet, at `{target}`. Use `main` as the initial branch.",
             "agentMode": "deterministic",
         })
 
         assert turn.status_code == 200
         body = turn.json()
-        assert body["plan"]["repo_path"] == "/projects/NewProject"
+        assert body["plan"]["repo_path"] == str(target)
         assert body["plan"]["base_branch"] == "main"
         repo_checkpoint = next(item for item in body["plan"]["planning_checkpoints"] if item["key"] == "repo_target")
         assert repo_checkpoint["status"] == "agreed"
-        assert repo_checkpoint["summary"] == "/projects/NewProject @ main"
+        assert repo_checkpoint["summary"] == f"{target} @ main"
         assert body["structured"]["checkpoint_updates"][0]["key"] == "repo_target"
 
 
@@ -365,7 +389,7 @@ async def test_pm_turn_locks_repo_and_scope_from_agent_gate_response(tmp_path: P
         assert turn.status_code == 200
         body = turn.json()
         checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
-        assert body["plan"]["repo_path"] == "/projects/NewProject"
+        assert body["plan"]["repo_path"] == "/tmp/NewProject"
         assert checkpoints["repo_target"]["status"] == "agreed"
         assert checkpoints["scope"]["status"] == "agreed"
         updated_keys = {item["key"] for item in body["structured"]["checkpoint_updates"]}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sqlite3
 import uuid
@@ -463,30 +464,41 @@ def _planner_pm_current_content(user_content: str) -> str:
 def _planner_pm_workdir(plan: dict) -> Path:
     repo_path = str(plan.get("repo_path") or "").strip()
     if repo_path:
-        target = Path(_resolve_planner_repo_path(repo_path)).expanduser()
-        try:
+        target_path = _planner_repo_target_ready_path(repo_path)
+        if target_path:
+            target = Path(target_path).expanduser()
             target.mkdir(parents=True, exist_ok=True)
             return target
-        except OSError:
-            if target.exists() and target.is_dir():
-                return target
-            existing_parent = next((parent for parent in target.parents if parent.exists() and parent.is_dir()), None)
-            if existing_parent is not None and existing_parent != Path(target.anchor):
-                return existing_parent
     default = Path(effective_default_working_directory()).expanduser()
     if default.exists():
         return default
     return Path.cwd()
 
 
-def _planner_repo_base_dir() -> Path:
-    default = Path(effective_default_working_directory()).expanduser().resolve(strict=False)
-    return default.parent if default.name.lower() == "nidavellir" else default
+def _explicit_planner_repo_path(repo_path: str) -> str | None:
+    raw = repo_path.strip()
+    if not raw:
+        return None
+    if not re.match(r"^(?:~|/|[A-Za-z]:[\\/])", raw):
+        return None
+    return normalize_working_directory(raw).path
 
 
 def _resolve_planner_repo_path(repo_path: str) -> str:
-    normalized = normalize_working_directory(repo_path, base_dir=_planner_repo_base_dir())
-    return normalized.path
+    return _explicit_planner_repo_path(repo_path) or repo_path.strip()
+
+
+def _planner_repo_target_ready_path(repo_path: str) -> str | None:
+    resolved = _explicit_planner_repo_path(repo_path)
+    if not resolved:
+        return None
+    target = Path(resolved).expanduser()
+    if target.exists():
+        return str(target) if target.is_dir() else None
+    parent = target.parent
+    if parent.exists() and parent.is_dir() and parent != Path(target.anchor) and os.access(parent, os.W_OK):
+        return str(target)
+    return None
 
 
 def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
@@ -495,12 +507,6 @@ def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
         return None
     backtick_candidates = [candidate.strip() for candidate in re.findall(r"`([^`]+)`", text)]
     backtick_paths = [candidate for candidate in backtick_candidates if re.match(r"^(?:~|/|[A-Za-z]:[\\/])", candidate)]
-    if not backtick_paths:
-        repo_named = re.search(r"\b(?:repo|repository)\b[^\n.]*`([^`]+)`", text, re.IGNORECASE)
-        if repo_named:
-            candidate = repo_named.group(1).strip()
-            if candidate and candidate not in {"main", "master"} and re.match(r"^[A-Za-z0-9._/-]+$", candidate):
-                backtick_paths.append(candidate)
     path_match = None
     if not backtick_paths:
         path_match = re.search(r"(?:at|path(?:\s+is)?|target(?:s| path)?(?:\s+is)?)\s+([~/A-Za-z]:?[\\/][^\s,.;]+)", text, re.IGNORECASE)
@@ -592,7 +598,9 @@ def _planner_gate_confirmation_action(plan: dict, planner_message: dict, user_co
         base_branch = str(repo_evidence.get("base_branch") or plan.get("base_branch") or "").strip()
         if not repo_path:
             return None
-        resolved_repo_path = _resolve_planner_repo_path(repo_path)
+        resolved_repo_path = _planner_repo_target_ready_path(repo_path)
+        if not resolved_repo_path:
+            return None
         summary = f"{resolved_repo_path} @ {base_branch}" if base_branch else resolved_repo_path
         return {
             "type": "lock_gate",
@@ -667,7 +675,9 @@ def _planner_pm_confirmation_plan_updates(plan: dict, user_content: str) -> dict
     repo_path = str(action.get("repo_path") or "").strip()
     base_branch = str(action.get("base_branch") or "").strip()
     if repo_path:
-        updates["repo_path"] = _resolve_planner_repo_path(repo_path)
+        ready_path = _planner_repo_target_ready_path(repo_path)
+        if ready_path:
+            updates["repo_path"] = ready_path
     if base_branch:
         updates["base_branch"] = base_branch
     return updates
@@ -758,7 +768,7 @@ def _repair_planner_gate_frontier(store: Any, item_id: str, plan: dict) -> dict:
                 action = _planner_gate_confirmation_action(plan, latest_planner, str(message.get("content") or ""))
                 if action and action.get("gate") == "repo_target":
                     updates = {
-                        "repo_path": _resolve_planner_repo_path(str(action.get("repo_path") or "").strip()),
+                        "repo_path": _planner_repo_target_ready_path(str(action.get("repo_path") or "").strip()) or "",
                         "base_branch": str(action.get("base_branch") or "").strip(),
                     }
                     plan = store.update_plan_inbox_item(item_id, {key: value for key, value in updates.items() if value}) or plan
@@ -849,7 +859,9 @@ def _planner_sidecar_plan_updates(sidecar: dict | None) -> dict[str, str]:
         repo_path = str(action.get("repo_path") or "").strip()
         base_branch = str(action.get("base_branch") or "").strip()
         if repo_path:
-            updates["repo_path"] = _resolve_planner_repo_path(repo_path)
+            ready_path = _planner_repo_target_ready_path(repo_path)
+            if ready_path:
+                updates["repo_path"] = ready_path
         if base_branch:
             updates["base_branch"] = base_branch
     return updates
@@ -872,8 +884,10 @@ def _validate_planner_lock_action(plan: dict, action: dict, source_message_id: s
     if gate == "repo_target":
         repo_path = str(action.get("repo_path") or plan.get("repo_path") or "").strip()
         base_branch = str(action.get("base_branch") or plan.get("base_branch") or "").strip()
-        if not repo_path:
+        ready_path = _planner_repo_target_ready_path(repo_path)
+        if not ready_path:
             return None, None
+        repo_path = ready_path
         if base_branch and base_branch not in summary:
             summary = f"{summary} ({repo_path} @ {base_branch})"
         elif repo_path not in summary:
@@ -1086,8 +1100,10 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
     repo_evidence = _extract_repo_target_evidence(user_content)
     explicit_repo_lock = re.search(r"\brepo(?:sitory)? target\b[^\n.]*\blocked\b", text) is not None
 
-    if explicit_repo_lock and (repo_evidence or plan.get("repo_path")) and _checkpoint_status(plan, "repo_target") != "agreed":
-        repo_summary = repo_evidence.get("repo_path") if repo_evidence else plan.get("repo_path")
+    direct_repo_path = (repo_evidence or {}).get("repo_path") or plan.get("repo_path")
+    ready_direct_repo_path = _planner_repo_target_ready_path(direct_repo_path) if direct_repo_path else None
+    if explicit_repo_lock and ready_direct_repo_path and _checkpoint_status(plan, "repo_target") != "agreed":
+        repo_summary = ready_direct_repo_path
         base_branch = (repo_evidence or {}).get("base_branch") or plan.get("base_branch")
         if base_branch:
             repo_summary = f"{repo_summary} @ {base_branch}" if repo_summary else f"Base branch: {base_branch}"
@@ -1461,8 +1477,9 @@ async def _execute_planner_pm_turn(
         repo_evidence = _extract_repo_target_evidence(body.content)
         if repo_evidence:
             repo_path = repo_evidence.get("repo_path")
+            ready_path = _planner_repo_target_ready_path(repo_path) if repo_path else None
             plan_updates = {
-                "repo_path": _resolve_planner_repo_path(repo_path) if repo_path else None,
+                "repo_path": ready_path,
                 "base_branch": repo_evidence.get("base_branch"),
             }
             plan = store.update_plan_inbox_item(
@@ -1500,8 +1517,9 @@ async def _execute_planner_pm_turn(
             agent_repo_evidence = _extract_repo_target_evidence(agent_content)
             if agent_repo_evidence:
                 repo_path = agent_repo_evidence.get("repo_path")
+                ready_path = _planner_repo_target_ready_path(repo_path) if repo_path else None
                 plan_updates = {
-                    "repo_path": _resolve_planner_repo_path(repo_path) if repo_path else None,
+                    "repo_path": ready_path,
                     "base_branch": agent_repo_evidence.get("base_branch"),
                 }
                 plan = store.update_plan_inbox_item(
