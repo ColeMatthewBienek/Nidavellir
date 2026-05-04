@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import json
+import asyncio
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from nidavellir.commands import CommandRunner, CommandRunStore
-from nidavellir.commands.events import broadcast_command_event
+from nidavellir.agents.chat_harness import build_prompt_assembly
 from nidavellir.agents import registry as _agent_registry
 from nidavellir.agents.events import frontend_event
+from nidavellir.commands import CommandRunner, CommandRunStore
+from nidavellir.commands.events import broadcast_command_event
 from nidavellir.orchestration import OrchestrationStore
 from nidavellir.orchestration.worktrees import (
     WorktreeError,
@@ -33,6 +37,7 @@ from nidavellir.permissions.tool_protocol import TOOL_PROTOCOL_INSTRUCTIONS, ext
 from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 from nidavellir.routers.tool_requests import _continuation_content
+from nidavellir.workspace import effective_default_working_directory
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -197,6 +202,7 @@ class PlannerPmTurnRequest(BaseModel):
     content: str = Field(min_length=1)
     provider: str | None = None
     model: str | None = None
+    agentMode: str = "provider"
 
 
 class PlanningCheckpointUpdateRequest(BaseModel):
@@ -347,6 +353,177 @@ def _next_open_planner_gate(plan: dict) -> str:
     return next((key for key in PLANNER_GATE_ORDER if _checkpoint_status(plan, key) != "agreed"), "spec_approved")
 
 
+def _next_open_planner_gate_after_updates(plan: dict, checkpoint_updates: list[dict]) -> str:
+    agreed_updates = {item["key"] for item in checkpoint_updates if item.get("status") == "agreed"}
+    return next(
+        (key for key in PLANNER_GATE_ORDER if key not in agreed_updates and _checkpoint_status(plan, key) != "agreed"),
+        "spec_approved",
+    )
+
+
+def _latest_spec(plan: dict) -> dict | None:
+    specs = plan.get("specs") or []
+    return specs[0] if specs else None
+
+
+def _build_agentic_spec_draft(plan: dict, spec_deltas: list[dict]) -> str:
+    acceptance = plan.get("acceptance_criteria") or []
+    constraints = plan.get("constraints") or []
+    checkpoints = plan.get("planning_checkpoints") or []
+    satisfied = [item["title"] for item in checkpoints if item.get("status") == "agreed"]
+    pending = [f"{item['title']}: {item.get('status')}" for item in checkpoints if item.get("status") != "agreed"]
+    deltas_by_section: dict[str, list[str]] = {}
+    for delta in spec_deltas:
+        deltas_by_section.setdefault(delta["section"], []).append(delta["content"])
+
+    def bullets(values: list[str], fallback: str) -> str:
+        return "\n".join(f"- {value}" for value in values) if values else f"- {fallback}"
+
+    return "\n".join([
+        "# Agentic Forward Spec",
+        "",
+        "## Goal",
+        str(plan.get("raw_plan") or "").strip(),
+        "",
+        "## Target Repository",
+        f"- Repo path: {plan.get('repo_path') or 'Not captured'}",
+        f"- Base branch: {plan.get('base_branch') or 'Not captured'}",
+        "",
+        "## Scope",
+        bullets(deltas_by_section.get("Scope", []), "Needs PM confirmation."),
+        "",
+        "## Acceptance Criteria",
+        bullets(acceptance, "Needs testable acceptance criteria."),
+        "",
+        "## Verification Strategy",
+        bullets(deltas_by_section.get("Verification Strategy", []), "Needs verification strategy."),
+        "",
+        "## Risks and Dependencies",
+        bullets(deltas_by_section.get("Risks and Dependencies", []), "Needs risk and dependency review."),
+        "",
+        "## Constraints",
+        bullets(constraints, "No additional constraints captured."),
+        "",
+        "## Satisfied Planning Gates",
+        bullets(satisfied, "No gates satisfied yet."),
+        "",
+        "## Pending Planning Gates",
+        bullets(pending, "No pending gates."),
+    ])
+
+
+def _planner_pm_memory_context(plan: dict) -> str:
+    messages = plan.get("discussion_messages") or []
+    discussion = []
+    for message in messages[-12:]:
+        role = message.get("role", "unknown")
+        kind = message.get("kind", "message")
+        content = str(message.get("content") or "").strip()
+        if content:
+            discussion.append(f"- {role}/{kind}: {content}")
+    checkpoints = []
+    for checkpoint in plan.get("planning_checkpoints") or []:
+        summary = checkpoint.get("summary") or checkpoint.get("blocking_question") or ""
+        checkpoints.append(f"- {checkpoint.get('key')}: {checkpoint.get('status')} - {summary}".rstrip(" -"))
+    return "\n\n".join(part for part in [
+        f"Plan inbox item: {plan.get('id')}",
+        f"Raw intake:\n{plan.get('raw_plan') or ''}",
+        f"Repo path: {plan.get('repo_path') or 'not captured'}",
+        f"Base branch: {plan.get('base_branch') or 'not captured'}",
+        "Acceptance criteria:\n" + "\n".join(f"- {item}" for item in plan.get("acceptance_criteria") or []),
+        "Constraints:\n" + "\n".join(f"- {item}" for item in plan.get("constraints") or []),
+        "Planning checkpoints:\n" + "\n".join(checkpoints),
+        "Recent PM discussion:\n" + "\n".join(discussion),
+    ] if part.strip())
+
+
+def _planner_pm_current_content(user_content: str) -> str:
+    return "\n\n".join([
+        "Use the Planner PM skill for this focused planning turn.",
+        "The goal is an agentic-forward spec that can safely move to decomposition.",
+        "Act as Nidavellir PM: co-create, critique, capture evidence, and block decomposition until required gates are satisfied.",
+        "Return only the next PM chat message to the user. Do not emit JSON; Nidavellir records checkpoint evidence separately.",
+        f"User message:\n{user_content}",
+    ])
+
+
+def _planner_pm_workdir(plan: dict) -> Path:
+    repo_path = str(plan.get("repo_path") or "").strip()
+    if repo_path:
+        return Path(repo_path).expanduser()
+    return Path(effective_default_working_directory())
+
+
+def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request: Request, item_id: str) -> dict:
+    provider = body.provider or plan.get("provider") or "claude"
+    model = body.model or plan.get("model") or "claude-sonnet-4-6"
+    conversation_id = f"planner-pm:{item_id}"
+    assembly = build_prompt_assembly(
+        store=getattr(request.app.state, "memory_store", None),
+        skill_store=getattr(request.app.state, "skill_store", None),
+        conversation_id=conversation_id,
+        session_id=conversation_id,
+        provider_id=provider,
+        model_id=model,
+        current_content=_planner_pm_current_content(body.content),
+        memory_context=_planner_pm_memory_context(plan),
+        workdir=_planner_pm_workdir(plan),
+        command_store=getattr(request.app.state, "command_store", None),
+    )
+    return {
+        "harness": "main_chat_prompt_assembly",
+        "provider": provider,
+        "model": model,
+        "conversation_id": conversation_id,
+        "prompt_section_names": [section.name for section in assembly.sections],
+        "injected_skill_ids": assembly.injected_skill_ids,
+        "suppressed_skill_ids": assembly.suppressed_skill_ids,
+        "estimated_tokens": assembly.estimated_tokens,
+        "_rendered_prompt": assembly.rendered_text,
+    }
+
+
+async def _run_planner_pm_agent(
+    plan: dict,
+    harness_metadata: dict,
+    request: Request,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
+) -> dict:
+    provider = harness_metadata["provider"]
+    manifest = _agent_registry.PROVIDER_REGISTRY.get(provider)
+    if manifest is None:
+        return {"status": "failed", "content": "", "error": "provider_not_found"}
+    agent = None
+    transcript_parts: list[str] = []
+    try:
+        safety_store = getattr(request.app.state, "provider_safety_store", None)
+        dangerousness = safety_store.get_policy(provider).effective_dangerousness if safety_store else "restricted"
+        agent = _agent_registry.make_agent(
+            provider,
+            slot_id=0,
+            workdir=_planner_pm_workdir(plan),
+            model_id=harness_metadata["model"],
+            dangerousness=dangerousness,
+        )
+        await agent.start()
+        await agent.send(harness_metadata["_rendered_prompt"])
+        async for item in agent.stream():
+            text = _stringify_agent_event(item)
+            if text:
+                transcript_parts.append(text)
+                if on_chunk is not None:
+                    await on_chunk(text)
+        return {"status": "completed", "content": "".join(transcript_parts).strip(), "error": None}
+    except Exception as exc:
+        return {"status": "failed", "content": "".join(transcript_parts).strip(), "error": str(exc)}
+    finally:
+        if agent is not None:
+            try:
+                await agent.kill()
+            except Exception:
+                pass
+
+
 def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: str) -> dict:
     text = user_content.lower()
     checkpoint_updates: list[dict] = []
@@ -426,6 +603,7 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
             "kind": kind,
             "content": content,
             "active_gate": active_gate,
+            "draft_spec": kind == "approval" and active_gate == "spec_draft" and _latest_spec(plan) is None,
             "checkpoint_updates": checkpoint_updates,
             "decisions": decisions,
             "assumptions": assumptions,
@@ -442,6 +620,7 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
                 f"The next gate is {active_gate}: {blockers[0]['question']}"
             ),
             "active_gate": active_gate,
+            "draft_spec": False,
             "checkpoint_updates": checkpoint_updates,
             "decisions": decisions,
             "assumptions": assumptions,
@@ -449,20 +628,29 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
             "spec_deltas": spec_deltas,
         }
 
-    active_gate = _next_open_planner_gate(plan)
+    active_gate = _next_open_planner_gate_after_updates(plan, checkpoint_updates)
     next_questions = {
         "scope": "What is the first autonomous execution slice, and what is explicitly out of scope?",
         "risks": "What dependencies, risk areas, or autonomy guardrails should the EM know before decomposition?",
         "spec_draft": "Should I draft the agentic-forward spec from the evidence captured so far?",
         "spec_approved": "After reviewing the spec, do you approve it for decomposition?",
     }
-    return {
-        "kind": "question",
-        "content": (
+    wants_draft = "draft" in text or "spec" in text
+    draft_spec = active_gate == "spec_draft" and wants_draft and _latest_spec(plan) is None
+    content = (
+        "As Nidavellir PM, I drafted the agentic-forward spec from the evidence captured so far. "
+        "Review it before approving decomposition."
+        if draft_spec
+        else (
             "As Nidavellir PM, the planning evidence is improving. "
             f"The next gate is {active_gate}: {next_questions.get(active_gate, 'What evidence should we capture for this gate?')}"
-        ),
+        )
+    )
+    return {
+        "kind": "message" if draft_spec else "question",
+        "content": content,
         "active_gate": active_gate,
+        "draft_spec": draft_spec,
         "checkpoint_updates": checkpoint_updates,
         "decisions": decisions,
         "assumptions": assumptions,
@@ -664,21 +852,33 @@ def create_planner_discussion_message(item_id: str, body: PlannerDiscussionMessa
         raise
 
 
-@router.post("/plan-inbox/{item_id}/pm-turn")
-def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
+async def _execute_planner_pm_turn(
+    item_id: str,
+    body: PlannerPmTurnRequest,
+    request: Request,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
+) -> dict:
     store = _store(request)
     plan = store.get_plan_inbox_item(item_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
     try:
+        harness_metadata = _planner_pm_harness_metadata(plan, body, request, item_id)
         user_message = store.create_planner_discussion_message(
             plan_inbox_item_id=item_id,
             role="user",
             kind="message",
             content=body.content,
-            metadata={"source": "pm_turn", "provider": body.provider, "model": body.model},
+            metadata={
+                "source": "pm_turn",
+                "provider": harness_metadata["provider"],
+                "model": harness_metadata["model"],
+            },
         )
         structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
+        agent_result = {"status": "skipped", "content": "", "error": None}
+        if body.agentMode == "provider":
+            agent_result = await _run_planner_pm_agent(plan, harness_metadata, request, on_chunk=on_chunk)
         checkpoint_updates: list[dict] = []
         for update in structured["checkpoint_updates"]:
             checkpoint = store.update_planning_checkpoint(
@@ -690,22 +890,53 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             )
             if checkpoint is not None:
                 checkpoint_updates.append(checkpoint)
+        draft_spec = None
+        if structured["draft_spec"]:
+            draft_spec = store.create_agentic_spec(
+                plan_inbox_item_id=item_id,
+                content=_build_agentic_spec_draft(plan, structured["spec_deltas"]),
+                metadata={
+                    "source": "planner-pm",
+                    "source_message_ids": [user_message["id"]],
+                    "active_gate": structured["active_gate"],
+                },
+                status="draft",
+            )
+            checkpoint = store.update_planning_checkpoint(
+                plan_inbox_item_id=item_id,
+                key="spec_draft",
+                status="agreed",
+                summary=f"Draft spec v{draft_spec['version']} generated by Planner PM.",
+                source_message_ids=[user_message["id"]],
+            )
+            if checkpoint is not None:
+                checkpoint_updates.append(checkpoint)
         pm_message = store.create_planner_discussion_message(
             plan_inbox_item_id=item_id,
             role="planner",
             kind=structured["kind"],
-            content=structured["content"],
+            content=(agent_result.get("content") or structured["content"]).strip(),
             metadata={
                 "source": "nidavellir_pm",
                 "skill": "planner-pm",
-                "provider": body.provider or plan.get("provider"),
-                "model": body.model or plan.get("model"),
+                "provider": harness_metadata["provider"],
+                "model": harness_metadata["model"],
+                "agent_mode": body.agentMode,
+                "agent_status": agent_result["status"],
+                "agent_error": agent_result["error"],
+                "harness": harness_metadata["harness"],
+                "harness_conversation_id": harness_metadata["conversation_id"],
+                "prompt_section_names": harness_metadata["prompt_section_names"],
+                "injected_skill_ids": harness_metadata["injected_skill_ids"],
+                "suppressed_skill_ids": harness_metadata["suppressed_skill_ids"],
+                "estimated_tokens": harness_metadata["estimated_tokens"],
                 "active_gate": structured["active_gate"],
                 "checkpoint_updates": [{"key": item["key"], "status": item["status"]} for item in checkpoint_updates],
                 "decisions": structured["decisions"],
                 "assumptions": structured["assumptions"],
                 "blockers": structured["blockers"],
                 "spec_deltas": structured["spec_deltas"],
+                "draft_spec_id": draft_spec["id"] if draft_spec else None,
             },
         )
         refreshed_plan = store.get_plan_inbox_item(item_id)
@@ -715,11 +946,42 @@ def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Re
             "structured": {
                 **structured,
                 "checkpoint_updates": checkpoint_updates,
+                "draft_spec": draft_spec,
+                "harness": {key: value for key, value in harness_metadata.items() if not key.startswith("_")},
+                "agent": agent_result,
             },
         }
     except Exception as err:
         _handle_store_error(err)
         raise
+
+
+@router.post("/plan-inbox/{item_id}/pm-turn")
+async def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
+    return await _execute_planner_pm_turn(item_id, body, request)
+
+
+@router.post("/plan-inbox/{item_id}/pm-turn/stream")
+async def stream_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> StreamingResponse:
+    async def events():
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def on_chunk(content: str) -> None:
+            await queue.put({"type": "chunk", "content": content})
+
+        yield json.dumps({"type": "start"}) + "\n"
+        task = asyncio.create_task(_execute_planner_pm_turn(item_id, body, request, on_chunk=on_chunk))
+        while not task.done() or not queue.empty():
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                yield json.dumps(event) + "\n"
+            except asyncio.TimeoutError:
+                continue
+        result = await task
+        yield json.dumps({"type": "result", "result": result}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @router.get("/plan-inbox/{item_id}/checkpoints")
