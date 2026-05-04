@@ -176,7 +176,7 @@ Never mark a checkpoint complete because the user says "check it off". Identify 
 
 ## Supervision Boundary
 
-The PM scopes, gates, supervises, validates, and reports. Coding agents implement only after approval and EM acceptance. Sandcastle-style runner mechanics are an execution substrate below the PM, not a replacement for the PM flow.
+The PM scopes, gates, supervises, validates, and reports. Coding agents implement only after approval and EM acceptance. Nidavellir runner mechanics are an execution substrate below the PM, not a replacement for the PM flow.
 """
 
 

@@ -73,10 +73,10 @@ When supervising a coding agent, require structured markers and parse them into
 Nidavellir events. Read `references/supervised-agent-protocol.md` when creating
 or reviewing coding-agent prompts.
 
-## Sandcastle-Inspired Execution
+## Nidavellir Execution Policy
 
 The PM does not implement the sandbox. It selects and supervises execution
-policy. Read `references/sandcastle-runner-contract.md` when preparing execution
+policy. Read `references/nidavellir-runner-contract.md` when preparing execution
 metadata, worktree policy, branch strategy, lifecycle hooks, or validation loops.
 
 ## Forbidden
