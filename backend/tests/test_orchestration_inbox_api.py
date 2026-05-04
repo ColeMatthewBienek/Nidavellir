@@ -226,9 +226,8 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: p
         assert "Planner PM skill" in agent.sent[0]
         assert turn_body["messages"][1]["metadata"]["active_gate"] == "scope"
         assert turn_body["structured"]["active_gate"] == "scope"
-        assert turn_body["structured"]["checkpoint_updates"][0]["key"] == "verification"
-        assert turn_body["structured"]["checkpoint_updates"][0]["source_message_ids"] == [turn_body["messages"][0]["id"]]
-        assert turn_body["structured"]["spec_deltas"][0]["section"] == "Verification Strategy"
+        assert turn_body["structured"]["checkpoint_updates"] == []
+        assert turn_body["structured"]["spec_deltas"] == []
         assert turn_body["messages"][1]["role"] == "planner"
         assert turn_body["messages"][1]["content"].startswith("As Nidavellir PM")
 
@@ -238,7 +237,7 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: p
         assert body["status"] == "planning"
         assert body["planning_checkpoints"][1]["status"] == "agreed"
         assert body["planning_checkpoints"][3]["status"] == "agreed"
-        assert body["planning_checkpoints"][4]["status"] == "agreed"
+        assert body["planning_checkpoints"][4]["status"] == "missing"
         discussion_contents = [message["content"] for message in body["discussion_messages"]]
         assert "As Nidavellir PM, agent-backed planning reply." in discussion_contents
         assert any(content.startswith("Decomposer consumes") for content in discussion_contents)
@@ -389,9 +388,124 @@ async def test_pm_turn_locks_acceptance_without_locking_proposed_verification(tm
         assert checkpoints["acceptance"]["status"] == "agreed"
         assert checkpoints["verification"]["status"] == "missing"
         assert checkpoints["risks"]["status"] == "missing"
+
+        checkpoint_response = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints")
+        assert checkpoint_response.status_code == 200
+        checkpoint_body = {item["key"]: item for item in checkpoint_response.json()}
+        assert checkpoint_body["acceptance"]["status"] == "agreed"
+        assert checkpoint_body["verification"]["status"] == "missing"
+        assert checkpoint_body["risks"]["status"] == "missing"
         updated_keys = {item["key"] for item in body["structured"]["checkpoint_updates"]}
         assert "acceptance" in updated_keys
         assert "verification" not in updated_keys
+
+
+@pytest.mark.asyncio
+async def test_planner_gate_frontier_replays_confirmations_and_clears_future_false_locks(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build Security Workstation.",
+        })).json()
+
+        async def add_message(role: str, content: str, active_gate: str | None = None) -> None:
+            response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/discussion", json={
+                "role": role,
+                "kind": "question" if role == "planner" else "message",
+                "content": content,
+                "metadata": {"active_gate": active_gate} if active_gate else {},
+            })
+            assert response.status_code == 200
+
+        await add_message(
+            "planner",
+            "Active gate: `repo_target`.\n\nWhich repo/path should this work target?",
+            "repo_target",
+        )
+        await add_message("user", "new repo (not initiated yet) in /projects/NewProject")
+        await add_message(
+            "planner",
+            (
+                "Active gate: `repo_target`.\n\n"
+                "Recommended lock:\n"
+                "`/mnt/c/Users/colebienek/projects/security-workstation`\n\n"
+                "Baseline:\n"
+                "- initialize a new git repo there\n"
+                "- default branch: `main`\n\n"
+                "Focused question: should I replace `/projects/NewProject` with "
+                "`/mnt/c/Users/colebienek/projects/security-workstation` as the final repo target?"
+            ),
+            "repo_target",
+        )
+        await add_message("user", "yes, lock it")
+        await add_message(
+            "planner",
+            (
+                "Active gate: `scope`.\n\n"
+                "Proposed V1 scope:\n"
+                "- global installer\n"
+                "- generated `sec` CLI\n\n"
+                "Explicit non-goals:\n"
+                "- desktop app\n"
+                "- browser UI\n\n"
+                "Focused question: should I lock this V1 scope as written?"
+            ),
+            "scope",
+        )
+        await add_message("user", "Lock as wreitten")
+        await add_message(
+            "planner",
+            (
+                "Active gate: `acceptance`.\n\n"
+                "Proposed acceptance criteria:\n"
+                "- New repo initialized at `/mnt/c/Users/colebienek/projects/security-workstation` on `main`.\n"
+                "- `sec doctor` reports local dependency/config health.\n\n"
+                "Focused question: should I lock these acceptance criteria as written?"
+            ),
+            "acceptance",
+        )
+        await add_message("user", "Lock them")
+        await add_message(
+            "planner",
+            (
+                "Acceptance criteria locked.\n\n"
+                "Active gate: `verification`.\n\n"
+                "Proposed verification plan:\n"
+                "- `pnpm install`\n"
+                "- `pnpm test`\n\n"
+                "Focused question: should I lock this verification plan as written?"
+            ),
+            "verification",
+        )
+
+        store = app.state.orchestration_store
+        store.update_planning_checkpoint(
+            plan_inbox_item_id=plan["id"],
+            key="verification",
+            status="agreed",
+            summary="Legacy false positive.",
+            source_message_ids=["legacy"],
+        )
+        store.update_planning_checkpoint(
+            plan_inbox_item_id=plan["id"],
+            key="risks",
+            status="agreed",
+            summary="Legacy false positive.",
+            source_message_ids=["legacy"],
+        )
+
+        detail = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}")
+        assert detail.status_code == 200
+        body = detail.json()
+        checkpoints = {item["key"]: item for item in body["planning_checkpoints"]}
+        assert body["repo_path"] == "/mnt/c/Users/colebienek/projects/security-workstation"
+        assert body["base_branch"] == "main"
+        assert checkpoints["repo_target"]["status"] == "agreed"
+        assert checkpoints["scope"]["status"] == "agreed"
+        assert checkpoints["acceptance"]["status"] == "agreed"
+        assert checkpoints["verification"]["status"] == "missing"
+        assert checkpoints["risks"]["status"] == "missing"
 
 
 @pytest.mark.asyncio

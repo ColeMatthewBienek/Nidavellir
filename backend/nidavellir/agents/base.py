@@ -68,5 +68,14 @@ class CLIAgent(ABC):
 
     def process_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        path_parts = [
+            str(Path.home() / ".local" / "bin"),
+            str(Path.home() / ".codex" / "bin" / "wsl"),
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        existing_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([part for part in path_parts if part and part not in existing_path] + [existing_path])
         env.setdefault("UV_CACHE_DIR", "/tmp/uv-cache")
         return env

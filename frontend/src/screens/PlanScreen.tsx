@@ -2025,11 +2025,11 @@ export function PlanScreen() {
   useEffect(() => {
     if (!preferredModel) return;
     setPlannerProvider((currentProvider) => {
-      if (currentProvider && agentModels.some((item) => item.provider_id === currentProvider)) return currentProvider;
+      if (currentProvider && agentModels.some((item) => item.provider_id === currentProvider && item.available)) return currentProvider;
       return preferredModel.provider_id;
     });
     setPlannerModel((currentModel) => {
-      if (currentModel && agentModels.some((item) => item.provider_id === plannerProvider && item.model_id === currentModel)) return currentModel;
+      if (currentModel && agentModels.some((item) => item.provider_id === plannerProvider && item.model_id === currentModel && item.available)) return currentModel;
       return preferredModel.model_id;
     });
   }, [agentModels, plannerProvider, preferredModel]);
