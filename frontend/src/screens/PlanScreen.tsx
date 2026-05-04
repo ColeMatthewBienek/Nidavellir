@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar } from '../components/shared/TopBar';
 import { Btn } from '../components/shared/Btn';
+import { StreamRenderer } from '../components/chat/StreamRenderer';
 import { useAgentModels } from '../hooks/useAgentModels';
 import type { AgentModelDef } from '../lib/types';
+import type { StreamEvent } from '../lib/streamTypes';
 import { getProviderTheme } from '../lib/providerTheme';
 
 const API = 'http://localhost:7430';
@@ -259,6 +261,15 @@ interface PlanInboxDetail extends PlanInboxItem {
   discussion_messages: PlannerDiscussionMessage[];
   planning_checkpoints: PlanningCheckpoint[];
   specs: AgenticSpec[];
+}
+
+function plannerStreamEvents(message: PlannerDiscussionMessage): StreamEvent[] {
+  const events = message.metadata?.events;
+  return Array.isArray(events) ? (events as StreamEvent[]) : [];
+}
+
+function plannerMessageStreaming(message: PlannerDiscussionMessage): boolean {
+  return message.metadata?.streaming === true;
 }
 
 interface TaskInboxItem {
@@ -708,19 +719,29 @@ function PlannerDiscussionPanel({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 4 }}>
               {item.discussion_messages.length === 0 ? (
                 <div style={{ color: 'var(--t1)', fontSize: 12 }}>No discussion yet.</div>
-              ) : item.discussion_messages.map((message) => (
-                <div key={message.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: message.role === 'user' ? '#1f6feb14' : 'var(--bg0)', padding: 10, maxWidth: message.role === 'user' ? '86%' : '94%', alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
-                    <span style={{ color: message.role === 'user' ? 'var(--blu)' : 'var(--grn)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
-                      {message.role === 'user' ? 'You' : 'Nidavellir PM'} · {message.kind}
-                    </span>
-                    <span style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
-                      {new Date(message.created_at).toLocaleTimeString()}
-                    </span>
+              ) : item.discussion_messages.map((message) => {
+                const streamEvents = plannerStreamEvents(message);
+                const streaming = plannerMessageStreaming(message);
+                return (
+                  <div key={message.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: message.role === 'user' ? '#1f6feb14' : 'var(--bg0)', padding: 10, maxWidth: message.role === 'user' ? '86%' : '94%', alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
+                      <span style={{ color: message.role === 'user' ? 'var(--blu)' : 'var(--grn)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
+                        {message.role === 'user' ? 'You' : 'Nidavellir PM'} · {message.kind}
+                      </span>
+                      <span style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+                        {new Date(message.created_at).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    {message.role === 'planner' && streamEvents.length > 0 ? (
+                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                        <StreamRenderer events={streamEvents} streaming={streaming} providerId={plannerProvider} />
+                      </div>
+                    ) : (
+                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</div>
+                    )}
                   </div>
-                  <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}
@@ -2179,10 +2200,35 @@ export function PlanScreen() {
             if (!line.trim()) continue;
             const event = JSON.parse(line) as { type: string; content?: string; result?: { messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail } };
             if (event.type === 'chunk' && event.content) {
+              const chunk = event.content;
               setSelectedPlanInboxItem((current) => current ? {
                 ...current,
                 discussion_messages: current.discussion_messages.map((message) => (
-                  message.id === plannerTempId ? { ...message, content: `${message.content}${event.content}` } : message
+                  message.id === plannerTempId ? {
+                    ...message,
+                    content: `${message.content}${chunk}`,
+                    metadata: {
+                      ...message.metadata,
+                      events: [
+                        ...plannerStreamEvents(message),
+                        { type: 'answer_delta', content: chunk, provider: plannerProvider } satisfies StreamEvent,
+                      ],
+                    },
+                  } : message
+                )),
+              } : current);
+            } else if (event.type === 'activity' && 'event' in event) {
+              const activityEvent = (event as { event: StreamEvent }).event;
+              setSelectedPlanInboxItem((current) => current ? {
+                ...current,
+                discussion_messages: current.discussion_messages.map((message) => (
+                  message.id === plannerTempId ? {
+                    ...message,
+                    metadata: {
+                      ...message.metadata,
+                      events: [...plannerStreamEvents(message), activityEvent],
+                    },
+                  } : message
                 )),
               } : current);
             } else if (event.type === 'result' && event.result) {

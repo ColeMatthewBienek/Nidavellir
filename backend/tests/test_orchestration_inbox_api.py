@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from nidavellir.agents.events import AgentActivityEvent
 from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.main import app
 from nidavellir.memory.store import MemoryStore
@@ -28,6 +30,7 @@ class PlannerPmFakeAgent:
         self.sent.append(text)
 
     async def stream(self):
+        yield AgentActivityEvent.progress(provider="codex", content="Reviewing planning gates")
         yield "As Nidavellir PM, agent-backed planning reply."
 
     async def kill(self) -> None:
@@ -231,6 +234,34 @@ async def test_pm_turn_generates_draft_spec_when_gate_evidence_is_complete(tmp_p
         assert body["plan"]["specs"][0]["id"] == body["structured"]["draft_spec"]["id"]
         assert body["plan"]["planning_checkpoints"][6]["status"] == "agreed"
         assert body["messages"][1]["metadata"]["draft_spec_id"] == body["structured"]["draft_spec"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmFakeAgent())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build autonomous orchestration.",
+            "repoPath": "/repo/nidavellir",
+            "baseBranch": "main",
+            "acceptanceCriteria": ["Planner gates cannot be bypassed from the UI."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn/stream", json={
+            "content": "Verification should run orchestration API tests.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert response.status_code == 200
+        events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+        assert [event["type"] for event in events] == ["start", "activity", "chunk", "result", "done"]
+        assert events[1]["event"]["type"] == "progress"
+        assert events[1]["event"]["content"] == "Reviewing planning gates"
+        assert events[2]["content"] == "As Nidavellir PM, agent-backed planning reply."
+        assert events[3]["result"]["messages"][1]["content"] == "As Nidavellir PM, agent-backed planning reply."
 
 
 @pytest.mark.asyncio
