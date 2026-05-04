@@ -2125,20 +2125,84 @@ export function PlanScreen() {
 
   const createPlannerDiscussionMessage = (content: string) => {
     if (!selectedPlanInboxId) return;
-    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxId}/pm-turn`, {
+    const userTempId = `pm-user-${Date.now()}`;
+    const plannerTempId = `pm-planner-${Date.now()}`;
+    const now = new Date().toISOString();
+    setSelectedPlanInboxItem((current) => current ? {
+      ...current,
+      discussion_messages: [
+        ...current.discussion_messages,
+        {
+          id: userTempId,
+          plan_inbox_item_id: current.id,
+          role: 'user',
+          kind: 'message',
+          content,
+          linked_artifact_id: null,
+          metadata: { optimistic: true },
+          created_at: now,
+        },
+        {
+          id: plannerTempId,
+          plan_inbox_item_id: current.id,
+          role: 'planner',
+          kind: 'message',
+          content: '',
+          linked_artifact_id: null,
+          metadata: { streaming: true },
+          created_at: now,
+        },
+      ],
+    } : current);
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxId}/pm-turn/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content, provider: plannerProvider || null, model: plannerModel || null }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`planner_pm_turn_${response.status}`);
-        return response.json() as Promise<{ messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail }>;
+        if (!response.body) {
+          return response.json() as Promise<{ messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail }>;
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffered = '';
+        let finalResult: { messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail } | null = null;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffered += decoder.decode(value, { stream: true });
+          const lines = buffered.split('\n');
+          buffered = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line) as { type: string; content?: string; result?: { messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail } };
+            if (event.type === 'chunk' && event.content) {
+              setSelectedPlanInboxItem((current) => current ? {
+                ...current,
+                discussion_messages: current.discussion_messages.map((message) => (
+                  message.id === plannerTempId ? { ...message, content: `${message.content}${event.content}` } : message
+                )),
+              } : current);
+            } else if (event.type === 'result' && event.result) {
+              finalResult = event.result;
+            }
+          }
+        }
+        if (buffered.trim()) {
+          const event = JSON.parse(buffered) as { type: string; result?: { messages: PlannerDiscussionMessage[]; plan: PlanInboxDetail } };
+          if (event.type === 'result' && event.result) finalResult = event.result;
+        }
+        if (!finalResult) throw new Error('planner_pm_turn_missing_result');
+        return finalResult;
       })
       .then((result) => {
         setSelectedPlanInboxItem(result.plan);
         setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'planner_pm_turn_failed'));
+      .catch((err) => setError(err instanceof Error ? err.message : 'planner_pm_turn_failed'))
+      .finally(() => setLoading(false));
   };
 
   const createTask = (title: string, description: string) => {

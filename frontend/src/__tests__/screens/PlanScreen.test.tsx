@@ -262,10 +262,100 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
-      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn') && options?.method === 'POST') {
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST') {
         const body = JSON.parse(String(options.body));
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'start' })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'chunk', content: 'As Nidavellir PM, what verification should we lock before I draft the spec?' })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({
+              type: 'result',
+              result: {
+                messages: [
+                  {
+                    id: 'discussion-2',
+                    plan_inbox_item_id: 'plan-1',
+                    role: 'user',
+                    kind: 'message',
+                    content: body.content,
+                    linked_artifact_id: null,
+                    metadata: {},
+                    created_at: '2026-05-03T00:01:00Z',
+                  },
+                  {
+                    id: 'discussion-3',
+                    plan_inbox_item_id: 'plan-1',
+                    role: 'planner',
+                    kind: 'question',
+                    content: 'As Nidavellir PM, what verification should we lock before I draft the spec?',
+                    linked_artifact_id: null,
+                    metadata: {},
+                    created_at: '2026-05-03T00:02:00Z',
+                  },
+                ],
+                plan: {
+                  id: 'plan-1',
+                  raw_plan: 'Automate orchestration',
+                  repo_path: '/repo',
+                  base_branch: 'main',
+                  provider: null,
+                  model: null,
+                  automation_mode: 'supervised',
+                  max_concurrency: 1,
+                  priority: null,
+                  source: 'plan_tab',
+                  constraints: [],
+                  acceptance_criteria: ['Vague specs are blocked'],
+                  status: 'planning',
+                  locked_by: null,
+                  locked_at: null,
+                  final_spec_id: null,
+                  created_at: '2026-05-03T00:00:00Z',
+                  updated_at: '2026-05-03T00:02:00Z',
+                  discussion_messages: [
+                    {
+                      id: 'discussion-1',
+                      plan_inbox_item_id: 'plan-1',
+                      role: 'user',
+                      kind: 'message',
+                      content: 'Automate orchestration',
+                      linked_artifact_id: null,
+                      metadata: { source: 'raw_plan' },
+                      created_at: '2026-05-03T00:00:00Z',
+                    },
+                    {
+                      id: 'discussion-2',
+                      plan_inbox_item_id: 'plan-1',
+                      role: 'user',
+                      kind: 'message',
+                      content: body.content,
+                      linked_artifact_id: null,
+                      metadata: {},
+                      created_at: '2026-05-03T00:01:00Z',
+                    },
+                    {
+                      id: 'discussion-3',
+                      plan_inbox_item_id: 'plan-1',
+                      role: 'planner',
+                      kind: 'question',
+                      content: 'As Nidavellir PM, what verification should we lock before I draft the spec?',
+                      linked_artifact_id: null,
+                      metadata: {},
+                      created_at: '2026-05-03T00:02:00Z',
+                    },
+                  ],
+                  planning_checkpoints: planningCheckpoints,
+                },
+              },
+            })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'done' })}\n`));
+            controller.close();
+          },
+        });
         return Promise.resolve({
           ok: true,
+          body: stream,
           json: async () => {
             const messages = [
               {
@@ -544,7 +634,7 @@ describe('PlanScreen orchestration board', () => {
 
     await waitFor(() => {
       const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
-        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn') && options?.method === 'POST'
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST'
       );
       expect(calls.length).toBe(1);
       const body = JSON.parse(String(calls[0][1]?.body));

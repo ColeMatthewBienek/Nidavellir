@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+import asyncio
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from nidavellir.agents.chat_harness import build_prompt_assembly
@@ -480,7 +483,12 @@ def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request
     }
 
 
-async def _run_planner_pm_agent(plan: dict, harness_metadata: dict, request: Request) -> dict:
+async def _run_planner_pm_agent(
+    plan: dict,
+    harness_metadata: dict,
+    request: Request,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
+) -> dict:
     provider = harness_metadata["provider"]
     manifest = _agent_registry.PROVIDER_REGISTRY.get(provider)
     if manifest is None:
@@ -503,6 +511,8 @@ async def _run_planner_pm_agent(plan: dict, harness_metadata: dict, request: Req
             text = _stringify_agent_event(item)
             if text:
                 transcript_parts.append(text)
+                if on_chunk is not None:
+                    await on_chunk(text)
         return {"status": "completed", "content": "".join(transcript_parts).strip(), "error": None}
     except Exception as exc:
         return {"status": "failed", "content": "".join(transcript_parts).strip(), "error": str(exc)}
@@ -842,8 +852,12 @@ def create_planner_discussion_message(item_id: str, body: PlannerDiscussionMessa
         raise
 
 
-@router.post("/plan-inbox/{item_id}/pm-turn")
-async def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
+async def _execute_planner_pm_turn(
+    item_id: str,
+    body: PlannerPmTurnRequest,
+    request: Request,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
+) -> dict:
     store = _store(request)
     plan = store.get_plan_inbox_item(item_id)
     if plan is None:
@@ -864,7 +878,7 @@ async def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, reque
         structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
         agent_result = {"status": "skipped", "content": "", "error": None}
         if body.agentMode == "provider":
-            agent_result = await _run_planner_pm_agent(plan, harness_metadata, request)
+            agent_result = await _run_planner_pm_agent(plan, harness_metadata, request, on_chunk=on_chunk)
         checkpoint_updates: list[dict] = []
         for update in structured["checkpoint_updates"]:
             checkpoint = store.update_planning_checkpoint(
@@ -940,6 +954,34 @@ async def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, reque
     except Exception as err:
         _handle_store_error(err)
         raise
+
+
+@router.post("/plan-inbox/{item_id}/pm-turn")
+async def create_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> dict:
+    return await _execute_planner_pm_turn(item_id, body, request)
+
+
+@router.post("/plan-inbox/{item_id}/pm-turn/stream")
+async def stream_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, request: Request) -> StreamingResponse:
+    async def events():
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def on_chunk(content: str) -> None:
+            await queue.put({"type": "chunk", "content": content})
+
+        yield json.dumps({"type": "start"}) + "\n"
+        task = asyncio.create_task(_execute_planner_pm_turn(item_id, body, request, on_chunk=on_chunk))
+        while not task.done() or not queue.empty():
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                yield json.dumps(event) + "\n"
+            except asyncio.TimeoutError:
+                continue
+        result = await task
+        yield json.dumps({"type": "result", "result": result}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @router.get("/plan-inbox/{item_id}/checkpoints")
