@@ -663,6 +663,9 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
             "title": "Refactor orchestration backend",
             "objective": "Improve everything",
         })).json()
+        premature_materialize = await c.post(f"/api/orchestration/task-inbox/{rejected['id']}/materialize", json={})
+        assert premature_materialize.status_code == 400
+        assert premature_materialize.json()["detail"] == "task_inbox_item_not_atomic"
         invalid_shape = await c.post(f"/api/orchestration/task-inbox/{rejected['id']}/shape-reports", json={
             "verdict": "invalid",
             "report": {

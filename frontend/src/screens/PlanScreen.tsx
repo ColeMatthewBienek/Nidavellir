@@ -900,7 +900,13 @@ ${pending.length ? pending.map((title) => `- ${title}`).join('\n') : '- None'}
   );
 }
 
-function TaskInboxPanel({ items }: { items: TaskInboxItem[] }) {
+function TaskInboxPanel({
+  items,
+  onMaterialize,
+}: {
+  items: TaskInboxItem[];
+  onMaterialize: (item: TaskInboxItem) => void;
+}) {
   return (
     <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 0, overflow: 'hidden' }}>
       <div style={{ borderBottom: '1px solid var(--bd)', padding: '9px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
@@ -924,6 +930,11 @@ function TaskInboxPanel({ items }: { items: TaskInboxItem[] }) {
             <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
               {item.dependencies.length} deps · {item.materialized_task_id ? 'materialized' : 'not materialized'}
             </div>
+            {item.status === 'accepted_atomic' && !item.materialized_task_id && (
+              <div>
+                <Btn small onClick={() => onMaterialize(item)}>Materialize</Btn>
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -2297,6 +2308,34 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_create_failed'));
   };
 
+  const materializeTaskInboxItem = (item: TaskInboxItem) => {
+    fetch(`${API}/api/orchestration/task-inbox/${item.id}/materialize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`task_inbox_materialize_${response.status}`);
+        return response.json() as Promise<{ task: OrchestrationTaskDetail; task_inbox_item: TaskInboxItem }>;
+      })
+      .then((result) => {
+        setTaskInboxItems((current) => current.map((existing) => (
+          existing.id === result.task_inbox_item.id ? result.task_inbox_item : existing
+        )));
+        setTasks((current) => [result.task, ...current.filter((existing) => existing.id !== result.task.id)]);
+        setSelectedTask({
+          ...result.task,
+          nodes: result.task.nodes ?? [],
+          edges: result.task.edges ?? [],
+          steps: result.task.steps ?? [],
+          worktrees: result.task.worktrees ?? [],
+          readiness: result.task.readiness ?? { runnable: [], blocked: [] },
+        });
+        setSelectedNodeId(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'task_inbox_materialize_failed'));
+  };
+
   const moveTask = (task: OrchestrationTaskSummary, status: string) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}`, {
       method: 'PATCH',
@@ -2732,7 +2771,7 @@ export function PlanScreen() {
               onCreate={createPlanInboxItem}
               loading={loading}
             />
-            <TaskInboxPanel items={taskInboxItems} />
+            <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} />
           </div>
         </div>
 
