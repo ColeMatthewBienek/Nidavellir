@@ -38,7 +38,7 @@ from nidavellir.permissions.tool_protocol import TOOL_PROTOCOL_INSTRUCTIONS, ext
 from nidavellir.resources.events import broadcast_resource_event
 from nidavellir.routers.permissions import audit_store, evaluate_and_audit
 from nidavellir.routers.tool_requests import _continuation_content
-from nidavellir.workspace import effective_default_working_directory
+from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -463,27 +463,44 @@ def _planner_pm_current_content(user_content: str) -> str:
 def _planner_pm_workdir(plan: dict) -> Path:
     repo_path = str(plan.get("repo_path") or "").strip()
     if repo_path:
-        target = Path(repo_path).expanduser()
-        if target.exists():
+        target = Path(_resolve_planner_repo_path(repo_path)).expanduser()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
             return target
-        existing_parent = next((parent for parent in target.parents if parent.exists()), None)
-        if existing_parent is not None:
-            return existing_parent
+        except OSError:
+            if target.exists() and target.is_dir():
+                return target
+            existing_parent = next((parent for parent in target.parents if parent.exists() and parent.is_dir()), None)
+            if existing_parent is not None and existing_parent != Path(target.anchor):
+                return existing_parent
     default = Path(effective_default_working_directory()).expanduser()
     if default.exists():
         return default
     return Path.cwd()
 
 
+def _planner_repo_base_dir() -> Path:
+    default = Path(effective_default_working_directory()).expanduser().resolve(strict=False)
+    return default.parent if default.name.lower() == "nidavellir" else default
+
+
+def _resolve_planner_repo_path(repo_path: str) -> str:
+    normalized = normalize_working_directory(repo_path, base_dir=_planner_repo_base_dir())
+    return normalized.path
+
+
 def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
     lowered = text.lower()
     if not any(token in lowered for token in ("repo", "repository", "project path", "worktree target", "target path")):
         return None
-    backtick_paths = [
-        candidate.strip()
-        for candidate in re.findall(r"`([^`]+)`", text)
-        if re.match(r"^(?:~|/|[A-Za-z]:[\\/])", candidate.strip())
-    ]
+    backtick_candidates = [candidate.strip() for candidate in re.findall(r"`([^`]+)`", text)]
+    backtick_paths = [candidate for candidate in backtick_candidates if re.match(r"^(?:~|/|[A-Za-z]:[\\/])", candidate)]
+    if not backtick_paths:
+        repo_named = re.search(r"\b(?:repo|repository)\b[^\n.]*`([^`]+)`", text, re.IGNORECASE)
+        if repo_named:
+            candidate = repo_named.group(1).strip()
+            if candidate and candidate not in {"main", "master"} and re.match(r"^[A-Za-z0-9._/-]+$", candidate):
+                backtick_paths.append(candidate)
     path_match = None
     if not backtick_paths:
         path_match = re.search(r"(?:at|path(?:\s+is)?|target(?:s| path)?(?:\s+is)?)\s+([~/A-Za-z]:?[\\/][^\s,.;]+)", text, re.IGNORECASE)
@@ -575,13 +592,14 @@ def _planner_gate_confirmation_action(plan: dict, planner_message: dict, user_co
         base_branch = str(repo_evidence.get("base_branch") or plan.get("base_branch") or "").strip()
         if not repo_path:
             return None
-        summary = f"{repo_path} @ {base_branch}" if base_branch else repo_path
+        resolved_repo_path = _resolve_planner_repo_path(repo_path)
+        summary = f"{resolved_repo_path} @ {base_branch}" if base_branch else resolved_repo_path
         return {
             "type": "lock_gate",
             "gate": "repo_target",
             "summary": summary,
             "evidence": "User confirmed the PM-proposed repo target.",
-            "repo_path": repo_path,
+            "repo_path": resolved_repo_path,
             "base_branch": base_branch,
         }
     if gate == "scope":
@@ -649,7 +667,7 @@ def _planner_pm_confirmation_plan_updates(plan: dict, user_content: str) -> dict
     repo_path = str(action.get("repo_path") or "").strip()
     base_branch = str(action.get("base_branch") or "").strip()
     if repo_path:
-        updates["repo_path"] = repo_path
+        updates["repo_path"] = _resolve_planner_repo_path(repo_path)
     if base_branch:
         updates["base_branch"] = base_branch
     return updates
@@ -740,7 +758,7 @@ def _repair_planner_gate_frontier(store: Any, item_id: str, plan: dict) -> dict:
                 action = _planner_gate_confirmation_action(plan, latest_planner, str(message.get("content") or ""))
                 if action and action.get("gate") == "repo_target":
                     updates = {
-                        "repo_path": str(action.get("repo_path") or "").strip(),
+                        "repo_path": _resolve_planner_repo_path(str(action.get("repo_path") or "").strip()),
                         "base_branch": str(action.get("base_branch") or "").strip(),
                     }
                     plan = store.update_plan_inbox_item(item_id, {key: value for key, value in updates.items() if value}) or plan
@@ -831,7 +849,7 @@ def _planner_sidecar_plan_updates(sidecar: dict | None) -> dict[str, str]:
         repo_path = str(action.get("repo_path") or "").strip()
         base_branch = str(action.get("base_branch") or "").strip()
         if repo_path:
-            updates["repo_path"] = repo_path
+            updates["repo_path"] = _resolve_planner_repo_path(repo_path)
         if base_branch:
             updates["base_branch"] = base_branch
     return updates
@@ -1442,8 +1460,9 @@ async def _execute_planner_pm_turn(
             plan = store.update_plan_inbox_item(item_id, confirmation_plan_updates) or plan
         repo_evidence = _extract_repo_target_evidence(body.content)
         if repo_evidence:
+            repo_path = repo_evidence.get("repo_path")
             plan_updates = {
-                "repo_path": repo_evidence.get("repo_path"),
+                "repo_path": _resolve_planner_repo_path(repo_path) if repo_path else None,
                 "base_branch": repo_evidence.get("base_branch"),
             }
             plan = store.update_plan_inbox_item(
@@ -1480,8 +1499,9 @@ async def _execute_planner_pm_turn(
         elif agent_content:
             agent_repo_evidence = _extract_repo_target_evidence(agent_content)
             if agent_repo_evidence:
+                repo_path = agent_repo_evidence.get("repo_path")
                 plan_updates = {
-                    "repo_path": agent_repo_evidence.get("repo_path"),
+                    "repo_path": _resolve_planner_repo_path(repo_path) if repo_path else None,
                     "base_branch": agent_repo_evidence.get("base_branch"),
                 }
                 plan = store.update_plan_inbox_item(

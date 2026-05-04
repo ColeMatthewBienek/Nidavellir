@@ -11,6 +11,7 @@ from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.main import app
 from nidavellir.memory.store import MemoryStore
 from nidavellir.orchestration import OrchestrationStore
+from nidavellir.routers import orchestration as orchestration_router
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
 from nidavellir.permissions.tool_requests import ToolRequestStore
 from nidavellir.skills.builtin import ensure_builtin_skills
@@ -78,6 +79,17 @@ class PlannerPmInvalidSidecarAgent(PlannerPmFakeAgent):
             "{\"actions\":[{\"type\":\"lock_gate\",\"gate\":\"verification\",\"summary\":\"Verification locked.\",\"evidence\":\"Missing commands should invalidate this.\"}]}"
             "</nidavellir-pm-actions>"
         )
+
+
+def test_planner_pm_new_repo_workdir_resolves_and_creates_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    default_repo = tmp_path / "nidavellir"
+    default_repo.mkdir()
+    monkeypatch.setattr(orchestration_router, "effective_default_working_directory", lambda: str(default_repo))
+
+    workdir = orchestration_router._planner_pm_workdir({"repo_path": "security-workstation"})
+
+    assert workdir == tmp_path / "security-workstation"
+    assert workdir.is_dir()
 
 
 def setup_app(tmp_path: Path):
