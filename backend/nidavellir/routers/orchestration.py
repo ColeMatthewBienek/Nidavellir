@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import sqlite3
 import uuid
 from pathlib import Path
@@ -488,6 +488,7 @@ async def _run_planner_pm_agent(
     harness_metadata: dict,
     request: Request,
     on_chunk: Callable[[str], Awaitable[None]] | None = None,
+    on_activity: Callable[[dict], Awaitable[None]] | None = None,
 ) -> dict:
     provider = harness_metadata["provider"]
     manifest = _agent_registry.PROVIDER_REGISTRY.get(provider)
@@ -508,6 +509,10 @@ async def _run_planner_pm_agent(
         await agent.start()
         await agent.send(harness_metadata["_rendered_prompt"])
         async for item in agent.stream():
+            if isinstance(item, dict) or hasattr(item, "to_frontend"):
+                if on_activity is not None:
+                    await on_activity(frontend_event(item))
+                continue
             text = _stringify_agent_event(item)
             if text:
                 transcript_parts.append(text)
@@ -857,6 +862,7 @@ async def _execute_planner_pm_turn(
     body: PlannerPmTurnRequest,
     request: Request,
     on_chunk: Callable[[str], Awaitable[None]] | None = None,
+    on_activity: Callable[[dict], Awaitable[None]] | None = None,
 ) -> dict:
     store = _store(request)
     plan = store.get_plan_inbox_item(item_id)
@@ -878,7 +884,13 @@ async def _execute_planner_pm_turn(
         structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
         agent_result = {"status": "skipped", "content": "", "error": None}
         if body.agentMode == "provider":
-            agent_result = await _run_planner_pm_agent(plan, harness_metadata, request, on_chunk=on_chunk)
+            agent_result = await _run_planner_pm_agent(
+                plan,
+                harness_metadata,
+                request,
+                on_chunk=on_chunk,
+                on_activity=on_activity,
+            )
         checkpoint_updates: list[dict] = []
         for update in structured["checkpoint_updates"]:
             checkpoint = store.update_planning_checkpoint(
@@ -969,8 +981,17 @@ async def stream_planner_pm_turn(item_id: str, body: PlannerPmTurnRequest, reque
         async def on_chunk(content: str) -> None:
             await queue.put({"type": "chunk", "content": content})
 
+        async def on_activity(event: dict) -> None:
+            await queue.put({"type": "activity", "event": event})
+
         yield json.dumps({"type": "start"}) + "\n"
-        task = asyncio.create_task(_execute_planner_pm_turn(item_id, body, request, on_chunk=on_chunk))
+        task = asyncio.create_task(_execute_planner_pm_turn(
+            item_id,
+            body,
+            request,
+            on_chunk=on_chunk,
+            on_activity=on_activity,
+        ))
         while not task.done() or not queue.empty():
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=0.1)

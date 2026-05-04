@@ -268,6 +268,7 @@ describe('PlanScreen orchestration board', () => {
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'start' })}\n`));
+            controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'activity', event: { type: 'progress', content: 'Reviewing planning gates', provider: 'claude' } })}\n`));
             controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'chunk', content: 'As Nidavellir PM, what verification should we lock before I draft the spec?' })}\n`));
             controller.enqueue(encoder.encode(`${JSON.stringify({
               type: 'result',
