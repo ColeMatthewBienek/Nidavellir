@@ -265,6 +265,31 @@ async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
+async def test_pm_turn_locks_repo_target_from_user_evidence(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "acceptanceCriteria": ["Repo target must be durable."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`. Use `main` as the initial branch.",
+            "agentMode": "deterministic",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        assert body["plan"]["repo_path"] == "/projects/NewProject"
+        assert body["plan"]["base_branch"] == "main"
+        repo_checkpoint = next(item for item in body["plan"]["planning_checkpoints"] if item["key"] == "repo_target")
+        assert repo_checkpoint["status"] == "agreed"
+        assert repo_checkpoint["summary"] == "/projects/NewProject @ main"
+        assert body["structured"]["checkpoint_updates"][0]["key"] == "repo_target"
+
+
+@pytest.mark.asyncio
 async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
     setup_app(tmp_path)
 

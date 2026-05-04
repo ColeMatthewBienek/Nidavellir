@@ -647,11 +647,13 @@ function CheckpointRail({
               </div>
               <StatusPill status={checkpoint.status} />
             </div>
-            <ul style={{ margin: 0, paddingLeft: 24, color: 'var(--t1)', fontSize: 11, lineHeight: 1.45, overflow: 'hidden' }}>
-              {requirements.map((requirement) => (
-                <li key={requirement} style={{ textDecoration: complete ? 'line-through' : 'none' }}>{requirement}</li>
-              ))}
-            </ul>
+            <div style={{ minHeight: 0, overflowY: 'auto', paddingRight: 3 }}>
+              <ul style={{ margin: 0, paddingLeft: 24, color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
+                {requirements.map((requirement) => (
+                  <li key={requirement} style={{ textDecoration: complete ? 'line-through' : 'none' }}>{requirement}</li>
+                ))}
+              </ul>
+            </div>
             <div style={{ color: 'var(--t1)', fontSize: 10, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 'auto' }}>
               {complete ? 'Satisfied by saved planning state.' : blocked ? 'Blocked by unresolved planning state.' : 'Waiting for PM/spec analysis.'}
             </div>
@@ -683,12 +685,16 @@ function PlannerDiscussionPanel({
   loading: boolean;
 }) {
   const [content, setContent] = useState('');
+  const bottomRef = useRef<HTMLDivElement | null>(null);
   const disabled = !item || !content.trim() || loading;
   const send = () => {
     if (disabled) return;
     onSend(content.trim());
     setContent('');
   };
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [item?.discussion_messages.length, item?.discussion_messages.at(-1)?.content]);
 
   return (
     <section style={{ background: 'var(--bg1)', minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto auto minmax(0, 1fr) auto', flex: 1 }}>
@@ -754,6 +760,7 @@ function PlannerDiscussionPanel({
                   </div>
                 );
               })}
+              <div ref={bottomRef} style={{ height: 1 }} />
             </div>
           </>
         )}
@@ -764,7 +771,7 @@ function PlannerDiscussionPanel({
           value={content}
           onChange={(event) => setContent(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
               send();
             }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -454,6 +455,32 @@ def _planner_pm_workdir(plan: dict) -> Path:
     return Path(effective_default_working_directory())
 
 
+def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
+    lowered = text.lower()
+    if not any(token in lowered for token in ("repo", "repository", "project path", "worktree target", "target path")):
+        return None
+    path_match = re.search(r"`([^`]+)`", text)
+    if path_match is None:
+        path_match = re.search(r"(?:at|path(?:\s+is)?|target(?:s| path)?(?:\s+is)?)\s+([~/A-Za-z]:?[\\/][^\s,.;]+)", text, re.IGNORECASE)
+    repo_path = path_match.group(1).strip() if path_match else ""
+    branch_match = re.search(r"['`\"]?([A-Za-z0-9._/-]+)['`\"]?\s+as\s+the\s+(?:initial|default|base)\s+branch", text, re.IGNORECASE)
+    if branch_match is None:
+        branch_match = re.search(r"\b(?:branch|baseline|default branch|initial branch)\b[^A-Za-z0-9_-]*['`\"]?([A-Za-z0-9._/-]+)['`\"]?", text, re.IGNORECASE)
+    base_branch = branch_match.group(1).strip() if branch_match else ""
+    if base_branch and not re.search(r"[A-Za-z0-9]", base_branch):
+        base_branch = ""
+    if not repo_path and "new repo" not in lowered and "new project" not in lowered and "repo target" not in lowered:
+        return None
+    result: dict[str, str] = {}
+    if repo_path:
+        result["repo_path"] = repo_path
+    if base_branch:
+        result["base_branch"] = base_branch
+    elif "main" in lowered:
+        result["base_branch"] = "main"
+    return result or None
+
+
 def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request: Request, item_id: str) -> dict:
     provider = body.provider or plan.get("provider") or "claude"
     model = body.model or plan.get("model") or "claude-sonnet-4-6"
@@ -536,7 +563,19 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
     assumptions: list[str] = []
     blockers: list[dict] = []
     spec_deltas: list[dict] = []
+    repo_evidence = _extract_repo_target_evidence(user_content)
 
+    if (repo_evidence or plan.get("repo_path")) and _checkpoint_status(plan, "repo_target") != "agreed":
+        repo_summary = repo_evidence.get("repo_path") if repo_evidence else plan.get("repo_path")
+        base_branch = (repo_evidence or {}).get("base_branch") or plan.get("base_branch")
+        if base_branch:
+            repo_summary = f"{repo_summary} @ {base_branch}" if repo_summary else f"Base branch: {base_branch}"
+        checkpoint_updates.append({
+            "key": "repo_target",
+            "status": "agreed",
+            "summary": repo_summary or "Repo target evidence captured in PM discussion.",
+            "source_message_ids": [user_message_id],
+        })
     if any(token in text for token in ("scope", "non-goal", "non goal", "in scope", "out of scope", "first slice", "first autonomous")):
         checkpoint_updates.append({
             "key": "scope",
@@ -881,6 +920,16 @@ async def _execute_planner_pm_turn(
                 "model": harness_metadata["model"],
             },
         )
+        repo_evidence = _extract_repo_target_evidence(body.content)
+        if repo_evidence:
+            plan_updates = {
+                "repo_path": repo_evidence.get("repo_path"),
+                "base_branch": repo_evidence.get("base_branch"),
+            }
+            plan = store.update_plan_inbox_item(
+                item_id,
+                {key: value for key, value in plan_updates.items() if value},
+            ) or plan
         structured = _planner_pm_structured_turn(plan, body.content, user_message["id"])
         agent_result = {"status": "skipped", "content": "", "error": None}
         if body.agentMode == "provider":
