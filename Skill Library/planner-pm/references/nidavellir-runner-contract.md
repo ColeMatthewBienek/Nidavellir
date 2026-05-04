@@ -1,8 +1,9 @@
-# Sandcastle-Inspired Runner Contract
+# Nidavellir Runner Contract
 
-Use this as Nidavellir's execution substrate shape. Sandcastle is a reference for
-agent execution mechanics, not for replacing Nidavellir's PM, decomposer, Task
-Inbox, EM, or approval gates.
+Use this as Nidavellir's execution substrate shape. This contract defines how
+autonomous agent runs are prepared, isolated, supervised, validated, and
+preserved without replacing Nidavellir's PM, decomposer, Task Inbox, EM, or
+approval gates.
 
 ## Runner Inputs
 
