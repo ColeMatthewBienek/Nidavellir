@@ -257,6 +257,16 @@ class TaskInboxUpdateRequest(BaseModel):
     materializedNodeId: str | None = None
 
 
+class TaskInboxMaterializeRequest(BaseModel):
+    status: str = "backlog"
+    labels: list[str] = Field(default_factory=list)
+    conversationId: str | None = None
+    baseRepoPath: str | None = None
+    baseBranch: str | None = None
+    taskBranch: str | None = None
+    worktreePath: str | None = None
+
+
 class TaskShapeReportCreateRequest(BaseModel):
     verdict: str
     report: dict[str, Any] = Field(default_factory=dict)
@@ -807,6 +817,51 @@ def _repair_planner_gate_frontier(store: Any, item_id: str, plan: dict) -> dict:
             )
             changed = True
     return store.get_plan_inbox_item(item_id) if changed else plan
+
+
+def _implementation_target_from_plan(plan: dict | None) -> dict[str, str]:
+    if not plan:
+        return {}
+    repo_path = str(plan.get("repo_path") or "").strip()
+    target_path = _planner_repo_target_ready_path(repo_path) if repo_path else None
+    if not target_path:
+        return {}
+    target = {"base_repo_path": target_path}
+    base_branch = str(plan.get("base_branch") or "").strip()
+    if base_branch:
+        target["base_branch"] = base_branch
+    return target
+
+
+def _task_payload_with_plan_target(store: Any, payload: dict[str, Any] | None, plan_inbox_item_id: str | None) -> dict[str, Any]:
+    merged = dict(payload or {})
+    if not plan_inbox_item_id:
+        return merged
+    target = _implementation_target_from_plan(store.get_plan_inbox_item(plan_inbox_item_id))
+    if target:
+        merged.setdefault("base_repo_path", target["base_repo_path"])
+        merged.setdefault("implementation_cwd", target["base_repo_path"])
+        if target.get("base_branch"):
+            merged.setdefault("base_branch", target["base_branch"])
+    return merged
+
+
+def _task_inbox_implementation_target(store: Any, item: dict) -> dict[str, str]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    repo_path = str(payload.get("base_repo_path") or "").strip()
+    base_branch = str(payload.get("base_branch") or "").strip()
+    if not repo_path:
+        plan_id = item.get("plan_inbox_item_id")
+        target = _implementation_target_from_plan(store.get_plan_inbox_item(plan_id) if plan_id else None)
+        repo_path = target.get("base_repo_path", "")
+        base_branch = base_branch or target.get("base_branch", "")
+    ready_path = _planner_repo_target_ready_path(repo_path) if repo_path else None
+    if not ready_path:
+        return {}
+    result = {"base_repo_path": ready_path}
+    if base_branch:
+        result["base_branch"] = base_branch
+    return result
 
 
 def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
@@ -1738,11 +1793,12 @@ def list_task_inbox_items(request: Request, status: str | None = None) -> list[d
 
 @router.post("/task-inbox")
 def create_task_inbox_item(body: TaskInboxCreateRequest, request: Request) -> dict:
+    store = _store(request)
     try:
-        return _store(request).create_task_inbox_item(
+        return store.create_task_inbox_item(
             title=body.title,
             objective=body.objective,
-            payload=body.payload,
+            payload=_task_payload_with_plan_target(store, body.payload, body.planInboxItemId),
             dependencies=body.dependencies,
             plan_inbox_item_id=body.planInboxItemId,
             decomposition_run_id=body.decompositionRunId,
@@ -1750,6 +1806,48 @@ def create_task_inbox_item(body: TaskInboxCreateRequest, request: Request) -> di
             status=body.status,
             priority=body.priority,
         )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/task-inbox/{item_id}/materialize")
+def materialize_task_inbox_item(item_id: str, body: TaskInboxMaterializeRequest, request: Request) -> dict:
+    store = _store(request)
+    item = store.get_task_inbox_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="task_inbox_item_not_found")
+    if item.get("materialized_task_id"):
+        existing = store.get_task(item["materialized_task_id"])
+        if existing is None:
+            raise HTTPException(status_code=404, detail="materialized_task_not_found")
+        return {"task": existing, "task_inbox_item": item}
+    target = _task_inbox_implementation_target(store, item)
+    base_repo_path = body.baseRepoPath or target.get("base_repo_path")
+    base_branch = body.baseBranch or target.get("base_branch")
+    if not _planner_repo_target_ready_path(base_repo_path or ""):
+        raise HTTPException(status_code=400, detail="implementation_repo_target_required")
+    try:
+        task = store.create_task(
+            title=item["title"],
+            description=item.get("objective") or "",
+            status=body.status,
+            priority=item.get("priority"),
+            labels=body.labels,
+            conversation_id=body.conversationId,
+            base_repo_path=base_repo_path,
+            base_branch=base_branch,
+            task_branch=body.taskBranch,
+            worktree_path=body.worktreePath,
+        )
+        updated = store.update_task_inbox_item(
+            item_id,
+            {
+                "status": "materialized",
+                "materialized_task_id": task["id"],
+            },
+        ) or item
+        return {"task": task, "task_inbox_item": updated}
     except Exception as err:
         _handle_store_error(err)
         raise

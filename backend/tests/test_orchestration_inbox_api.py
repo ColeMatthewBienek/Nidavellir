@@ -576,10 +576,14 @@ async def test_pm_turn_rejects_invalid_sidecar_gate_action(tmp_path: Path, monke
 @pytest.mark.asyncio
 async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
     setup_app(tmp_path)
+    target_repo = tmp_path / "security-workstation"
+    target_repo.mkdir()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         plan = (await c.post("/api/orchestration/plan-inbox", json={
             "rawPlan": "Build queue-backed orchestration intake.",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
         })).json()
         spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
             "content": "# Goal\nBuild queue-backed orchestration intake.",
@@ -609,6 +613,9 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
         task_body = task.json()
         assert task_body["status"] == "new"
         assert task_body["payload"]["single_objective"] == "PlanInbox persistence and API"
+        assert task_body["payload"]["base_repo_path"] == str(target_repo)
+        assert task_body["payload"]["base_branch"] == "main"
+        assert task_body["payload"]["implementation_cwd"] == str(target_repo)
 
         claimed = await c.post(f"/api/orchestration/task-inbox/{task_body['id']}/claim", json={"lockedBy": "em-1"})
         assert claimed.status_code == 200
@@ -643,6 +650,14 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
         assert body["status"] == "accepted_atomic"
         assert body["shape_reports"][0]["verdict"] == "valid"
         assert body["em_reviews"][0]["verdict"] == "atomic"
+
+        materialized = await c.post(f"/api/orchestration/task-inbox/{task_body['id']}/materialize", json={})
+        assert materialized.status_code == 200
+        materialized_body = materialized.json()
+        assert materialized_body["task"]["base_repo_path"] == str(target_repo)
+        assert materialized_body["task"]["base_branch"] == "main"
+        assert materialized_body["task_inbox_item"]["status"] == "materialized"
+        assert materialized_body["task_inbox_item"]["materialized_task_id"] == materialized_body["task"]["id"]
 
         rejected = (await c.post("/api/orchestration/task-inbox", json={
             "title": "Refactor orchestration backend",
