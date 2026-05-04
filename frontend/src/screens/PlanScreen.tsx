@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar } from '../components/shared/TopBar';
 import { Btn } from '../components/shared/Btn';
 import { StreamRenderer } from '../components/chat/StreamRenderer';
+import { AgentActivityTimeline } from '../components/chat/AgentActivityTimeline';
 import { useAgentModels } from '../hooks/useAgentModels';
 import type { AgentModelDef } from '../lib/types';
 import type { StreamEvent } from '../lib/streamTypes';
@@ -270,6 +271,10 @@ function plannerStreamEvents(message: PlannerDiscussionMessage): StreamEvent[] {
 
 function plannerMessageStreaming(message: PlannerDiscussionMessage): boolean {
   return message.metadata?.streaming === true;
+}
+
+function plannerHasActivity(events: StreamEvent[]): boolean {
+  return events.some((event) => event.type !== 'answer_delta' && event.type !== 'text' && event.type !== 'done');
 }
 
 interface TaskInboxItem {
@@ -735,6 +740,13 @@ function PlannerDiscussionPanel({
                     {message.role === 'planner' && streamEvents.length > 0 ? (
                       <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
                         <StreamRenderer events={streamEvents} streaming={streaming} providerId={plannerProvider} />
+                        {plannerHasActivity(streamEvents) && (
+                          <AgentActivityTimeline
+                            events={streamEvents}
+                            streaming={streaming}
+                            startedAt={new Date(message.created_at)}
+                          />
+                        )}
                       </div>
                     ) : (
                       <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</div>
