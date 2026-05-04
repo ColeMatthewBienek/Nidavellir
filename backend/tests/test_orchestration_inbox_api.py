@@ -42,7 +42,13 @@ class PlannerPmGateLockAgent(PlannerPmFakeAgent):
         yield (
             "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`.\n\n"
             "Scope gate locked: V1 scope is the smallest useful PM planning slice. "
-            "Out of scope: autonomous task execution."
+            "Out of scope: autonomous task execution.\n"
+            "<nidavellir-pm-actions>"
+            "{\"actions\":["
+            "{\"type\":\"lock_gate\",\"gate\":\"repo_target\",\"summary\":\"Repo target locked.\",\"evidence\":\"PM selected new repo path.\",\"repo_path\":\"/projects/NewProject\",\"base_branch\":\"main\"},"
+            "{\"type\":\"lock_gate\",\"gate\":\"scope\",\"summary\":\"Scope and non-goals locked.\",\"evidence\":\"User confirmed the V1 PM planning slice.\",\"in_scope\":[\"PM planning slice\"],\"non_goals\":[\"autonomous task execution\"]}"
+            "]}"
+            "</nidavellir-pm-actions>"
         )
 
 
@@ -55,7 +61,22 @@ class PlannerPmAcceptanceThenVerificationProposalAgent(PlannerPmFakeAgent):
             "- `pnpm install`\n"
             "- `pnpm test`\n"
             "- `sec doctor`\n\n"
-            "Focused question: should I lock this verification plan as written?"
+            "Focused question: should I lock this verification plan as written?\n"
+            "<nidavellir-pm-actions>"
+            "{\"actions\":["
+            "{\"type\":\"lock_gate\",\"gate\":\"acceptance\",\"summary\":\"Acceptance criteria locked.\",\"evidence\":\"User confirmed proposed acceptance criteria.\",\"criteria\":[\"Repo and scope gates must update from PM discussion.\"]}"
+            "]}"
+            "</nidavellir-pm-actions>"
+        )
+
+
+class PlannerPmInvalidSidecarAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Verification plan proposed, but not locked yet.\n"
+            "<nidavellir-pm-actions>"
+            "{\"actions\":[{\"type\":\"lock_gate\",\"gate\":\"verification\",\"summary\":\"Verification locked.\",\"evidence\":\"Missing commands should invalidate this.\"}]}"
+            "</nidavellir-pm-actions>"
         )
 
 
@@ -279,11 +300,13 @@ async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, m
 
         assert response.status_code == 200
         events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-        assert [event["type"] for event in events] == ["start", "activity", "chunk", "result", "done"]
+        assert events[0]["type"] == "start"
+        assert events[-2]["type"] == "result"
+        assert events[-1]["type"] == "done"
         assert events[1]["event"]["type"] == "progress"
         assert events[1]["event"]["content"] == "Reviewing planning gates"
-        assert events[2]["content"] == "As Nidavellir PM, agent-backed planning reply."
-        assert events[3]["result"]["messages"][1]["content"] == "As Nidavellir PM, agent-backed planning reply."
+        assert "".join(event["content"] for event in events if event["type"] == "chunk") == "As Nidavellir PM, agent-backed planning reply."
+        assert events[-2]["result"]["messages"][1]["content"] == "As Nidavellir PM, agent-backed planning reply."
 
 
 @pytest.mark.asyncio
@@ -369,6 +392,35 @@ async def test_pm_turn_locks_acceptance_without_locking_proposed_verification(tm
         updated_keys = {item["key"] for item in body["structured"]["checkpoint_updates"]}
         assert "acceptance" in updated_keys
         assert "verification" not in updated_keys
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_rejects_invalid_sidecar_gate_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr(
+        "nidavellir.routers.orchestration._agent_registry.make_agent",
+        lambda *args, **kwargs: PlannerPmInvalidSidecarAgent(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "repoPath": "/mnt/c/Users/colebienek/projects/security-workstation",
+            "baseBranch": "main",
+            "acceptanceCriteria": ["Repo and scope gates must update from PM discussion."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Please continue.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
+        assert checkpoints["verification"]["status"] == "missing"
+        assert "nidavellir-pm-actions" not in body["messages"][1]["content"]
 
 
 @pytest.mark.asyncio

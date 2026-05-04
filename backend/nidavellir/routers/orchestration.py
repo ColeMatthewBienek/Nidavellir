@@ -345,6 +345,9 @@ PLANNER_GATE_ORDER = [
     "spec_approved",
 ]
 
+PLANNER_PM_ACTION_OPEN = "<nidavellir-pm-actions>"
+PLANNER_PM_ACTION_CLOSE = "</nidavellir-pm-actions>"
+
 
 def _checkpoint_status(plan: dict, key: str) -> str:
     return next((item.get("status", "missing") for item in plan.get("planning_checkpoints", []) if item.get("key") == key), "missing")
@@ -443,7 +446,11 @@ def _planner_pm_current_content(user_content: str) -> str:
         "Use the Planner PM skill for this focused planning turn.",
         "The goal is an agentic-forward spec that can safely move to decomposition.",
         "Act as Nidavellir PM: co-create, critique, capture evidence, and block decomposition until required gates are satisfied.",
-        "Return only the next PM chat message to the user. Do not emit JSON; Nidavellir records checkpoint evidence separately.",
+        "Return the next PM chat message to the user first.",
+        "If and only if a planning gate should be locked, append a machine-readable action sidecar after the visible message.",
+        f"Wrap the sidecar exactly in {PLANNER_PM_ACTION_OPEN} and {PLANNER_PM_ACTION_CLOSE}.",
+        "The sidecar JSON shape is: {\"actions\":[{\"type\":\"lock_gate\",\"gate\":\"repo_target|scope|acceptance|verification|risks\",\"summary\":\"...\",\"evidence\":\"...\",\"repo_path\":\"...\",\"base_branch\":\"...\",\"criteria\":[\"...\"],\"commands\":[\"...\"],\"risks\":[\"...\"]}]}",
+        "Do not add lock_gate actions for proposed next gates. Only lock a gate after explicit user confirmation or concrete captured evidence.",
         f"User message:\n{user_content}",
     ])
 
@@ -500,6 +507,139 @@ def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
             base["spec_deltas"].append(delta)
             seen_deltas.add(marker)
     return base
+
+
+def _split_planner_pm_sidecar(content: str) -> tuple[str, dict | None]:
+    start = content.find(PLANNER_PM_ACTION_OPEN)
+    if start < 0:
+        return content.strip(), None
+    end = content.find(PLANNER_PM_ACTION_CLOSE, start + len(PLANNER_PM_ACTION_OPEN))
+    visible = content[:start].strip()
+    if end < 0:
+        return visible, None
+    raw_json = content[start + len(PLANNER_PM_ACTION_OPEN):end].strip()
+    try:
+        parsed = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return visible, None
+    return visible, parsed if isinstance(parsed, dict) else None
+
+
+def _planner_sidecar_plan_updates(sidecar: dict | None) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    actions = sidecar.get("actions") if isinstance(sidecar, dict) else None
+    if not isinstance(actions, list):
+        return updates
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if action.get("type") != "lock_gate" or action.get("gate") != "repo_target":
+            continue
+        repo_path = str(action.get("repo_path") or "").strip()
+        base_branch = str(action.get("base_branch") or "").strip()
+        if repo_path:
+            updates["repo_path"] = repo_path
+        if base_branch:
+            updates["base_branch"] = base_branch
+    return updates
+
+
+def _validate_planner_lock_action(plan: dict, action: dict, source_message_id: str) -> tuple[dict | None, dict | None]:
+    gate = str(action.get("gate") or "").strip()
+    if action.get("type") != "lock_gate" or gate not in PLANNER_GATE_ORDER:
+        return None, None
+    if gate in {"intake", "spec_draft", "spec_approved"}:
+        return None, None
+    if _checkpoint_status(plan, gate) == "agreed":
+        return None, None
+
+    summary = str(action.get("summary") or "").strip()
+    evidence = str(action.get("evidence") or "").strip()
+    if not summary or not evidence:
+        return None, None
+
+    if gate == "repo_target":
+        repo_path = str(action.get("repo_path") or plan.get("repo_path") or "").strip()
+        base_branch = str(action.get("base_branch") or plan.get("base_branch") or "").strip()
+        if not repo_path:
+            return None, None
+        if base_branch and base_branch not in summary:
+            summary = f"{summary} ({repo_path} @ {base_branch})"
+        elif repo_path not in summary:
+            summary = f"{summary} ({repo_path})"
+    elif gate == "scope":
+        in_scope = action.get("in_scope")
+        non_goals = action.get("non_goals")
+        if not isinstance(in_scope, list) or not in_scope or not isinstance(non_goals, list):
+            return None, None
+    elif gate == "acceptance":
+        criteria = action.get("criteria")
+        if not isinstance(criteria, list) or not any(str(item).strip() for item in criteria):
+            return None, None
+    elif gate == "verification":
+        commands = action.get("commands")
+        checks = action.get("checks")
+        has_commands = isinstance(commands, list) and any(str(item).strip() for item in commands)
+        has_checks = isinstance(checks, list) and any(str(item).strip() for item in checks)
+        if not has_commands and not has_checks:
+            return None, None
+    elif gate == "risks":
+        risks = action.get("risks")
+        dependencies = action.get("dependencies")
+        has_risks = isinstance(risks, list) and any(str(item).strip() for item in risks)
+        has_dependencies = isinstance(dependencies, list) and any(str(item).strip() for item in dependencies)
+        if not has_risks and not has_dependencies:
+            return None, None
+
+    checkpoint = {
+        "key": gate,
+        "status": "agreed",
+        "summary": summary,
+        "source_message_ids": [source_message_id],
+    }
+    section_by_gate = {
+        "scope": "Scope",
+        "acceptance": "Acceptance Criteria",
+        "verification": "Verification Strategy",
+        "risks": "Risks and Dependencies",
+    }
+    delta = None
+    if gate in section_by_gate:
+        delta = {
+            "section": section_by_gate[gate],
+            "source_message_id": source_message_id,
+            "content": evidence,
+        }
+    return checkpoint, delta
+
+
+def _planner_pm_sidecar_evidence(plan: dict, sidecar: dict | None, source_message_id: str) -> dict:
+    checkpoint_updates: list[dict] = []
+    spec_deltas: list[dict] = []
+    actions = sidecar.get("actions") if isinstance(sidecar, dict) else None
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            checkpoint, delta = _validate_planner_lock_action(plan, action, source_message_id)
+            if checkpoint is None:
+                continue
+            if any(item["key"] == checkpoint["key"] for item in checkpoint_updates):
+                continue
+            checkpoint_updates.append(checkpoint)
+            if delta is not None:
+                spec_deltas.append(delta)
+    return {
+        "kind": "message",
+        "content": "",
+        "active_gate": _next_open_planner_gate_after_updates(plan, checkpoint_updates),
+        "draft_spec": False,
+        "checkpoint_updates": checkpoint_updates,
+        "decisions": [],
+        "assumptions": [],
+        "blockers": [],
+        "spec_deltas": spec_deltas,
+    }
 
 
 def _planner_pm_locked_gate_evidence(plan: dict, content: str, source_message_id: str) -> dict:
@@ -596,7 +736,35 @@ async def _run_planner_pm_agent(
     if manifest is None:
         return {"status": "failed", "content": "", "error": "provider_not_found"}
     agent = None
-    transcript_parts: list[str] = []
+    raw_parts: list[str] = []
+    visible_parts: list[str] = []
+    pending_visible = ""
+    sidecar_started = False
+
+    async def emit_visible(chunk: str) -> None:
+        if not chunk:
+            return
+        visible_parts.append(chunk)
+        if on_chunk is not None:
+            await on_chunk(chunk)
+
+    async def handle_text_chunk(chunk: str) -> None:
+        nonlocal pending_visible, sidecar_started
+        raw_parts.append(chunk)
+        if sidecar_started:
+            return
+        pending_visible += chunk
+        marker_index = pending_visible.find(PLANNER_PM_ACTION_OPEN)
+        if marker_index >= 0:
+            await emit_visible(pending_visible[:marker_index])
+            pending_visible = ""
+            sidecar_started = True
+            return
+        keep = max(0, len(PLANNER_PM_ACTION_OPEN) - 1)
+        if len(pending_visible) > keep:
+            await emit_visible(pending_visible[:-keep])
+            pending_visible = pending_visible[-keep:]
+
     try:
         safety_store = getattr(request.app.state, "provider_safety_store", None)
         dangerousness = safety_store.get_policy(provider).effective_dangerousness if safety_store else "restricted"
@@ -616,12 +784,16 @@ async def _run_planner_pm_agent(
                 continue
             text = _stringify_agent_event(item)
             if text:
-                transcript_parts.append(text)
-                if on_chunk is not None:
-                    await on_chunk(text)
-        return {"status": "completed", "content": "".join(transcript_parts).strip(), "error": None}
+                await handle_text_chunk(text)
+        if not sidecar_started:
+            await emit_visible(pending_visible)
+        raw_content = "".join(raw_parts).strip()
+        visible_content, sidecar = _split_planner_pm_sidecar(raw_content)
+        return {"status": "completed", "content": visible_content, "raw_content": raw_content, "sidecar": sidecar, "error": None}
     except Exception as exc:
-        return {"status": "failed", "content": "".join(transcript_parts).strip(), "error": str(exc)}
+        raw_content = "".join(raw_parts).strip()
+        visible_content, sidecar = _split_planner_pm_sidecar(raw_content)
+        return {"status": "failed", "content": visible_content, "raw_content": raw_content, "sidecar": sidecar, "error": str(exc)}
     finally:
         if agent is not None:
             try:
@@ -1015,17 +1187,29 @@ async def _execute_planner_pm_turn(
                 on_activity=on_activity,
             )
         agent_content = str(agent_result.get("content") or "")
-        agent_repo_evidence = _extract_repo_target_evidence(agent_content)
-        if agent_repo_evidence:
-            plan_updates = {
-                "repo_path": agent_repo_evidence.get("repo_path"),
-                "base_branch": agent_repo_evidence.get("base_branch"),
-            }
+        sidecar = agent_result.get("sidecar") if isinstance(agent_result.get("sidecar"), dict) else None
+        sidecar_plan_updates = _planner_sidecar_plan_updates(sidecar)
+        if sidecar_plan_updates:
             plan = store.update_plan_inbox_item(
                 item_id,
-                {key: value for key, value in plan_updates.items() if value},
+                sidecar_plan_updates,
             ) or plan
-        if agent_content:
+        if sidecar:
+            structured = _merge_planner_structured_evidence(
+                structured,
+                _planner_pm_sidecar_evidence(plan, sidecar, user_message["id"]),
+            )
+        elif agent_content:
+            agent_repo_evidence = _extract_repo_target_evidence(agent_content)
+            if agent_repo_evidence:
+                plan_updates = {
+                    "repo_path": agent_repo_evidence.get("repo_path"),
+                    "base_branch": agent_repo_evidence.get("base_branch"),
+                }
+                plan = store.update_plan_inbox_item(
+                    item_id,
+                    {key: value for key, value in plan_updates.items() if value},
+                ) or plan
             structured = _merge_planner_structured_evidence(
                 structured,
                 _planner_pm_locked_gate_evidence(plan, agent_content, user_message["id"]),
