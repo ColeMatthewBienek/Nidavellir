@@ -37,6 +37,15 @@ class PlannerPmFakeAgent:
         self.killed = True
 
 
+class PlannerPmGateLockAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`.\n\n"
+            "Scope gate locked: V1 scope is the smallest useful PM planning slice. "
+            "Out of scope: autonomous task execution."
+        )
+
+
 def setup_app(tmp_path: Path):
     app.state.memory_store = MemoryStore(str(tmp_path / "memory.db"))
     app.state.token_store = TokenUsageStore(str(tmp_path / "tokens.db"))
@@ -287,6 +296,33 @@ async def test_pm_turn_locks_repo_target_from_user_evidence(tmp_path: Path):
         assert repo_checkpoint["status"] == "agreed"
         assert repo_checkpoint["summary"] == "/projects/NewProject @ main"
         assert body["structured"]["checkpoint_updates"][0]["key"] == "repo_target"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_locks_repo_and_scope_from_agent_gate_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmGateLockAgent())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "acceptanceCriteria": ["Repo and scope gates must update from PM discussion."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "That repo target and scope work for me.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
+        assert body["plan"]["repo_path"] == "/projects/NewProject"
+        assert checkpoints["repo_target"]["status"] == "agreed"
+        assert checkpoints["scope"]["status"] == "agreed"
+        updated_keys = {item["key"] for item in body["structured"]["checkpoint_updates"]}
+        assert {"repo_target", "scope"} <= updated_keys
 
 
 @pytest.mark.asyncio

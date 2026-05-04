@@ -481,6 +481,27 @@ def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
     return result or None
 
 
+def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
+    seen_updates = {item.get("key") for item in base["checkpoint_updates"]}
+    for update in extra["checkpoint_updates"]:
+        if update.get("key") not in seen_updates:
+            base["checkpoint_updates"].append(update)
+            seen_updates.add(update.get("key"))
+    for key in ("decisions", "assumptions"):
+        existing = set(base[key])
+        for item in extra[key]:
+            if item not in existing:
+                base[key].append(item)
+                existing.add(item)
+    seen_deltas = {(item.get("section"), item.get("content")) for item in base["spec_deltas"]}
+    for delta in extra["spec_deltas"]:
+        marker = (delta.get("section"), delta.get("content"))
+        if marker not in seen_deltas:
+            base["spec_deltas"].append(delta)
+            seen_deltas.add(marker)
+    return base
+
+
 def _planner_pm_harness_metadata(plan: dict, body: PlannerPmTurnRequest, request: Request, item_id: str) -> dict:
     provider = body.provider or plan.get("provider") or "claude"
     model = body.model or plan.get("model") or "claude-sonnet-4-6"
@@ -939,6 +960,22 @@ async def _execute_planner_pm_turn(
                 request,
                 on_chunk=on_chunk,
                 on_activity=on_activity,
+            )
+        agent_content = str(agent_result.get("content") or "")
+        agent_repo_evidence = _extract_repo_target_evidence(agent_content)
+        if agent_repo_evidence:
+            plan_updates = {
+                "repo_path": agent_repo_evidence.get("repo_path"),
+                "base_branch": agent_repo_evidence.get("base_branch"),
+            }
+            plan = store.update_plan_inbox_item(
+                item_id,
+                {key: value for key, value in plan_updates.items() if value},
+            ) or plan
+        if agent_content:
+            structured = _merge_planner_structured_evidence(
+                structured,
+                _planner_pm_structured_turn(plan, agent_content, user_message["id"]),
             )
         checkpoint_updates: list[dict] = []
         for update in structured["checkpoint_updates"]:
