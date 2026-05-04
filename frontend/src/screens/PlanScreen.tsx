@@ -3,7 +3,9 @@ import { TopBar } from '../components/shared/TopBar';
 import { Btn } from '../components/shared/Btn';
 import { StreamRenderer } from '../components/chat/StreamRenderer';
 import { AgentActivityTimeline } from '../components/chat/AgentActivityTimeline';
+import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
 import { useAgentModels } from '../hooks/useAgentModels';
+import { formatAssistantAnswer } from '../lib/answerFormatting';
 import type { AgentModelDef } from '../lib/types';
 import type { StreamEvent } from '../lib/streamTypes';
 import { getProviderTheme } from '../lib/providerTheme';
@@ -755,7 +757,13 @@ function PlannerDiscussionPanel({
                         )}
                       </div>
                     ) : (
-                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</div>
+                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                        {message.role === 'planner' ? (
+                          <MarkdownRenderer content={formatAssistantAnswer(message.content)} />
+                        ) : (
+                          <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
+                        )}
+                      </div>
                     )}
                   </div>
                 );

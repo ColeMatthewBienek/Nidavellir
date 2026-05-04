@@ -463,8 +463,16 @@ def _planner_pm_current_content(user_content: str) -> str:
 def _planner_pm_workdir(plan: dict) -> Path:
     repo_path = str(plan.get("repo_path") or "").strip()
     if repo_path:
-        return Path(repo_path).expanduser()
-    return Path(effective_default_working_directory())
+        target = Path(repo_path).expanduser()
+        if target.exists():
+            return target
+        existing_parent = next((parent for parent in target.parents if parent.exists()), None)
+        if existing_parent is not None:
+            return existing_parent
+    default = Path(effective_default_working_directory()).expanduser()
+    if default.exists():
+        return default
+    return Path.cwd()
 
 
 def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
