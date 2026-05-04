@@ -631,7 +631,9 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), {
       target: { value: 'Decomposer should consume only the approved spec.' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Send message to Nidavellir PM' }));
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), { key: 'Enter', shiftKey: true });
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream'))).toBe(false);
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), { key: 'Enter' });
 
     await waitFor(() => {
       const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>

@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar } from '../components/shared/TopBar';
 import { Btn } from '../components/shared/Btn';
 import { StreamRenderer } from '../components/chat/StreamRenderer';
+import { AgentActivityTimeline } from '../components/chat/AgentActivityTimeline';
+import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
 import { useAgentModels } from '../hooks/useAgentModels';
+import { formatAssistantAnswer } from '../lib/answerFormatting';
 import type { AgentModelDef } from '../lib/types';
 import type { StreamEvent } from '../lib/streamTypes';
 import { getProviderTheme } from '../lib/providerTheme';
@@ -270,6 +273,10 @@ function plannerStreamEvents(message: PlannerDiscussionMessage): StreamEvent[] {
 
 function plannerMessageStreaming(message: PlannerDiscussionMessage): boolean {
   return message.metadata?.streaming === true;
+}
+
+function plannerHasActivity(events: StreamEvent[]): boolean {
+  return events.some((event) => event.type !== 'answer_delta' && event.type !== 'text' && event.type !== 'done');
 }
 
 interface TaskInboxItem {
@@ -642,11 +649,13 @@ function CheckpointRail({
               </div>
               <StatusPill status={checkpoint.status} />
             </div>
-            <ul style={{ margin: 0, paddingLeft: 24, color: 'var(--t1)', fontSize: 11, lineHeight: 1.45, overflow: 'hidden' }}>
-              {requirements.map((requirement) => (
-                <li key={requirement} style={{ textDecoration: complete ? 'line-through' : 'none' }}>{requirement}</li>
-              ))}
-            </ul>
+            <div style={{ minHeight: 0, overflowY: 'auto', paddingRight: 3 }}>
+              <ul style={{ margin: 0, paddingLeft: 24, color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
+                {requirements.map((requirement) => (
+                  <li key={requirement} style={{ textDecoration: complete ? 'line-through' : 'none' }}>{requirement}</li>
+                ))}
+              </ul>
+            </div>
             <div style={{ color: 'var(--t1)', fontSize: 10, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 'auto' }}>
               {complete ? 'Satisfied by saved planning state.' : blocked ? 'Blocked by unresolved planning state.' : 'Waiting for PM/spec analysis.'}
             </div>
@@ -678,12 +687,16 @@ function PlannerDiscussionPanel({
   loading: boolean;
 }) {
   const [content, setContent] = useState('');
+  const bottomRef = useRef<HTMLDivElement | null>(null);
   const disabled = !item || !content.trim() || loading;
   const send = () => {
     if (disabled) return;
     onSend(content.trim());
     setContent('');
   };
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [item?.discussion_messages.length, item?.discussion_messages.at(-1)?.content]);
 
   return (
     <section style={{ background: 'var(--bg1)', minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto auto minmax(0, 1fr) auto', flex: 1 }}>
@@ -735,13 +748,27 @@ function PlannerDiscussionPanel({
                     {message.role === 'planner' && streamEvents.length > 0 ? (
                       <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
                         <StreamRenderer events={streamEvents} streaming={streaming} providerId={plannerProvider} />
+                        {plannerHasActivity(streamEvents) && (
+                          <AgentActivityTimeline
+                            events={streamEvents}
+                            streaming={streaming}
+                            startedAt={new Date(message.created_at)}
+                          />
+                        )}
                       </div>
                     ) : (
-                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</div>
+                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                        {message.role === 'planner' ? (
+                          <MarkdownRenderer content={formatAssistantAnswer(message.content)} />
+                        ) : (
+                          <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
               })}
+              <div ref={bottomRef} style={{ height: 1 }} />
             </div>
           </>
         )}
@@ -752,7 +779,7 @@ function PlannerDiscussionPanel({
           value={content}
           onChange={(event) => setContent(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
               send();
             }
@@ -2006,11 +2033,11 @@ export function PlanScreen() {
   useEffect(() => {
     if (!preferredModel) return;
     setPlannerProvider((currentProvider) => {
-      if (currentProvider && agentModels.some((item) => item.provider_id === currentProvider)) return currentProvider;
+      if (currentProvider && agentModels.some((item) => item.provider_id === currentProvider && item.available)) return currentProvider;
       return preferredModel.provider_id;
     });
     setPlannerModel((currentModel) => {
-      if (currentModel && agentModels.some((item) => item.provider_id === plannerProvider && item.model_id === currentModel)) return currentModel;
+      if (currentModel && agentModels.some((item) => item.provider_id === plannerProvider && item.model_id === currentModel && item.available)) return currentModel;
       return preferredModel.model_id;
     });
   }, [agentModels, plannerProvider, preferredModel]);

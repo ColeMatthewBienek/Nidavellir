@@ -11,6 +11,7 @@ from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.main import app
 from nidavellir.memory.store import MemoryStore
 from nidavellir.orchestration import OrchestrationStore
+from nidavellir.routers import orchestration as orchestration_router
 from nidavellir.permissions import PermissionAuditStore, PermissionEvaluator
 from nidavellir.permissions.tool_requests import ToolRequestStore
 from nidavellir.skills.builtin import ensure_builtin_skills
@@ -35,6 +36,60 @@ class PlannerPmFakeAgent:
 
     async def kill(self) -> None:
         self.killed = True
+
+
+class PlannerPmGateLockAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`.\n\n"
+            "Scope gate locked: V1 scope is the smallest useful PM planning slice. "
+            "Out of scope: autonomous task execution.\n"
+            "<nidavellir-pm-actions>"
+            "{\"actions\":["
+            "{\"type\":\"lock_gate\",\"gate\":\"repo_target\",\"summary\":\"Repo target locked.\",\"evidence\":\"PM selected new repo path.\",\"repo_path\":\"/projects/NewProject\",\"base_branch\":\"main\"},"
+            "{\"type\":\"lock_gate\",\"gate\":\"scope\",\"summary\":\"Scope and non-goals locked.\",\"evidence\":\"User confirmed the V1 PM planning slice.\",\"in_scope\":[\"PM planning slice\"],\"non_goals\":[\"autonomous task execution\"]}"
+            "]}"
+            "</nidavellir-pm-actions>"
+        )
+
+
+class PlannerPmAcceptanceThenVerificationProposalAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Acceptance criteria locked.\n\n"
+            "Active gate: `verification`.\n\n"
+            "Proposed verification plan:\n"
+            "- `pnpm install`\n"
+            "- `pnpm test`\n"
+            "- `sec doctor`\n\n"
+            "Focused question: should I lock this verification plan as written?\n"
+            "<nidavellir-pm-actions>"
+            "{\"actions\":["
+            "{\"type\":\"lock_gate\",\"gate\":\"acceptance\",\"summary\":\"Acceptance criteria locked.\",\"evidence\":\"User confirmed proposed acceptance criteria.\",\"criteria\":[\"Repo and scope gates must update from PM discussion.\"]}"
+            "]}"
+            "</nidavellir-pm-actions>"
+        )
+
+
+class PlannerPmInvalidSidecarAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Verification plan proposed, but not locked yet.\n"
+            "<nidavellir-pm-actions>"
+            "{\"actions\":[{\"type\":\"lock_gate\",\"gate\":\"verification\",\"summary\":\"Verification locked.\",\"evidence\":\"Missing commands should invalidate this.\"}]}"
+            "</nidavellir-pm-actions>"
+        )
+
+
+def test_planner_pm_new_repo_workdir_resolves_and_creates_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    default_repo = tmp_path / "nidavellir"
+    default_repo.mkdir()
+    monkeypatch.setattr(orchestration_router, "effective_default_working_directory", lambda: str(default_repo))
+
+    workdir = orchestration_router._planner_pm_workdir({"repo_path": "security-workstation"})
+
+    assert workdir == tmp_path / "security-workstation"
+    assert workdir.is_dir()
 
 
 def setup_app(tmp_path: Path):
@@ -183,9 +238,8 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: p
         assert "Planner PM skill" in agent.sent[0]
         assert turn_body["messages"][1]["metadata"]["active_gate"] == "scope"
         assert turn_body["structured"]["active_gate"] == "scope"
-        assert turn_body["structured"]["checkpoint_updates"][0]["key"] == "verification"
-        assert turn_body["structured"]["checkpoint_updates"][0]["source_message_ids"] == [turn_body["messages"][0]["id"]]
-        assert turn_body["structured"]["spec_deltas"][0]["section"] == "Verification Strategy"
+        assert turn_body["structured"]["checkpoint_updates"] == []
+        assert turn_body["structured"]["spec_deltas"] == []
         assert turn_body["messages"][1]["role"] == "planner"
         assert turn_body["messages"][1]["content"].startswith("As Nidavellir PM")
 
@@ -195,7 +249,7 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: p
         assert body["status"] == "planning"
         assert body["planning_checkpoints"][1]["status"] == "agreed"
         assert body["planning_checkpoints"][3]["status"] == "agreed"
-        assert body["planning_checkpoints"][4]["status"] == "agreed"
+        assert body["planning_checkpoints"][4]["status"] == "missing"
         discussion_contents = [message["content"] for message in body["discussion_messages"]]
         assert "As Nidavellir PM, agent-backed planning reply." in discussion_contents
         assert any(content.startswith("Decomposer consumes") for content in discussion_contents)
@@ -257,11 +311,242 @@ async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, m
 
         assert response.status_code == 200
         events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-        assert [event["type"] for event in events] == ["start", "activity", "chunk", "result", "done"]
+        assert events[0]["type"] == "start"
+        assert events[-2]["type"] == "result"
+        assert events[-1]["type"] == "done"
         assert events[1]["event"]["type"] == "progress"
         assert events[1]["event"]["content"] == "Reviewing planning gates"
-        assert events[2]["content"] == "As Nidavellir PM, agent-backed planning reply."
-        assert events[3]["result"]["messages"][1]["content"] == "As Nidavellir PM, agent-backed planning reply."
+        assert "".join(event["content"] for event in events if event["type"] == "chunk") == "As Nidavellir PM, agent-backed planning reply."
+        assert events[-2]["result"]["messages"][1]["content"] == "As Nidavellir PM, agent-backed planning reply."
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_locks_repo_target_from_user_evidence(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "acceptanceCriteria": ["Repo target must be durable."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Repo target is now locked: new repo, not initialized yet, at `/projects/NewProject`. Use `main` as the initial branch.",
+            "agentMode": "deterministic",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        assert body["plan"]["repo_path"] == "/projects/NewProject"
+        assert body["plan"]["base_branch"] == "main"
+        repo_checkpoint = next(item for item in body["plan"]["planning_checkpoints"] if item["key"] == "repo_target")
+        assert repo_checkpoint["status"] == "agreed"
+        assert repo_checkpoint["summary"] == "/projects/NewProject @ main"
+        assert body["structured"]["checkpoint_updates"][0]["key"] == "repo_target"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_locks_repo_and_scope_from_agent_gate_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmGateLockAgent())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "acceptanceCriteria": ["Repo and scope gates must update from PM discussion."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "That repo target and scope work for me.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
+        assert body["plan"]["repo_path"] == "/projects/NewProject"
+        assert checkpoints["repo_target"]["status"] == "agreed"
+        assert checkpoints["scope"]["status"] == "agreed"
+        updated_keys = {item["key"] for item in body["structured"]["checkpoint_updates"]}
+        assert {"repo_target", "scope"} <= updated_keys
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_locks_acceptance_without_locking_proposed_verification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr(
+        "nidavellir.routers.orchestration._agent_registry.make_agent",
+        lambda *args, **kwargs: PlannerPmAcceptanceThenVerificationProposalAgent(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "repoPath": "/mnt/c/Users/colebienek/projects/security-workstation",
+            "baseBranch": "main",
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Lock them",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
+        assert checkpoints["repo_target"]["status"] == "agreed"
+        assert checkpoints["acceptance"]["status"] == "agreed"
+        assert checkpoints["verification"]["status"] == "missing"
+        assert checkpoints["risks"]["status"] == "missing"
+
+        checkpoint_response = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints")
+        assert checkpoint_response.status_code == 200
+        checkpoint_body = {item["key"]: item for item in checkpoint_response.json()}
+        assert checkpoint_body["acceptance"]["status"] == "agreed"
+        assert checkpoint_body["verification"]["status"] == "missing"
+        assert checkpoint_body["risks"]["status"] == "missing"
+        updated_keys = {item["key"] for item in body["structured"]["checkpoint_updates"]}
+        assert "acceptance" in updated_keys
+        assert "verification" not in updated_keys
+
+
+@pytest.mark.asyncio
+async def test_planner_gate_frontier_replays_confirmations_and_clears_future_false_locks(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build Security Workstation.",
+        })).json()
+
+        async def add_message(role: str, content: str, active_gate: str | None = None) -> None:
+            response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/discussion", json={
+                "role": role,
+                "kind": "question" if role == "planner" else "message",
+                "content": content,
+                "metadata": {"active_gate": active_gate} if active_gate else {},
+            })
+            assert response.status_code == 200
+
+        await add_message(
+            "planner",
+            "Active gate: `repo_target`.\n\nWhich repo/path should this work target?",
+            "repo_target",
+        )
+        await add_message("user", "new repo (not initiated yet) in /projects/NewProject")
+        await add_message(
+            "planner",
+            (
+                "Active gate: `repo_target`.\n\n"
+                "Recommended lock:\n"
+                "`/mnt/c/Users/colebienek/projects/security-workstation`\n\n"
+                "Baseline:\n"
+                "- initialize a new git repo there\n"
+                "- default branch: `main`\n\n"
+                "Focused question: should I replace `/projects/NewProject` with "
+                "`/mnt/c/Users/colebienek/projects/security-workstation` as the final repo target?"
+            ),
+            "repo_target",
+        )
+        await add_message("user", "yes, lock it")
+        await add_message(
+            "planner",
+            (
+                "Active gate: `scope`.\n\n"
+                "Proposed V1 scope:\n"
+                "- global installer\n"
+                "- generated `sec` CLI\n\n"
+                "Explicit non-goals:\n"
+                "- desktop app\n"
+                "- browser UI\n\n"
+                "Focused question: should I lock this V1 scope as written?"
+            ),
+            "scope",
+        )
+        await add_message("user", "Lock as wreitten")
+        await add_message(
+            "planner",
+            (
+                "Active gate: `acceptance`.\n\n"
+                "Proposed acceptance criteria:\n"
+                "- New repo initialized at `/mnt/c/Users/colebienek/projects/security-workstation` on `main`.\n"
+                "- `sec doctor` reports local dependency/config health.\n\n"
+                "Focused question: should I lock these acceptance criteria as written?"
+            ),
+            "acceptance",
+        )
+        await add_message("user", "Lock them")
+        await add_message(
+            "planner",
+            (
+                "Acceptance criteria locked.\n\n"
+                "Active gate: `verification`.\n\n"
+                "Proposed verification plan:\n"
+                "- `pnpm install`\n"
+                "- `pnpm test`\n\n"
+                "Focused question: should I lock this verification plan as written?"
+            ),
+            "verification",
+        )
+
+        store = app.state.orchestration_store
+        store.update_planning_checkpoint(
+            plan_inbox_item_id=plan["id"],
+            key="verification",
+            status="agreed",
+            summary="Legacy false positive.",
+            source_message_ids=["legacy"],
+        )
+        store.update_planning_checkpoint(
+            plan_inbox_item_id=plan["id"],
+            key="risks",
+            status="agreed",
+            summary="Legacy false positive.",
+            source_message_ids=["legacy"],
+        )
+
+        detail = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}")
+        assert detail.status_code == 200
+        body = detail.json()
+        checkpoints = {item["key"]: item for item in body["planning_checkpoints"]}
+        assert body["repo_path"] == "/mnt/c/Users/colebienek/projects/security-workstation"
+        assert body["base_branch"] == "main"
+        assert checkpoints["repo_target"]["status"] == "agreed"
+        assert checkpoints["scope"]["status"] == "agreed"
+        assert checkpoints["acceptance"]["status"] == "agreed"
+        assert checkpoints["verification"]["status"] == "missing"
+        assert checkpoints["risks"]["status"] == "missing"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_rejects_invalid_sidecar_gate_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr(
+        "nidavellir.routers.orchestration._agent_registry.make_agent",
+        lambda *args, **kwargs: PlannerPmInvalidSidecarAgent(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new autonomous project.",
+            "repoPath": "/mnt/c/Users/colebienek/projects/security-workstation",
+            "baseBranch": "main",
+            "acceptanceCriteria": ["Repo and scope gates must update from PM discussion."],
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Please continue.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
+        assert checkpoints["verification"]["status"] == "missing"
+        assert "nidavellir-pm-actions" not in body["messages"][1]["content"]
 
 
 @pytest.mark.asyncio
