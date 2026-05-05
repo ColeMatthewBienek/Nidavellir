@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,17 @@ from nidavellir.permissions.tool_requests import ToolRequestStore
 from nidavellir.skills.builtin import ensure_builtin_skills
 from nidavellir.skills.store import SkillStore
 from nidavellir.tokens.store import TokenUsageStore
+
+
+def create_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "nidavellir@example.test"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Nidavellir Test"], cwd=path, check=True)
+    (path / "README.md").write_text("# test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=path, check=True, capture_output=True, text=True)
+    return path
 
 
 class PlannerPmFakeAgent:
@@ -826,8 +838,7 @@ async def test_decompose_approved_plan_creates_task_inbox_candidates(tmp_path: P
 @pytest.mark.asyncio
 async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_items(tmp_path: Path):
     setup_app(tmp_path)
-    target_repo = tmp_path / "security-workstation"
-    target_repo.mkdir()
+    target_repo = create_git_repo(tmp_path / "security-workstation")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         plan = (await c.post("/api/orchestration/plan-inbox", json={
@@ -868,6 +879,7 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
             "lockedBy": "em-daemon-test",
             "maxItems": 3,
             "materialize": True,
+            "provisionWorktrees": True,
         })
 
         assert processed.status_code == 200
@@ -883,6 +895,14 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
         assert [node["title"] for node in atomic_result["materialization"]["task"]["nodes"]] == ["Implementation"]
         assert [step["type"] for step in atomic_result["materialization"]["task"]["steps"]] == ["agent", "command"]
         assert atomic_result["materialization"]["task"]["readiness"]["runnable"][0]["step_type"] == "agent"
+        assert len(atomic_result["worktree_provisioning"]["created"]) == 1
+        worktree = atomic_result["worktree_provisioning"]["created"][0]
+        assert worktree["kind"] == "execution"
+        assert worktree["status"] == "clean"
+        assert worktree["node_id"] == atomic_result["materialization"]["task"]["nodes"][0]["id"]
+        assert Path(worktree["worktree_path"]).exists()
+        prepared_task = atomic_result["materialization"]["task"]
+        assert prepared_task["worktrees"][0]["id"] == worktree["id"]
         assert atomic_result["task_inbox_item"]["status"] == "materialized"
 
         broad_result = by_id[broad["id"]]

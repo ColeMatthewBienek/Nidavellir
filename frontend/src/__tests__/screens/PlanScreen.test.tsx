@@ -810,6 +810,7 @@ describe('PlanScreen orchestration board', () => {
       const body = JSON.parse(String(calls[0][1]?.body));
       expect(body.lockedBy).toBe('plan-screen-em');
       expect(body.materialize).toBe(true);
+      expect(body.provisionWorktrees).toBe(true);
     });
     expect((await screen.findAllByText('Run deterministic EM processing from the Plan UI.')).length).toBeGreaterThan(0);
     expect((await screen.findAllByText('/repo')).length).toBeGreaterThan(0);
