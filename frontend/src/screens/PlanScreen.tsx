@@ -15,6 +15,7 @@ const API = 'http://localhost:7430';
 const BOARD_COLUMNS = [
   { id: 'backlog', label: 'Backlog' },
   { id: 'ready', label: 'Ready' },
+  { id: 'queued_for_execution', label: 'Queued' },
   { id: 'running', label: 'Running' },
   { id: 'review', label: 'Review' },
   { id: 'done', label: 'Done' },
@@ -29,6 +30,7 @@ const PROVIDER_ORDER = ['claude', 'codex', 'ollama', 'gemini'];
 const STATUS_COLORS: Record<string, string> = {
   backlog: 'var(--t1)',
   ready: 'var(--blu)',
+  queued_for_execution: 'var(--prp)',
   running: 'var(--yel)',
   waiting_for_user: 'var(--yel)',
   review: 'var(--prp)',
@@ -2448,7 +2450,7 @@ export function PlanScreen() {
     fetch(`${API}/api/orchestration/task-inbox/process`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lockedBy: 'plan-screen-em', maxItems: 5, materialize: true, provisionWorktrees: true }),
+      body: JSON.stringify({ lockedBy: 'plan-screen-em', maxItems: 5, materialize: true, provisionWorktrees: true, queueExecution: true }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`task_inbox_process_${response.status}`);
