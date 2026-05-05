@@ -254,7 +254,7 @@ CREATE INDEX IF NOT EXISTS idx_orchestration_agentic_specs_plan ON orchestration
 CREATE INDEX IF NOT EXISTS idx_orchestration_decomposition_runs_plan ON orchestration_decomposition_runs(plan_inbox_item_id, pass_index);
 """
 
-TASK_STATUSES = {"backlog", "ready", "running", "review", "done", "blocked", "cancelled"}
+TASK_STATUSES = {"backlog", "ready", "queued_for_execution", "running", "review", "done", "blocked", "cancelled"}
 NODE_STATUSES = {"not_started", "ready", "running", "blocked", "failed", "complete", "skipped", "cancelled"}
 STEP_STATUSES = {"pending", "ready", "running", "waiting_for_user", "failed", "complete", "skipped", "cancelled"}
 STEP_TYPES = {"manual", "agent", "command", "review", "gate", "artifact", "handoff"}

@@ -288,6 +288,7 @@ class TaskInboxProcessRequest(BaseModel):
     maxItems: int = Field(default=5, ge=1, le=25)
     materialize: bool = True
     provisionWorktrees: bool = False
+    queueExecution: bool = False
 
 
 def _store(request: Request) -> OrchestrationStore:
@@ -1287,6 +1288,52 @@ def _provision_task_execution_worktrees(store: Any, task: dict) -> dict[str, Any
         },
     )
     return {"created": created, "skipped": skipped}
+
+
+def _task_ready_for_execution_queue(task: dict) -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    agent_node_ids = {
+        step["node_id"]
+        for step in task.get("steps", [])
+        if step.get("type") == "agent" and step.get("config", {}).get("requires_worktree") is not False
+    }
+    active_worktree_node_ids = {
+        worktree.get("node_id")
+        for worktree in task.get("worktrees", [])
+        if worktree.get("kind") == "execution" and worktree.get("status") not in {"removed", "missing", "error"}
+    }
+    for node_id in sorted(agent_node_ids - active_worktree_node_ids):
+        missing.append(f"execution worktree for node {node_id}")
+    if not task.get("readiness", {}).get("runnable"):
+        missing.append("runnable step")
+    return not missing, missing
+
+
+def _queue_task_for_execution(store: Any, task_id: str) -> dict[str, Any]:
+    task = store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    ready, missing = _task_ready_for_execution_queue(task)
+    if not ready:
+        store.append_event(
+            task_id=task_id,
+            type="task_execution_queue_blocked",
+            payload={"missing": missing},
+        )
+        return {"task": task, "queued": False, "missing": missing}
+    updated = store.update_task(task_id, {"status": "queued_for_execution"}) or task
+    store.append_event(
+        task_id=task_id,
+        type="task_queued_for_execution",
+        payload={
+            "runnable_count": len(updated.get("readiness", {}).get("runnable", [])),
+            "worktree_count": len([
+                item for item in updated.get("worktrees", [])
+                if item.get("kind") == "execution" and item.get("status") not in {"removed", "missing", "error"}
+            ]),
+        },
+    )
+    return {"task": updated, "queued": True, "missing": []}
 
 
 def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
@@ -2393,6 +2440,12 @@ def process_task_inbox(body: TaskInboxProcessRequest, request: Request) -> dict:
             if body.provisionWorktrees:
                 result["worktree_provisioning"] = _provision_task_execution_worktrees(store, materialized["task"])
                 result["materialization"]["task"] = store.get_task(materialized["task"]["id"]) or materialized["task"]
+            if body.queueExecution:
+                queued = _queue_task_for_execution(store, materialized["task"]["id"])
+                result["execution_queue"] = queued
+                result["materialization"]["task"] = queued["task"]
+                if queued["queued"]:
+                    result["action"] = "queued_for_execution"
         processed.append(result)
 
     store.append_event(type="task_inbox_process_finished", payload={
@@ -2400,6 +2453,7 @@ def process_task_inbox(body: TaskInboxProcessRequest, request: Request) -> dict:
         "max_items": body.maxItems,
         "processed_count": len(processed),
         "materialized_count": sum(1 for item in processed if item.get("action") == "materialized"),
+        "queued_for_execution_count": sum(1 for item in processed if item.get("action") == "queued_for_execution"),
         "provisioned_worktree_count": sum(
             len(item.get("worktree_provisioning", {}).get("created", []))
             for item in processed
@@ -2551,6 +2605,11 @@ def provision_task_execution_worktrees(task_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="task_not_found")
     provisioning = _provision_task_execution_worktrees(store, task)
     return {"task": store.get_task(task_id), "worktree_provisioning": provisioning}
+
+
+@router.post("/tasks/{task_id}/queue-execution")
+def queue_task_execution(task_id: str, request: Request) -> dict:
+    return _queue_task_for_execution(_store(request), task_id)
 
 
 @router.post("/tasks/{task_id}/nodes")

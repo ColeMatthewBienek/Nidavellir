@@ -880,6 +880,7 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
             "maxItems": 3,
             "materialize": True,
             "provisionWorktrees": True,
+            "queueExecution": True,
         })
 
         assert processed.status_code == 200
@@ -888,7 +889,7 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
         by_id = {item["task_inbox_item"]["id"]: item for item in body["processed"]}
 
         atomic_result = by_id[atomic["id"]]
-        assert atomic_result["action"] == "materialized"
+        assert atomic_result["action"] == "queued_for_execution"
         assert atomic_result["shape_report"]["verdict"] == "valid"
         assert atomic_result["em_review"]["verdict"] == "atomic"
         assert atomic_result["materialization"]["task"]["base_repo_path"] == str(target_repo)
@@ -903,6 +904,8 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
         assert Path(worktree["worktree_path"]).exists()
         prepared_task = atomic_result["materialization"]["task"]
         assert prepared_task["worktrees"][0]["id"] == worktree["id"]
+        assert prepared_task["status"] == "queued_for_execution"
+        assert atomic_result["execution_queue"]["queued"] is True
         assert atomic_result["task_inbox_item"]["status"] == "materialized"
 
         broad_result = by_id[broad["id"]]
