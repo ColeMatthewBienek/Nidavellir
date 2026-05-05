@@ -270,6 +270,9 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: p
         assert turn_body["structured"]["harness"]["conversation_id"] == f"planner-pm:{plan['id']}"
         assert turn_body["structured"]["agent"]["status"] == "completed"
         assert "Planner PM skill" in agent.sent[0]
+        assert "Read-only repo discovery is allowed" in agent.sent[0]
+        assert "Do not run implementation or test loops as the PM" in agent.sent[0]
+        assert "do not proceed into Step 4/write tests/implement" in agent.sent[0]
         assert turn_body["messages"][1]["metadata"]["active_gate"] == "scope"
         assert turn_body["structured"]["active_gate"] == "scope"
         assert turn_body["structured"]["checkpoint_updates"] == []

@@ -279,6 +279,10 @@ function plannerHasActivity(events: StreamEvent[]): boolean {
   return events.some((event) => event.type !== 'answer_delta' && event.type !== 'text' && event.type !== 'done');
 }
 
+function plannerHasText(events: StreamEvent[]): boolean {
+  return events.some((event) => (event.type === 'answer_delta' || event.type === 'text') && Boolean(event.content));
+}
+
 interface TaskInboxItem {
   id: string;
   plan_inbox_item_id?: string | null;
@@ -746,19 +750,20 @@ function PlannerDiscussionPanel({
               ) : item.discussion_messages.map((message) => {
                 const streamEvents = plannerStreamEvents(message);
                 const streaming = plannerMessageStreaming(message);
+                const renderStreamText = message.role === 'planner' && plannerHasText(streamEvents);
                 return (
-                  <div key={message.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: message.role === 'user' ? '#1f6feb14' : 'var(--bg0)', padding: 10, maxWidth: message.role === 'user' ? '86%' : '94%', alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                  <div key={message.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: message.role === 'user' ? '#1f6feb14' : 'var(--bg0)', padding: 12, width: message.role === 'planner' ? '100%' : undefined, maxWidth: message.role === 'user' ? '86%' : '100%', minWidth: 0, alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
-                      <span style={{ color: message.role === 'user' ? 'var(--blu)' : 'var(--grn)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
+                      <span style={{ color: message.role === 'user' ? 'var(--blu)' : 'var(--grn)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' }}>
                         {message.role === 'user' ? 'You' : 'Nidavellir PM'} · {message.kind}
                       </span>
-                      <span style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+                      <span style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>
                         {new Date(message.created_at).toLocaleTimeString()}
                       </span>
                     </div>
-                    {message.role === 'planner' && streamEvents.length > 0 ? (
-                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
-                        <StreamRenderer events={streamEvents} streaming={streaming} providerId={plannerProvider} />
+                    {renderStreamText ? (
+                      <div style={{ color: 'var(--t0)', fontSize: 14, lineHeight: 1.6, overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%' }}>
+                        <StreamRenderer events={streamEvents} streaming={streaming} providerId={plannerProvider} markdownSize="large" />
                         {plannerHasActivity(streamEvents) && (
                           <AgentActivityTimeline
                             events={streamEvents}
@@ -768,9 +773,18 @@ function PlannerDiscussionPanel({
                         )}
                       </div>
                     ) : (
-                      <div style={{ color: 'var(--t0)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                      <div style={{ color: 'var(--t0)', fontSize: 14, lineHeight: 1.6, overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%' }}>
                         {message.role === 'planner' ? (
-                          <MarkdownRenderer content={formatAssistantAnswer(message.content)} />
+                          <>
+                            <MarkdownRenderer content={formatAssistantAnswer(message.content)} size="large" />
+                            {plannerHasActivity(streamEvents) && (
+                              <AgentActivityTimeline
+                                events={streamEvents}
+                                streaming={streaming}
+                                startedAt={new Date(message.created_at)}
+                              />
+                            )}
+                          </>
                         ) : (
                           <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
                         )}
