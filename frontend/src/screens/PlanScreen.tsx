@@ -186,6 +186,8 @@ interface PlanInboxItem {
   locked_by?: string | null;
   locked_at?: string | null;
   final_spec_id?: string | null;
+  archived?: boolean | number;
+  deleted_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -507,6 +509,7 @@ function PlanInboxPanel({
   onSelect,
   onOpenPm,
   onCreate,
+  onArchive,
   loading,
 }: {
   items: PlanInboxItem[];
@@ -516,6 +519,7 @@ function PlanInboxPanel({
   onSelect: (itemId: string) => void;
   onOpenPm: (itemId: string) => void;
   onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string }) => void;
+  onArchive: (item: PlanInboxItem) => void;
   loading: boolean;
 }) {
   const [rawPlan, setRawPlan] = useState('');
@@ -594,12 +598,20 @@ function PlanInboxPanel({
         {items.length === 0 ? (
           <div style={{ color: 'var(--t1)', fontSize: 12 }}>No intake items yet.</div>
         ) : items.slice(0, 6).map((item) => (
-          <button
+          <div
             key={item.id}
-            type="button"
+            role="button"
+            tabIndex={0}
             onClick={() => {
               onSelect(item.id);
               onOpenPm(item.id);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onSelect(item.id);
+                onOpenPm(item.id);
+              }
             }}
             style={{
               border: `1px solid ${selectedItemId === item.id ? 'var(--blu)' : 'var(--bd)'}`,
@@ -622,10 +634,22 @@ function PlanInboxPanel({
               </div>
               <StatusPill status={item.status} />
             </div>
-            <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+              <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
+              </div>
+              <Btn
+                small
+                title="Archive this plan"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onArchive(item);
+                }}
+              >
+                Archive
+              </Btn>
             </div>
-          </button>
+          </div>
         ))}
       </div>
     </section>
@@ -2213,6 +2237,24 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_create_failed'));
   };
 
+  const archivePlanInboxItem = (item: PlanInboxItem) => {
+    fetch(`${API}/api/orchestration/plan-inbox/${item.id}/archive`, { method: 'POST' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_inbox_archive_${response.status}`);
+        return response.json() as Promise<PlanInboxItem>;
+      })
+      .then((archived) => {
+        setPlanInboxItems((current) => current.filter((existing) => existing.id !== archived.id));
+        if (selectedPlanInboxId === archived.id) {
+          setSelectedPlanInboxId(null);
+          setSelectedPlanInboxItem(null);
+          setPlannerModalOpen(false);
+          setSpecViewerOpen(false);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_archive_failed'));
+  };
+
   const createPlannerDiscussionMessage = (content: string) => {
     if (!selectedPlanInboxId) return;
     const userTempId = `pm-user-${Date.now()}`;
@@ -2838,6 +2880,7 @@ export function PlanScreen() {
               onSelect={loadPlanInboxDetail}
               onOpenPm={openPlannerModal}
               onCreate={createPlanInboxItem}
+              onArchive={archivePlanInboxItem}
               loading={loading}
             />
             <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} onProcess={processTaskInbox} />

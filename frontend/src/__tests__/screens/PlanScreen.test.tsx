@@ -343,6 +343,33 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/archive') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            id: 'plan-1',
+            raw_plan: 'Automate orchestration',
+            repo_path: '/repo',
+            base_branch: 'main',
+            provider: null,
+            model: null,
+            automation_mode: 'supervised',
+            max_concurrency: 1,
+            priority: null,
+            source: 'plan_tab',
+            constraints: [],
+            acceptance_criteria: ['Vague specs are blocked'],
+            status: 'cancelled',
+            locked_by: null,
+            locked_at: null,
+            final_spec_id: null,
+            archived: true,
+            deleted_at: '2026-05-03T00:02:00Z',
+            created_at: '2026-05-03T00:00:00Z',
+            updated_at: '2026-05-03T00:02:00Z',
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST') {
         const body = JSON.parse(String(options.body));
         const encoder = new TextEncoder();
@@ -669,6 +696,24 @@ describe('PlanScreen orchestration board', () => {
       expect(body.provider).toBe('claude');
       expect(body.model).toBe('claude-sonnet-4-6');
       expect(body.acceptanceCriteria).toEqual(['Vague specs are blocked']);
+    });
+  });
+
+  it('archives plans from the visible Plan Inbox', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Automate orchestration' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('PM Planning Session')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Archive' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/archive') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      expect(screen.queryByText('PM Planning Session')).toBeNull();
     });
   });
 
