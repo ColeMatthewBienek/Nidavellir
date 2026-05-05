@@ -762,6 +762,68 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_decompose_approved_plan_creates_task_inbox_candidates(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = tmp_path / "security-workstation"
+    target_repo.mkdir()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build queue-backed orchestration intake.",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "acceptanceCriteria": ["Plan decomposition produces Task Inbox candidates."],
+        })).json()
+        for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for decomposition.",
+            })
+            assert checkpoint.status_code == 200
+        spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+            "content": "\n".join([
+                "# Agentic Forward Spec",
+                "",
+                "## Task Breakdown",
+                "- Add durable Plan Inbox persistence",
+                "- Add Task Inbox EM processing endpoint",
+                "",
+                "## Acceptance Criteria",
+                "- Plan items are decomposed into Task Inbox candidates.",
+                "",
+                "## Verification Strategy",
+                "- `uv run pytest tests/test_orchestration_inbox_api.py`",
+            ]),
+            "status": "ready",
+        })).json()
+
+        decomposed = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/decompose", json={
+            "specId": spec["id"],
+            "maxTasks": 5,
+            "createTaskInboxItems": True,
+        })
+
+        assert decomposed.status_code == 200
+        body = decomposed.json()
+        assert body["plan"]["status"] == "decomposed"
+        assert body["decomposition_run"]["spec_id"] == spec["id"]
+        assert body["decomposition_run"]["decomposer_output"]["source"] == "deterministic_markdown_decomposer"
+        assert [item["title"] for item in body["task_inbox_items"]] == [
+            "Add durable Plan Inbox persistence",
+            "Add Task Inbox EM processing endpoint",
+        ]
+        first = body["task_inbox_items"][0]
+        assert first["plan_inbox_item_id"] == plan["id"]
+        assert first["decomposition_run_id"] == body["decomposition_run"]["id"]
+        assert first["payload"]["base_repo_path"] == str(target_repo)
+        assert first["payload"]["base_branch"] == "main"
+        assert first["payload"]["verification_steps"] == [{
+            "type": "command",
+            "command": "uv run pytest tests/test_orchestration_inbox_api.py",
+        }]
+
+
+@pytest.mark.asyncio
 async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_items(tmp_path: Path):
     setup_app(tmp_path)
     target_repo = tmp_path / "security-workstation"
