@@ -2988,14 +2988,47 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_run_ready_failed'));
   };
 
+  const runExecutionQueue = () => {
+    setLoading(true);
+    fetch(`${API}/api/orchestration/tasks/run-queued`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lockedBy: 'plan-screen-execution-daemon',
+        maxTasks: 3,
+        maxStepsPerTask: 10,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_run_queue_${response.status}`);
+        return response.json() as Promise<{ processed: Array<{ task: OrchestrationTaskDetail }> }>;
+      })
+      .then((result) => {
+        const updatedTasks = result.processed.map((item) => item.task).filter(Boolean);
+        if (updatedTasks.length > 0) {
+          setTasks((current) => [
+            ...updatedTasks,
+            ...current.filter((task) => !updatedTasks.some((updated) => updated.id === task.id)),
+          ]);
+          const selectedUpdate = updatedTasks.find((task) => task.id === selectedTask?.id);
+          if (selectedUpdate) setSelectedTask(selectedUpdate);
+        }
+        loadTasks();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_run_queue_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
+  const queuedCount = tasks.filter((task) => task.status === 'queued_for_execution').length;
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopBar title="Plan" sub={`${tasks.length} tasks · ${readyCount} ready · ${runningCount} running`}>
           <Btn small onClick={reloadAll} disabled={loading}>Reload</Btn>
+          <Btn small onClick={runExecutionQueue} disabled={loading || queuedCount === 0}>Run Queue</Btn>
           {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
         </TopBar>
