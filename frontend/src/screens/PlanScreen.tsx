@@ -344,6 +344,11 @@ interface PlanDecomposeResult {
   task_inbox_items: TaskInboxItem[];
 }
 
+interface PlanBriefTaskResult {
+  plan: PlanInboxDetail;
+  task_inbox_item: TaskInboxItem;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -917,6 +922,7 @@ function PlannerModal({
   onSend,
   onViewSpec,
   onDecompose,
+  onBriefTask,
   onClose,
   loading,
 }: {
@@ -928,10 +934,12 @@ function PlannerModal({
   onSend: (content: string) => void;
   onViewSpec: () => void;
   onDecompose: () => void;
+  onBriefTask: () => void;
   onClose: () => void;
   loading: boolean;
 }) {
   const canDecompose = planReadyForDecomposition(item);
+  const canBriefTask = item?.entry_mode === 'existing_project' && item?.work_lane !== 'project' && Boolean(item?.repo_path);
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="planner-modal-title" style={{
       position: 'fixed',
@@ -958,6 +966,16 @@ function PlannerModal({
               >
                 Send to Decomposer
               </Btn>
+              {item?.entry_mode === 'existing_project' && (
+                <Btn
+                  small
+                  disabled={!canBriefTask || loading}
+                  onClick={onBriefTask}
+                  title={canBriefTask ? 'Create a bounded existing-project Task Inbox brief for EM' : 'Requires an existing-project lane and repo target'}
+                >
+                  Send Brief to EM
+                </Btn>
+              )}
               <Btn small onClick={onClose} title="Close this session. Messages and checkpoint changes are already saved.">Close</Btn>
             </div>
           </div>
@@ -2548,6 +2566,30 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const briefSelectedExistingProjectPlan = () => {
+    if (!selectedPlanInboxItem) return;
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/brief-task`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxVerificationSteps: 5 }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_brief_task_${response.status}`);
+        return response.json() as Promise<PlanBriefTaskResult>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+        setTaskInboxItems((current) => [
+          result.task_inbox_item,
+          ...current.filter((item) => item.id !== result.task_inbox_item.id),
+        ]);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_brief_task_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const moveTask = (task: OrchestrationTaskSummary, status: string) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}`, {
       method: 'PATCH',
@@ -2998,6 +3040,7 @@ export function PlanScreen() {
             onSend={createPlannerDiscussionMessage}
             onViewSpec={() => setSpecViewerOpen(true)}
             onDecompose={decomposeSelectedPlan}
+            onBriefTask={briefSelectedExistingProjectPlan}
             onClose={() => setPlannerModalOpen(false)}
             loading={loading}
           />
