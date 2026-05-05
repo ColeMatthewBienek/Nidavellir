@@ -201,6 +201,24 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
         assert inspected.status_code == 200
         assert inspected.json()["repo_profile"]["git"]["current_branch"] == "main"
 
+        briefed = await c.post(f"/api/orchestration/plan-inbox/{existing_body['id']}/brief-task", json={
+            "maxVerificationSteps": 1,
+        })
+        assert briefed.status_code == 200
+        brief_body = briefed.json()
+        assert brief_body["plan"]["status"] == "decomposed"
+        assert brief_body["task_inbox_item"]["plan_inbox_item_id"] == existing_body["id"]
+        assert brief_body["task_inbox_item"]["decomposition_run_id"] is None
+        assert brief_body["task_inbox_item"]["title"].startswith("Bugfix: Fix a flaky test")
+        assert brief_body["task_inbox_item"]["payload"]["source"] == "existing_project_lane_brief"
+        assert brief_body["task_inbox_item"]["payload"]["work_lane"] == "bugfix"
+        assert brief_body["task_inbox_item"]["payload"]["base_repo_path"] == str(existing_repo)
+        assert brief_body["task_inbox_item"]["payload"]["base_branch"] == "main"
+        assert brief_body["task_inbox_item"]["payload"]["verification_steps"] == [{
+            "type": "command",
+            "command": "npm run test",
+        }]
+
         claimed = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/claim", json={"lockedBy": "daemon-1"})
         assert claimed.status_code == 200
         assert claimed.json()["status"] == "claimed"

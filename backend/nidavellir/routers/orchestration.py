@@ -243,6 +243,11 @@ class PlanInboxDecomposeRequest(BaseModel):
     createTaskInboxItems: bool = True
 
 
+class ExistingProjectBriefRequest(BaseModel):
+    title: str | None = None
+    maxVerificationSteps: int = Field(default=5, ge=0, le=10)
+
+
 class TaskInboxCreateRequest(BaseModel):
     title: str = Field(min_length=1)
     objective: str = ""
@@ -734,6 +739,49 @@ def _decompose_spec_to_candidates(plan: dict, spec: dict, max_tasks: int) -> dic
         "spec_id": spec.get("id"),
         "candidate_count": len(candidates),
         "candidate_tasks": candidates,
+    }
+
+
+def _existing_project_brief_title(plan: dict, override: str | None = None) -> str:
+    if override and override.strip():
+        return override.strip()
+    lane = str(plan.get("work_lane") or "work").replace("_", " ").strip() or "work"
+    objective = re.sub(r"\s+", " ", str(plan.get("raw_plan") or "")).strip()
+    if not objective:
+        return f"{lane.title()} task brief"
+    title = objective[:88].rstrip()
+    if len(objective) > len(title):
+        title = title.rstrip(" .,;:-") + "..."
+    return f"{lane.title()}: {title}"
+
+
+def _existing_project_brief_payload(plan: dict, repo_profile: dict[str, Any], max_verification_steps: int) -> dict[str, Any]:
+    objective = re.sub(r"\s+", " ", str(plan.get("raw_plan") or "")).strip() or "Complete the requested existing-project work."
+    verification_steps = [
+        {"type": "command", "command": str(command)}
+        for command in (repo_profile.get("test_commands") or [])[:max_verification_steps]
+        if str(command).strip()
+    ]
+    if not verification_steps:
+        verification_steps = [{"type": "manual", "command": "Review the implementation against the task brief and repo conventions."}]
+    return {
+        "source": "existing_project_lane_brief",
+        "single_objective": objective,
+        "work_lane": str(plan.get("work_lane") or "feature"),
+        "entry_mode": "existing_project",
+        "affected_areas": [],
+        "acceptance_criteria": [str(item).strip() for item in plan.get("acceptance_criteria") or [] if str(item).strip()],
+        "verification_steps": verification_steps,
+        "repo_profile": repo_profile,
+        "agent_prompt": "\n".join([
+            "Implement this bounded existing-project task from the Nidavellir lane brief.",
+            "",
+            f"Work lane: {plan.get('work_lane') or 'feature'}",
+            f"Task objective: {objective}",
+            "",
+            "Inspect the target repository before editing. Keep changes scoped to the requested work and repo conventions.",
+            "Use the supplied implementation target and verification steps.",
+        ]),
     }
 
 
@@ -2060,6 +2108,51 @@ def inspect_plan_inbox_repo(item_id: str, request: Request) -> dict:
     profile = _inspect_existing_project_repo(item.get("repo_path"), item.get("base_branch"))
     updated = store.update_plan_inbox_item(item_id, {"repo_profile": profile})
     return {"plan": updated, "repo_profile": profile}
+
+
+@router.post("/plan-inbox/{item_id}/brief-task")
+def create_existing_project_brief_task(item_id: str, body: ExistingProjectBriefRequest, request: Request) -> dict:
+    store = _store(request)
+    plan = store.get_plan_inbox_item(item_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    if plan.get("entry_mode") != "existing_project":
+        raise HTTPException(status_code=400, detail="plan_not_existing_project")
+    if str(plan.get("work_lane") or "project") == "project":
+        raise HTTPException(status_code=400, detail="project_lane_requires_spec_first")
+
+    repo_profile = plan.get("repo_profile") if isinstance(plan.get("repo_profile"), dict) else {}
+    if not repo_profile.get("ok"):
+        repo_profile = _inspect_existing_project_repo(plan.get("repo_path"), plan.get("base_branch"))
+        plan = store.update_plan_inbox_item(item_id, {"repo_profile": repo_profile}) or plan
+    if not repo_profile.get("ok"):
+        raise HTTPException(status_code=400, detail={"code": "repo_profile_not_ready", "profile": repo_profile})
+
+    payload = _existing_project_brief_payload(plan, repo_profile, body.maxVerificationSteps)
+    try:
+        task_item = store.create_task_inbox_item(
+            plan_inbox_item_id=item_id,
+            candidate_task_id=f"existing-project-{_decomposer_slug(str(plan.get('raw_plan') or ''), 'task')}",
+            title=_existing_project_brief_title(plan, body.title),
+            objective=payload["single_objective"],
+            payload=_task_payload_with_plan_target(store, payload, item_id),
+            dependencies=[],
+            priority=plan.get("priority"),
+        )
+        updated_plan = store.update_plan_inbox_item(item_id, {"status": "decomposed"}) or plan
+        store.append_event(
+            type="existing_project_brief_sent_to_task_inbox",
+            payload={
+                "plan_inbox_item_id": item_id,
+                "task_inbox_item_id": task_item["id"],
+                "work_lane": plan.get("work_lane"),
+                "repo_path": repo_profile.get("repo_path"),
+            },
+        )
+        return {"plan": updated_plan, "task_inbox_item": task_item}
+    except Exception as err:
+        _handle_store_error(err)
+        raise
 
 
 @router.post("/plan-inbox/{item_id}/claim")
