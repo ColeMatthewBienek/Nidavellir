@@ -154,6 +154,13 @@ def setup_app(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
     setup_app(tmp_path)
+    existing_repo = create_git_repo(tmp_path / "repo")
+    (existing_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest", "typecheck": "tsc --noEmit"}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json"], cwd=existing_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Add package metadata"], cwd=existing_repo, check=True, capture_output=True, text=True)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         created = await c.post("/api/orchestration/plan-inbox", json={
@@ -178,11 +185,21 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
         existing_project = await c.post("/api/orchestration/plan-inbox", json={
             "rawPlan": "Fix a flaky test in an established repo.",
             "entryMode": "existing_project",
-            "repoPath": str(tmp_path / "repo"),
+            "workLane": "bugfix",
+            "repoPath": str(existing_repo),
             "baseBranch": "main",
         })
         assert existing_project.status_code == 200
-        assert existing_project.json()["entry_mode"] == "existing_project"
+        existing_body = existing_project.json()
+        assert existing_body["entry_mode"] == "existing_project"
+        assert existing_body["work_lane"] == "bugfix"
+        assert existing_body["repo_profile"]["ok"] is True
+        assert existing_body["repo_profile"]["package_manager"] == "npm"
+        assert existing_body["repo_profile"]["scripts"]["test"] == "vitest"
+
+        inspected = await c.post(f"/api/orchestration/plan-inbox/{existing_body['id']}/inspect-repo")
+        assert inspected.status_code == 200
+        assert inspected.json()["repo_profile"]["git"]["current_branch"] == "main"
 
         claimed = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/claim", json={"lockedBy": "daemon-1"})
         assert claimed.status_code == 200

@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS orchestration_plan_inbox_items (
   provider TEXT,
   model TEXT,
   entry_mode TEXT NOT NULL DEFAULT 'new_project',
+  work_lane TEXT NOT NULL DEFAULT 'project',
   automation_mode TEXT NOT NULL DEFAULT 'supervised',
   max_concurrency INTEGER NOT NULL DEFAULT 1,
   priority INTEGER,
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS orchestration_plan_inbox_items (
   requested_by TEXT,
   constraints_json TEXT NOT NULL DEFAULT '[]',
   acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+  repo_profile_json TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'new',
   locked_by TEXT,
   locked_at TEXT,
@@ -334,6 +336,10 @@ class OrchestrationStore:
             conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN deleted_at TEXT")
         if "entry_mode" not in plan_inbox_columns:
             conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN entry_mode TEXT NOT NULL DEFAULT 'new_project'")
+        if "work_lane" not in plan_inbox_columns:
+            conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN work_lane TEXT NOT NULL DEFAULT 'project'")
+        if "repo_profile_json" not in plan_inbox_columns:
+            conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN repo_profile_json TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -358,6 +364,7 @@ class OrchestrationStore:
         provider: str | None = None,
         model: str | None = None,
         entry_mode: str = "new_project",
+        work_lane: str = "project",
         automation_mode: str = "supervised",
         max_concurrency: int = 1,
         priority: int | None = None,
@@ -365,6 +372,7 @@ class OrchestrationStore:
         requested_by: str | None = None,
         constraints: list[str] | None = None,
         acceptance_criteria: list[str] | None = None,
+        repo_profile: dict | None = None,
         status: str = "new",
     ) -> dict:
         self._require_status(status, PLAN_INBOX_STATUSES, "plan_inbox_status")
@@ -374,15 +382,17 @@ class OrchestrationStore:
             raise ValueError("max_concurrency_must_be_positive")
         if entry_mode not in {"new_project", "existing_project"}:
             raise ValueError("invalid_plan_inbox_entry_mode")
+        if work_lane not in {"project", "feature", "bugfix", "chore", "docs", "review", "triage", "research"}:
+            raise ValueError("invalid_plan_inbox_work_lane")
         item_id = str(uuid.uuid4())
         now = _now()
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO orchestration_plan_inbox_items
-                   (id, raw_plan, repo_path, base_branch, provider, model, entry_mode, automation_mode,
+                   (id, raw_plan, repo_path, base_branch, provider, model, entry_mode, work_lane, automation_mode,
                     max_concurrency, priority, source, requested_by, constraints_json,
-                    acceptance_criteria_json, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    acceptance_criteria_json, repo_profile_json, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id,
                     raw_plan.strip(),
@@ -391,6 +401,7 @@ class OrchestrationStore:
                     provider,
                     model,
                     entry_mode,
+                    work_lane,
                     automation_mode,
                     max_concurrency,
                     priority,
@@ -398,6 +409,7 @@ class OrchestrationStore:
                     requested_by,
                     _json_dumps(constraints or []),
                     _json_dumps(acceptance_criteria or []),
+                    _json_dumps(repo_profile or {}),
                     status,
                     now,
                     now,
@@ -491,9 +503,9 @@ class OrchestrationStore:
 
     def update_plan_inbox_item(self, item_id: str, updates: dict[str, Any]) -> dict | None:
         allowed = {
-            "raw_plan", "repo_path", "base_branch", "provider", "model", "entry_mode", "automation_mode",
+            "raw_plan", "repo_path", "base_branch", "provider", "model", "entry_mode", "work_lane", "automation_mode",
             "max_concurrency", "priority", "source", "requested_by", "constraints",
-            "acceptance_criteria", "status", "locked_by", "locked_at", "final_spec_id",
+            "acceptance_criteria", "repo_profile", "status", "locked_by", "locked_at", "final_spec_id",
         }
         values = {key: value for key, value in updates.items() if key in allowed}
         if not values:
@@ -504,15 +516,18 @@ class OrchestrationStore:
             raise ValueError("max_concurrency_must_be_positive")
         if "entry_mode" in values and values["entry_mode"] not in {"new_project", "existing_project"}:
             raise ValueError("invalid_plan_inbox_entry_mode")
+        if "work_lane" in values and values["work_lane"] not in {"project", "feature", "bugfix", "chore", "docs", "review", "triage", "research"}:
+            raise ValueError("invalid_plan_inbox_work_lane")
         assignments = []
         params: list[Any] = []
         for key, value in values.items():
             column = {
                 "constraints": "constraints_json",
                 "acceptance_criteria": "acceptance_criteria_json",
+                "repo_profile": "repo_profile_json",
             }.get(key, key)
             assignments.append(f"{column} = ?")
-            params.append(_json_dumps(value or []) if key in {"constraints", "acceptance_criteria"} else value)
+            params.append(_json_dumps(value or ([] if key in {"constraints", "acceptance_criteria"} else {})) if key in {"constraints", "acceptance_criteria", "repo_profile"} else value)
         assignments.append("updated_at = ?")
         params.append(_now())
         params.append(item_id)
@@ -1785,6 +1800,7 @@ class OrchestrationStore:
         item = dict(row)
         item["constraints"] = _json_loads(item.pop("constraints_json"), [])
         item["acceptance_criteria"] = _json_loads(item.pop("acceptance_criteria_json"), [])
+        item["repo_profile"] = _json_loads(item.pop("repo_profile_json"), {})
         item["archived"] = bool(item["archived"])
         return item
 

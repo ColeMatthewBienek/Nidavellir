@@ -291,6 +291,9 @@ describe('PlanScreen orchestration board', () => {
             base_branch: 'main',
             provider: null,
             model: null,
+            entry_mode: 'new_project',
+            work_lane: 'project',
+            repo_profile: {},
             automation_mode: 'supervised',
             max_concurrency: 1,
             priority: null,
@@ -317,6 +320,9 @@ describe('PlanScreen orchestration board', () => {
             base_branch: 'main',
             provider: null,
             model: null,
+            entry_mode: 'new_project',
+            work_lane: 'project',
+            repo_profile: {},
             automation_mode: 'supervised',
             max_concurrency: 1,
             priority: null,
@@ -353,6 +359,9 @@ describe('PlanScreen orchestration board', () => {
             base_branch: 'main',
             provider: null,
             model: null,
+            entry_mode: 'new_project',
+            work_lane: 'project',
+            repo_profile: {},
             automation_mode: 'supervised',
             max_concurrency: 1,
             priority: null,
@@ -410,6 +419,9 @@ describe('PlanScreen orchestration board', () => {
                   base_branch: 'main',
                   provider: null,
                   model: null,
+                  entry_mode: 'new_project',
+                  work_lane: 'project',
+                  repo_profile: {},
                   automation_mode: 'supervised',
                   max_concurrency: 1,
                   priority: null,
@@ -497,6 +509,9 @@ describe('PlanScreen orchestration board', () => {
                 base_branch: 'main',
                 provider: null,
                 model: null,
+                entry_mode: 'new_project',
+                work_lane: 'project',
+                repo_profile: {},
                 automation_mode: 'supervised',
                 max_concurrency: 1,
                 priority: null,
@@ -705,6 +720,7 @@ describe('PlanScreen orchestration board', () => {
 
     fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Fix flaky auth test' } });
     fireEvent.change(screen.getByRole('combobox', { name: 'Plan entry mode' }), { target: { value: 'existing_project' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Existing project lane' }), { target: { value: 'bugfix' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
 
     await waitFor(() => {
@@ -715,6 +731,7 @@ describe('PlanScreen orchestration board', () => {
       const body = JSON.parse(String(calls[0][1]?.body));
       expect(body.rawPlan).toBe('Fix flaky auth test');
       expect(body.entryMode).toBe('existing_project');
+      expect(body.workLane).toBe('bugfix');
     });
   });
 
