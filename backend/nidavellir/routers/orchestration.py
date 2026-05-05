@@ -287,6 +287,7 @@ class TaskInboxProcessRequest(BaseModel):
     lockedBy: str = Field(default="task-inbox-daemon", min_length=1)
     maxItems: int = Field(default=5, ge=1, le=25)
     materialize: bool = True
+    provisionWorktrees: bool = False
 
 
 def _store(request: Request) -> OrchestrationStore:
@@ -1205,6 +1206,87 @@ def _materialize_task_inbox_item(store: Any, item: dict, body: TaskInboxMaterial
         },
     ) or item
     return {"task": task, "task_inbox_item": updated}
+
+
+def _provision_task_execution_worktrees(store: Any, task: dict) -> dict[str, Any]:
+    base_repo_path = str(task.get("base_repo_path") or "").strip()
+    base_branch = str(task.get("base_branch") or "main").strip() or "main"
+    if not base_repo_path:
+        return {"created": [], "skipped": [{"reason": "base_repo_path_missing"}]}
+
+    repo_path = Path(base_repo_path).expanduser()
+    if not repo_path.exists() or not repo_path.is_dir():
+        return {"created": [], "skipped": [{"reason": "base_repo_path_missing", "repo_path": base_repo_path}]}
+
+    try:
+        repo = repo_root(repo_path)
+    except Exception as err:
+        return {"created": [], "skipped": [{"reason": "base_repo_not_git", "repo_path": base_repo_path, "error": str(err)}]}
+
+    current_task = store.get_task(task["id"]) or task
+    existing_node_worktrees = {
+        worktree.get("node_id")
+        for worktree in current_task.get("worktrees", [])
+        if worktree.get("kind") == "execution" and worktree.get("status") != "removed"
+    }
+    agent_steps_by_node = {
+        step["node_id"]: step
+        for step in current_task.get("steps", [])
+        if step.get("type") == "agent" and step.get("status") in {"pending", "running", "waiting_for_user", "failed"}
+    }
+    created: list[dict] = []
+    skipped: list[dict] = []
+    for node in current_task.get("nodes", []):
+        node_id = node["id"]
+        if node_id in existing_node_worktrees:
+            skipped.append({"node_id": node_id, "reason": "worktree_exists"})
+            continue
+        step = agent_steps_by_node.get(node_id)
+        if not step:
+            continue
+        if step.get("config", {}).get("requires_worktree") is False:
+            skipped.append({"node_id": node_id, "reason": "worktree_not_required"})
+            continue
+        branch_name = f"orchestration/{slugify(current_task.get('title') or task['id'])}/{slugify(node.get('title') or node_id)}"
+        worktree_path = default_worktree_path(repo, branch_name)
+        try:
+            result = create_git_worktree(
+                repo_path=repo,
+                worktree_path=worktree_path,
+                branch_name=branch_name,
+                base_ref=base_branch,
+            )
+            created.append(store.create_worktree(
+                task_id=current_task["id"],
+                node_id=node_id,
+                repo_path=result["repo_path"],
+                worktree_path=result["worktree_path"],
+                base_branch=base_branch,
+                branch_name=branch_name,
+                kind="execution",
+                base_commit=result["base_commit"],
+                head_commit=result["head_commit"],
+                status=result["status"],
+                dirty_count=result["dirty_count"],
+                dirty_summary=result["dirty_summary"],
+            ))
+        except Exception as err:
+            skipped.append({
+                "node_id": node_id,
+                "reason": "worktree_create_failed",
+                "branch_name": branch_name,
+                "worktree_path": str(worktree_path),
+                "error": str(err),
+            })
+    store.append_event(
+        task_id=current_task["id"],
+        type="task_execution_worktrees_provisioned",
+        payload={
+            "created_worktree_ids": [item["id"] for item in created],
+            "skipped": skipped,
+        },
+    )
+    return {"created": created, "skipped": skipped}
 
 
 def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
@@ -2308,6 +2390,9 @@ def process_task_inbox(body: TaskInboxProcessRequest, request: Request) -> dict:
             result["materialization"] = materialized
             result["task_inbox_item"] = materialized["task_inbox_item"]
             result["action"] = "materialized"
+            if body.provisionWorktrees:
+                result["worktree_provisioning"] = _provision_task_execution_worktrees(store, materialized["task"])
+                result["materialization"]["task"] = store.get_task(materialized["task"]["id"]) or materialized["task"]
         processed.append(result)
 
     store.append_event(type="task_inbox_process_finished", payload={
@@ -2315,6 +2400,10 @@ def process_task_inbox(body: TaskInboxProcessRequest, request: Request) -> dict:
         "max_items": body.maxItems,
         "processed_count": len(processed),
         "materialized_count": sum(1 for item in processed if item.get("action") == "materialized"),
+        "provisioned_worktree_count": sum(
+            len(item.get("worktree_provisioning", {}).get("created", []))
+            for item in processed
+        ),
     })
     return {"processed": processed}
 
@@ -2452,6 +2541,16 @@ def archive_task(task_id: str, request: Request) -> dict:
     if task is None:
         raise HTTPException(status_code=404, detail="task_not_found")
     return task
+
+
+@router.post("/tasks/{task_id}/provision-worktrees")
+def provision_task_execution_worktrees(task_id: str, request: Request) -> dict:
+    store = _store(request)
+    task = store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    provisioning = _provision_task_execution_worktrees(store, task)
+    return {"task": store.get_task(task_id), "worktree_provisioning": provisioning}
 
 
 @router.post("/tasks/{task_id}/nodes")

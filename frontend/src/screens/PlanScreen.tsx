@@ -2448,7 +2448,7 @@ export function PlanScreen() {
     fetch(`${API}/api/orchestration/task-inbox/process`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lockedBy: 'plan-screen-em', maxItems: 5, materialize: true }),
+      body: JSON.stringify({ lockedBy: 'plan-screen-em', maxItems: 5, materialize: true, provisionWorktrees: true }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`task_inbox_process_${response.status}`);
