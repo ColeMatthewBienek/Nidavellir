@@ -179,12 +179,14 @@ interface PlanInboxItem {
   provider?: string | null;
   model?: string | null;
   entry_mode: string;
+  work_lane: string;
   automation_mode: string;
   max_concurrency: number;
   priority?: number | null;
   source: string;
   constraints: string[];
   acceptance_criteria: string[];
+  repo_profile: Record<string, unknown>;
   status: string;
   locked_by?: string | null;
   locked_at?: string | null;
@@ -545,12 +547,13 @@ function PlanInboxPanel({
   plannerModel: string;
   onSelect: (itemId: string) => void;
   onOpenPm: (itemId: string) => void;
-  onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string }) => void;
+  onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string; workLane: string }) => void;
   onArchive: (item: PlanInboxItem) => void;
   loading: boolean;
 }) {
   const [rawPlan, setRawPlan] = useState('');
   const [entryMode, setEntryMode] = useState('new_project');
+  const [workLane, setWorkLane] = useState('project');
   const [repoPath, setRepoPath] = useState('');
   const [baseBranch, setBaseBranch] = useState('main');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
@@ -587,12 +590,32 @@ function PlanInboxPanel({
           <select
             aria-label="Plan entry mode"
             value={entryMode}
-            onChange={(event) => setEntryMode(event.target.value)}
+            onChange={(event) => {
+              setEntryMode(event.target.value);
+              if (event.target.value === 'new_project') setWorkLane('project');
+              else if (workLane === 'project') setWorkLane('feature');
+            }}
             style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
           >
             <option value="new_project">New project · spec-first</option>
             <option value="existing_project">Existing project · lane-first</option>
           </select>
+          {entryMode === 'existing_project' && (
+            <select
+              aria-label="Existing project lane"
+              value={workLane}
+              onChange={(event) => setWorkLane(event.target.value)}
+              style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
+            >
+              <option value="feature">Feature</option>
+              <option value="bugfix">Bugfix</option>
+              <option value="chore">Chore</option>
+              <option value="docs">Docs</option>
+              <option value="review">Review</option>
+              <option value="triage">Triage</option>
+              <option value="research">Research</option>
+            </select>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 6 }}>
             <input
               aria-label="Plan repo path"
@@ -623,7 +646,7 @@ function PlanInboxPanel({
           primary
           disabled={disabled}
           onClick={() => {
-            onCreate({ rawPlan: rawPlan.trim(), repoPath: repoPath.trim(), baseBranch: baseBranch.trim(), acceptanceCriteria, provider: plannerProvider, model: plannerModel, entryMode });
+            onCreate({ rawPlan: rawPlan.trim(), repoPath: repoPath.trim(), baseBranch: baseBranch.trim(), acceptanceCriteria, provider: plannerProvider, model: plannerModel, entryMode, workLane });
             setRawPlan('');
             setAcceptanceCriteria('');
           }}
@@ -673,7 +696,7 @@ function PlanInboxPanel({
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
               <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {(item.entry_mode || 'new_project').replace(/_/g, ' ')} · {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
+                {(item.entry_mode || 'new_project').replace(/_/g, ' ')} · {item.work_lane || 'project'} · {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
               </div>
               <Btn
                 small
@@ -2254,7 +2277,7 @@ export function PlanScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const createPlanInboxItem = (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string }) => {
+  const createPlanInboxItem = (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string; workLane: string }) => {
     const acceptanceCriteria = values.acceptanceCriteria
       .split('\n')
       .map((line) => line.trim())
@@ -2269,6 +2292,7 @@ export function PlanScreen() {
         provider: values.provider || null,
         model: values.model || null,
         entryMode: values.entryMode,
+        workLane: values.workLane,
         automationMode: 'supervised',
         maxConcurrency: 1,
         acceptanceCriteria,

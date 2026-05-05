@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import tomllib
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -160,6 +161,7 @@ class PlanInboxCreateRequest(BaseModel):
     provider: str | None = None
     model: str | None = None
     entryMode: str = "new_project"
+    workLane: str = "project"
     automationMode: str = "supervised"
     maxConcurrency: int = Field(default=1, ge=1)
     priority: int | None = None
@@ -177,6 +179,7 @@ class PlanInboxUpdateRequest(BaseModel):
     provider: str | None = None
     model: str | None = None
     entryMode: str | None = None
+    workLane: str | None = None
     automationMode: str | None = None
     maxConcurrency: int | None = Field(default=None, ge=1)
     priority: int | None = None
@@ -464,11 +467,13 @@ def _planner_pm_memory_context(plan: dict) -> str:
     return "\n\n".join(part for part in [
         f"Plan inbox item: {plan.get('id')}",
         f"Entry mode: {plan.get('entry_mode') or 'new_project'}",
+        f"Work lane: {plan.get('work_lane') or 'project'}",
         f"Raw intake:\n{plan.get('raw_plan') or ''}",
         f"Repo path: {plan.get('repo_path') or 'not captured'}",
         f"Base branch: {plan.get('base_branch') or 'not captured'}",
         "Acceptance criteria:\n" + "\n".join(f"- {item}" for item in plan.get("acceptance_criteria") or []),
         "Constraints:\n" + "\n".join(f"- {item}" for item in plan.get("constraints") or []),
+        "Repo profile:\n" + json.dumps(plan.get("repo_profile") or {}, indent=2, sort_keys=True),
         "Planning checkpoints:\n" + "\n".join(checkpoints),
         "Recent PM discussion:\n" + "\n".join(discussion),
     ] if part.strip())
@@ -530,6 +535,81 @@ def _planner_repo_target_ready_path(repo_path: str) -> str | None:
     if parent.exists() and parent.is_dir() and parent != Path(target.anchor) and os.access(parent, os.W_OK):
         return str(target)
     return None
+
+
+def _inspect_existing_project_repo(repo_path: str | None, base_branch: str | None = None) -> dict[str, Any]:
+    ready_path = _planner_repo_target_ready_path(str(repo_path or ""))
+    if not ready_path:
+        return {"ok": False, "reason": "repo_target_not_ready", "repo_path": repo_path}
+    root = Path(ready_path).expanduser()
+    profile: dict[str, Any] = {
+        "ok": True,
+        "repo_path": str(root),
+        "base_branch": base_branch or None,
+        "detected_files": [],
+        "package_manager": None,
+        "scripts": {},
+        "test_commands": [],
+        "languages": [],
+    }
+    try:
+        git_root = repo_root(root)
+        profile["git"] = {
+            "root": str(git_root),
+            "current_branch": current_branch(git_root),
+            "status": git_status(git_root),
+        }
+        root = git_root
+        profile["repo_path"] = str(root)
+    except Exception as err:
+        profile["git"] = {"error": str(err)}
+
+    file_names = [
+        "package.json", "pnpm-lock.yaml", "yarn.lock", "package-lock.json",
+        "pyproject.toml", "requirements.txt", "uv.lock", "Cargo.toml", "go.mod",
+    ]
+    profile["detected_files"] = [name for name in file_names if (root / name).exists()]
+    if (root / "pnpm-lock.yaml").exists():
+        profile["package_manager"] = "pnpm"
+    elif (root / "yarn.lock").exists():
+        profile["package_manager"] = "yarn"
+    elif (root / "package-lock.json").exists() or (root / "package.json").exists():
+        profile["package_manager"] = "npm"
+
+    if (root / "package.json").exists():
+        try:
+            package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            scripts = package.get("scripts") if isinstance(package, dict) else {}
+            if isinstance(scripts, dict):
+                profile["scripts"] = {str(key): str(value) for key, value in scripts.items()}
+                runner = profile["package_manager"] or "npm"
+                profile["test_commands"].extend(
+                    f"{runner} run {name}" for name in scripts
+                    if any(token in name.lower() for token in ("test", "check", "lint", "typecheck"))
+                )
+            profile["languages"].append("typescript/javascript")
+        except Exception as err:
+            profile["package_json_error"] = str(err)
+    if (root / "pyproject.toml").exists():
+        try:
+            project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+            profile["pyproject"] = {
+                "project_name": ((project.get("project") or {}).get("name") if isinstance(project, dict) else None),
+                "has_pytest": "pytest" in project.get("tool", {}) if isinstance(project.get("tool"), dict) else False,
+            }
+            profile["test_commands"].append("uv run pytest")
+            profile["languages"].append("python")
+        except Exception as err:
+            profile["pyproject_error"] = str(err)
+    if (root / "Cargo.toml").exists():
+        profile["languages"].append("rust")
+        profile["test_commands"].append("cargo test")
+    if (root / "go.mod").exists():
+        profile["languages"].append("go")
+        profile["test_commands"].append("go test ./...")
+    profile["languages"] = sorted(set(profile["languages"]))
+    profile["test_commands"] = list(dict.fromkeys(profile["test_commands"]))
+    return profile
 
 
 def _markdown_sections(markdown: str) -> dict[str, str]:
@@ -1905,6 +1985,7 @@ def list_plan_inbox_items(request: Request, status: str | None = None, includeAr
 @router.post("/plan-inbox")
 def create_plan_inbox_item(body: PlanInboxCreateRequest, request: Request) -> dict:
     try:
+        repo_profile = _inspect_existing_project_repo(body.repoPath, body.baseBranch) if body.entryMode == "existing_project" else {}
         return _store(request).create_plan_inbox_item(
             raw_plan=body.rawPlan,
             repo_path=body.repoPath,
@@ -1912,6 +1993,7 @@ def create_plan_inbox_item(body: PlanInboxCreateRequest, request: Request) -> di
             provider=body.provider,
             model=body.model,
             entry_mode=body.entryMode,
+            work_lane=body.workLane,
             automation_mode=body.automationMode,
             max_concurrency=body.maxConcurrency,
             priority=body.priority,
@@ -1919,6 +2001,7 @@ def create_plan_inbox_item(body: PlanInboxCreateRequest, request: Request) -> di
             requested_by=body.requestedBy,
             constraints=body.constraints,
             acceptance_criteria=body.acceptanceCriteria,
+            repo_profile=repo_profile,
             status=body.status,
         )
     except Exception as err:
@@ -1945,6 +2028,7 @@ def update_plan_inbox_item(item_id: str, body: PlanInboxUpdateRequest, request: 
         "provider": body.provider,
         "model": body.model,
         "entry_mode": body.entryMode,
+        "work_lane": body.workLane,
         "automation_mode": body.automationMode,
         "max_concurrency": body.maxConcurrency,
         "priority": body.priority,
@@ -1965,6 +2049,17 @@ def update_plan_inbox_item(item_id: str, body: PlanInboxUpdateRequest, request: 
     if item is None:
         raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
     return item
+
+
+@router.post("/plan-inbox/{item_id}/inspect-repo")
+def inspect_plan_inbox_repo(item_id: str, request: Request) -> dict:
+    store = _store(request)
+    item = store.get_plan_inbox_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    profile = _inspect_existing_project_repo(item.get("repo_path"), item.get("base_branch"))
+    updated = store.update_plan_inbox_item(item_id, {"repo_profile": profile})
+    return {"plan": updated, "repo_profile": profile}
 
 
 @router.post("/plan-inbox/{item_id}/claim")
