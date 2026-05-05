@@ -1630,9 +1630,9 @@ def _prepare_orchestration_tool_requests(
 
 
 @router.get("/plan-inbox")
-def list_plan_inbox_items(request: Request, status: str | None = None) -> list[dict]:
+def list_plan_inbox_items(request: Request, status: str | None = None, includeArchived: bool = False) -> list[dict]:
     try:
-        return _store(request).list_plan_inbox_items(status=status)
+        return _store(request).list_plan_inbox_items(status=status, include_archived=includeArchived)
     except Exception as err:
         _handle_store_error(err)
         raise
@@ -1711,6 +1711,30 @@ def claim_plan_inbox_item(item_id: str, body: ClaimRequest, request: Request) ->
     if item is None:
         raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
     return item
+
+
+@router.post("/plan-inbox/{item_id}/archive")
+def archive_plan_inbox_item(item_id: str, request: Request) -> dict:
+    try:
+        item = _store(request).archive_plan_inbox_item(item_id)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if item is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    return item
+
+
+@router.delete("/plan-inbox/{item_id}")
+def delete_plan_inbox_item(item_id: str, request: Request) -> dict:
+    try:
+        deleted = _store(request).delete_plan_inbox_item(item_id)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+    if not deleted:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    return {"id": item_id, "deleted": True}
 
 
 @router.get("/plan-inbox/{item_id}/discussion")

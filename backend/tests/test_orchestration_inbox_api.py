@@ -207,6 +207,27 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
         assert body["discussion_messages"][0]["role"] == "user"
         assert body["discussion_messages"][0]["content"] == "Automate orchestration planning and task execution."
 
+        archived = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/archive")
+        assert archived.status_code == 200
+        assert archived.json()["archived"] is True
+        assert archived.json()["status"] == "cancelled"
+        assert archived.json()["deleted_at"]
+
+        active_list = await c.get("/api/orchestration/plan-inbox")
+        assert active_list.status_code == 200
+        assert all(plan["id"] != item["id"] for plan in active_list.json())
+
+        archived_list = await c.get("/api/orchestration/plan-inbox", params={"includeArchived": True})
+        assert archived_list.status_code == 200
+        assert any(plan["id"] == item["id"] for plan in archived_list.json())
+
+        deleted = await c.delete(f"/api/orchestration/plan-inbox/{item['id']}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"id": item["id"], "deleted": True}
+
+        missing = await c.get(f"/api/orchestration/plan-inbox/{item['id']}")
+        assert missing.status_code == 404
+
 
 @pytest.mark.asyncio
 async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

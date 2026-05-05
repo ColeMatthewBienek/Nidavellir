@@ -142,6 +142,8 @@ CREATE TABLE IF NOT EXISTS orchestration_plan_inbox_items (
   locked_by TEXT,
   locked_at TEXT,
   final_spec_id TEXT,
+  archived INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -324,6 +326,11 @@ class OrchestrationStore:
             conn.execute("ALTER TABLE orchestration_tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
         if "deleted_at" not in task_columns:
             conn.execute("ALTER TABLE orchestration_tasks ADD COLUMN deleted_at TEXT")
+        plan_inbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(orchestration_plan_inbox_items)").fetchall()}
+        if "archived" not in plan_inbox_columns:
+            conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        if "deleted_at" not in plan_inbox_columns:
+            conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN deleted_at TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -418,20 +425,23 @@ class OrchestrationStore:
         self.append_event(type="plan_inbox_item_created", payload={"plan_inbox_item_id": item_id, "status": status})
         return self.get_plan_inbox_item(item_id) or {}
 
-    def list_plan_inbox_items(self, *, status: str | None = None) -> list[dict]:
+    def list_plan_inbox_items(self, *, status: str | None = None, include_archived: bool = False) -> list[dict]:
         with self._conn() as conn:
             if status:
                 self._require_status(status, PLAN_INBOX_STATUSES, "plan_inbox_status")
+                archived_clause = "" if include_archived else "AND archived = 0"
                 rows = conn.execute(
-                    """SELECT * FROM orchestration_plan_inbox_items
-                       WHERE status = ?
-                       ORDER BY COALESCE(priority, 999999) ASC, created_at ASC""",
+                    f"""SELECT * FROM orchestration_plan_inbox_items
+                        WHERE status = ? {archived_clause}
+                        ORDER BY COALESCE(priority, 999999) ASC, created_at ASC""",
                     (status,),
                 ).fetchall()
             else:
+                archived_clause = "" if include_archived else "WHERE archived = 0"
                 rows = conn.execute(
-                    """SELECT * FROM orchestration_plan_inbox_items
-                       ORDER BY updated_at DESC"""
+                    f"""SELECT * FROM orchestration_plan_inbox_items
+                        {archived_clause}
+                        ORDER BY updated_at DESC"""
                 ).fetchall()
         return [self._plan_inbox_row(row) for row in rows]
 
@@ -515,6 +525,36 @@ class OrchestrationStore:
             return self.get_plan_inbox_item(item_id)
         self.append_event(type="plan_inbox_item_claimed", payload={"plan_inbox_item_id": item_id, "locked_by": locked_by})
         return self.get_plan_inbox_item(item_id)
+
+    def archive_plan_inbox_item(self, item_id: str) -> dict | None:
+        if not self.get_plan_inbox_item(item_id):
+            return None
+        now = _now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE orchestration_plan_inbox_items
+                   SET archived = 1,
+                       deleted_at = ?,
+                       status = CASE
+                           WHEN status IN ('decomposed', 'cancelled', 'failed') THEN status
+                           ELSE 'cancelled'
+                       END,
+                       locked_by = NULL,
+                       locked_at = NULL,
+                       updated_at = ?
+                   WHERE id = ?""",
+                (now, now, item_id),
+            )
+        self.append_event(type="plan_inbox_item_archived", payload={"plan_inbox_item_id": item_id, "deleted_at": now})
+        return self.get_plan_inbox_item(item_id)
+
+    def delete_plan_inbox_item(self, item_id: str) -> bool:
+        if not self.get_plan_inbox_item(item_id):
+            return False
+        with self._conn() as conn:
+            conn.execute("DELETE FROM orchestration_plan_inbox_items WHERE id = ?", (item_id,))
+        self.append_event(type="plan_inbox_item_deleted", payload={"plan_inbox_item_id": item_id})
+        return True
 
     def list_planner_discussion_messages(self, plan_inbox_item_id: str) -> list[dict]:
         self._require_plan_inbox_item(plan_inbox_item_id)
@@ -1736,6 +1776,7 @@ class OrchestrationStore:
         item = dict(row)
         item["constraints"] = _json_loads(item.pop("constraints_json"), [])
         item["acceptance_criteria"] = _json_loads(item.pop("acceptance_criteria_json"), [])
+        item["archived"] = bool(item["archived"])
         return item
 
     def _agentic_spec_row(self, row: sqlite3.Row) -> dict:
