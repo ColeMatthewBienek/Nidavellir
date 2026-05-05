@@ -81,6 +81,17 @@ class PlannerPmInvalidSidecarAgent(PlannerPmFakeAgent):
         )
 
 
+class PlannerPmDuplicateResponseAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        response = (
+            "Step 1 — Stack Detection\n"
+            "This is a shell-based project.\n\n"
+            "Step 2 — Requirements Clarification\n"
+            "Lock the next focused planning question."
+        )
+        yield f"{response}\n{response}"
+
+
 def test_planner_pm_relative_repo_name_stays_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     default_repo = tmp_path / "nidavellir"
     default_repo.mkdir()
@@ -571,6 +582,33 @@ async def test_pm_turn_rejects_invalid_sidecar_gate_action(tmp_path: Path, monke
         checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
         assert checkpoints["verification"]["status"] == "missing"
         assert "nidavellir-pm-actions" not in body["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_collapses_duplicate_provider_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr(
+        "nidavellir.routers.orchestration._agent_registry.make_agent",
+        lambda *args, **kwargs: PlannerPmDuplicateResponseAgent(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a shell workstation.",
+            "repoPath": str(tmp_path / "security-workstation"),
+            "baseBranch": "main",
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Continue planning.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        content = turn.json()["messages"][1]["content"]
+        assert content.count("Step 1 — Stack Detection") == 1
+        assert content.count("Step 2 — Requirements Clarification") == 1
 
 
 @pytest.mark.asyncio

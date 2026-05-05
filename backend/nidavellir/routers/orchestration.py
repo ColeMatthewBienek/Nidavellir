@@ -1110,6 +1110,28 @@ def _split_planner_pm_sidecar(content: str) -> tuple[str, dict | None]:
     return visible, parsed if isinstance(parsed, dict) else None
 
 
+def _collapse_repeated_planner_response(content: str) -> str:
+    text = content.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    for size in range(len(lines) // 2, 3, -1):
+        first = "\n".join(lines[:size]).strip()
+        second = "\n".join(lines[size:size * 2]).strip()
+        if first and first == second:
+            return "\n".join([first, *lines[size * 2:]]).strip()
+    paragraphs = re.split(r"\n{2,}", text)
+    for size in range(len(paragraphs) // 2, 0, -1):
+        first = "\n\n".join(part.strip() for part in paragraphs[:size]).strip()
+        second = "\n\n".join(part.strip() for part in paragraphs[size:size * 2]).strip()
+        if first and first == second:
+            return "\n\n".join([first, *[part.strip() for part in paragraphs[size * 2:]]]).strip()
+    midpoint = len(text) // 2
+    if len(text) > 200 and text[:midpoint].strip() == text[midpoint:].strip():
+        return text[:midpoint].strip()
+    return text
+
+
 def _planner_sidecar_plan_updates(sidecar: dict | None) -> dict[str, str]:
     updates: dict[str, str] = {}
     actions = sidecar.get("actions") if isinstance(sidecar, dict) else None
@@ -1341,10 +1363,12 @@ async def _run_planner_pm_agent(
             await emit_visible(pending_visible)
         raw_content = "".join(raw_parts).strip()
         visible_content, sidecar = _split_planner_pm_sidecar(raw_content)
+        visible_content = _collapse_repeated_planner_response(visible_content)
         return {"status": "completed", "content": visible_content, "raw_content": raw_content, "sidecar": sidecar, "error": None}
     except Exception as exc:
         raw_content = "".join(raw_parts).strip()
         visible_content, sidecar = _split_planner_pm_sidecar(raw_content)
+        visible_content = _collapse_repeated_planner_response(visible_content)
         return {"status": "failed", "content": visible_content, "raw_content": raw_content, "sidecar": sidecar, "error": str(exc)}
     finally:
         if agent is not None:
