@@ -688,3 +688,74 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
         })
         assert em_reject.status_code == 200
         assert (await c.get(f"/api/orchestration/task-inbox/{rejected['id']}")).json()["status"] == "needs_more_decomposition"
+
+
+@pytest.mark.asyncio
+async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_items(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = tmp_path / "security-workstation"
+    target_repo.mkdir()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build queue-backed orchestration intake.",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+        })).json()
+
+        atomic = (await c.post("/api/orchestration/task-inbox", json={
+            "planInboxItemId": plan["id"],
+            "title": "Add daemon processing endpoint",
+            "objective": "Process one new Task Inbox item through shape review, EM review, and materialization.",
+            "payload": {
+                "single_objective": "Task Inbox daemon processing endpoint",
+                "affected_areas": ["backend/nidavellir/routers/orchestration.py"],
+                "verification_steps": [{"type": "command", "command": "uv run pytest tests/test_orchestration_inbox_api.py"}],
+            },
+            "dependencies": [],
+            "priority": 1,
+        })).json()
+        broad = (await c.post("/api/orchestration/task-inbox", json={
+            "title": "Refactor orchestration backend",
+            "objective": "Improve everything about orchestration.",
+            "payload": {"affected_areas": ["backend/nidavellir/routers/orchestration.py"]},
+            "priority": 2,
+        })).json()
+        missing_target = (await c.post("/api/orchestration/task-inbox", json={
+            "title": "Add inbox status copy",
+            "objective": "Update Task Inbox card status copy for daemon results.",
+            "payload": {
+                "single_objective": "Task Inbox status copy",
+                "verification_steps": [{"type": "command", "command": "npm test -- src/__tests__/screens/PlanScreen.test.tsx"}],
+            },
+            "priority": 3,
+        })).json()
+
+        processed = await c.post("/api/orchestration/task-inbox/process", json={
+            "lockedBy": "em-daemon-test",
+            "maxItems": 3,
+            "materialize": True,
+        })
+
+        assert processed.status_code == 200
+        body = processed.json()
+        assert len(body["processed"]) == 3
+        by_id = {item["task_inbox_item"]["id"]: item for item in body["processed"]}
+
+        atomic_result = by_id[atomic["id"]]
+        assert atomic_result["action"] == "materialized"
+        assert atomic_result["shape_report"]["verdict"] == "valid"
+        assert atomic_result["em_review"]["verdict"] == "atomic"
+        assert atomic_result["materialization"]["task"]["base_repo_path"] == str(target_repo)
+        assert atomic_result["task_inbox_item"]["status"] == "materialized"
+
+        broad_result = by_id[broad["id"]]
+        assert broad_result["action"] == "needs_more_decomposition"
+        assert broad_result["shape_report"]["verdict"] == "invalid"
+        assert broad_result["task_inbox_item"]["status"] == "needs_more_decomposition"
+
+        missing_target_result = by_id[missing_target["id"]]
+        assert missing_target_result["action"] == "blocked"
+        assert missing_target_result["shape_report"]["verdict"] == "valid"
+        assert missing_target_result["em_review"]["verdict"] == "blocked"
+        assert missing_target_result["em_review"]["report"]["reason"] == "No valid implementation repo target is available."
