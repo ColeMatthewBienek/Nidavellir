@@ -136,6 +136,15 @@ class TaskRunReadyRequest(BaseModel):
     permissionOverride: str | None = None
 
 
+class TaskRunQueuedRequest(BaseModel):
+    lockedBy: str = Field(default="execution-daemon", min_length=1)
+    maxTasks: int = Field(default=3, ge=1, le=10)
+    maxStepsPerTask: int = Field(default=10, ge=1, le=50)
+    includeInChat: bool = False
+    timeoutSeconds: int = Field(default=120, ge=1, le=600)
+    permissionOverride: str | None = None
+
+
 class WorktreeCreateRequest(BaseModel):
     nodeId: str | None = None
     repoPath: str | None = None
@@ -2804,6 +2813,59 @@ def provision_task_execution_worktrees(task_id: str, request: Request) -> dict:
 @router.post("/tasks/{task_id}/queue-execution")
 def queue_task_execution(task_id: str, request: Request) -> dict:
     return _queue_task_for_execution(_store(request), task_id)
+
+
+def _task_status_after_queue_run(task: dict, result: dict) -> str:
+    steps = task.get("steps") if isinstance(task.get("steps"), list) else []
+    statuses = {str(step.get("status")) for step in steps}
+    if "failed" in statuses:
+        return "blocked"
+    if "waiting_for_user" in statuses:
+        return "blocked"
+    if steps and statuses <= {"complete", "skipped"}:
+        return "review"
+    if result.get("executed", 0) > 0:
+        return "running"
+    return "queued_for_execution"
+
+
+@router.post("/tasks/run-queued")
+async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Request) -> dict:
+    store = _store(request)
+    queued_tasks = [task for task in store.list_tasks() if task.get("status") == "queued_for_execution"][:body.maxTasks]
+    processed: list[dict[str, Any]] = []
+    for task in queued_tasks:
+        task = store.update_task(task["id"], {"status": "running"}) or task
+        result = await run_ready_steps(
+            task["id"],
+            TaskRunReadyRequest(
+                conversationId=task.get("conversation_id"),
+                includeInChat=body.includeInChat,
+                timeoutSeconds=body.timeoutSeconds,
+                maxSteps=body.maxStepsPerTask,
+                permissionOverride=body.permissionOverride,
+            ),
+            request,
+        )
+        refreshed = result.get("task") or store.get_task(task["id"]) or task
+        next_status = _task_status_after_queue_run(refreshed, result)
+        refreshed = store.update_task(task["id"], {"status": next_status}) or refreshed
+        processed.append({
+            "task": refreshed,
+            "executed": result.get("executed", 0),
+            "status": next_status,
+            "pending_manual": result.get("pending_manual", []),
+            "results": result.get("results", []),
+        })
+
+    store.append_event(type="execution_queue_run_finished", payload={
+        "locked_by": body.lockedBy,
+        "max_tasks": body.maxTasks,
+        "processed_count": len(processed),
+        "completed_count": sum(1 for item in processed if item.get("status") == "review"),
+        "blocked_count": sum(1 for item in processed if item.get("status") == "blocked"),
+    })
+    return {"processed": processed}
 
 
 @router.post("/tasks/{task_id}/nodes")

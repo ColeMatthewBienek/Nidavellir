@@ -963,3 +963,50 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
         assert missing_target_result["shape_report"]["verdict"] == "valid"
         assert missing_target_result["em_review"]["verdict"] == "blocked"
         assert missing_target_result["em_review"]["report"]["reason"] == "No valid implementation repo target is available."
+
+
+@pytest.mark.asyncio
+async def test_run_queued_execution_tasks_runs_ready_command_steps(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "queued-project")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Queued command task",
+            "description": "Run a deterministic queued command.",
+            "status": "queued_for_execution",
+            "baseRepoPath": str(target_repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={
+            "title": "Verify",
+        })).json()
+        step = (await c.post(f"/api/orchestration/nodes/{node['id']}/steps", json={
+            "title": "Print queue marker",
+            "type": "command",
+            "config": {"command": "printf queue-ok"},
+        })).json()
+        worktree = await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "branchName": "orchestration/queued-command-task/verify",
+        })
+        assert worktree.status_code == 200
+
+        queued = await c.post("/api/orchestration/tasks/run-queued", json={
+            "lockedBy": "execution-daemon-test",
+            "maxTasks": 1,
+            "maxStepsPerTask": 5,
+            "permissionOverride": "allow_once",
+        })
+
+        assert queued.status_code == 200
+        body = queued.json()
+        assert len(body["processed"]) == 1
+        result = body["processed"][0]
+        assert result["executed"] == 1
+        assert result["status"] == "review"
+        assert result["task"]["status"] == "review"
+        assert result["results"][0]["step_id"] == step["id"]
+        assert result["results"][0]["step_type"] == "command"
+        assert result["results"][0]["status"] == "complete"
+        assert result["task"]["steps"][0]["output_summary"] == "queue-ok"
