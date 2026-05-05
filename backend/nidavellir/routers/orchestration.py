@@ -277,6 +277,12 @@ class EmReviewCreateRequest(BaseModel):
     report: dict[str, Any] = Field(default_factory=dict)
 
 
+class TaskInboxProcessRequest(BaseModel):
+    lockedBy: str = Field(default="task-inbox-daemon", min_length=1)
+    maxItems: int = Field(default=5, ge=1, le=25)
+    materialize: bool = True
+
+
 def _store(request: Request) -> OrchestrationStore:
     store = getattr(request.app.state, "orchestration_store", None)
     if store is None:
@@ -862,6 +868,125 @@ def _task_inbox_implementation_target(store: Any, item: dict) -> dict[str, str]:
     if base_branch:
         result["base_branch"] = base_branch
     return result
+
+
+BROAD_TASK_PATTERNS = re.compile(
+    r"\b(?:everything|all\s+of|entire|whole|full\s+stack|refactor|rewrite|overhaul|improve\s+everything)\b",
+    re.IGNORECASE,
+)
+
+
+def _task_inbox_shape_decision(item: dict) -> tuple[str, dict[str, Any]]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    title = str(item.get("title") or "").strip()
+    objective = str(item.get("objective") or "").strip()
+    single_objective = str(payload.get("single_objective") or objective).strip()
+    affected_areas = payload.get("affected_areas") if isinstance(payload.get("affected_areas"), list) else []
+    reasons: list[str] = []
+    required_rewrite: list[str] = []
+    theme_like_indicators: list[str] = []
+    candidate_text = f"{title}\n{objective}\n{single_objective}"
+
+    if not title:
+        reasons.append("Task has no title.")
+    if not objective:
+        reasons.append("Task has no objective.")
+        required_rewrite.append("Add a concrete objective that can be completed by one agent.")
+    if not single_objective:
+        reasons.append("Task has no single objective signal.")
+        required_rewrite.append("Add payload.single_objective or tighten the objective to one execution outcome.")
+    broad_match = BROAD_TASK_PATTERNS.search(candidate_text)
+    if broad_match:
+        theme_like_indicators.append(broad_match.group(0))
+        reasons.append("Task wording is broad enough to describe a theme instead of one execution unit.")
+        required_rewrite.append("Split this into smaller candidate tasks before EM acceptance.")
+    if len(affected_areas) > 6:
+        reasons.append("Task touches too many affected areas for a first-pass atomic worktree unit.")
+        required_rewrite.append("Split by subsystem or verification boundary.")
+
+    verdict = "invalid" if reasons else "valid"
+    return verdict, {
+        "single_objective": single_objective,
+        "affected_areas": affected_areas,
+        "reasons": reasons,
+        "required_rewrite": required_rewrite,
+        "theme_like_indicators": theme_like_indicators,
+        "rubric": {
+            "requires_title": True,
+            "requires_objective": True,
+            "rejects_theme_wording": True,
+            "max_affected_areas": 6,
+        },
+    }
+
+
+def _task_inbox_em_decision(store: Any, item: dict, shape_report: dict) -> tuple[str, dict[str, Any]]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    target = _task_inbox_implementation_target(store, item)
+    verification_steps = payload.get("verification_steps") if isinstance(payload.get("verification_steps"), list) else []
+    dependencies = item.get("dependencies") if isinstance(item.get("dependencies"), list) else []
+    if shape_report.get("verdict") != "valid":
+        return "not_atomic", {
+            "reason": "Shape report is invalid.",
+            "shape_report_id": shape_report.get("id"),
+            "required_split": shape_report.get("report", {}).get("required_rewrite", []),
+        }
+    if not target:
+        return "blocked", {
+            "reason": "No valid implementation repo target is available.",
+            "required_action": "Lock an explicit existing repo path or new-project path whose parent exists.",
+        }
+    if not verification_steps:
+        return "needs_clarification", {
+            "reason": "Verification steps are required before autonomous execution.",
+            "required_action": "Add deterministic verification_steps to the task payload.",
+            "base_repo_path": target.get("base_repo_path"),
+        }
+    return "atomic", {
+        "bounded_worktree_scope": True,
+        "dependency_status": "explicit" if dependencies else "none",
+        "blast_radius": "bounded",
+        "verification_independence": "declared",
+        "base_repo_path": target.get("base_repo_path"),
+        "base_branch": target.get("base_branch"),
+        "verification_steps": verification_steps,
+        "reasons": ["Task has one objective, a valid implementation target, and deterministic verification."],
+    }
+
+
+def _materialize_task_inbox_item(store: Any, item: dict, body: TaskInboxMaterializeRequest) -> dict:
+    if item.get("materialized_task_id"):
+        existing = store.get_task(item["materialized_task_id"])
+        if existing is None:
+            raise HTTPException(status_code=404, detail="materialized_task_not_found")
+        return {"task": existing, "task_inbox_item": item}
+    if item.get("status") != "accepted_atomic":
+        raise HTTPException(status_code=400, detail="task_inbox_item_not_atomic")
+    target = _task_inbox_implementation_target(store, item)
+    base_repo_path = body.baseRepoPath or target.get("base_repo_path")
+    base_branch = body.baseBranch or target.get("base_branch")
+    if not _planner_repo_target_ready_path(base_repo_path or ""):
+        raise HTTPException(status_code=400, detail="implementation_repo_target_required")
+    task = store.create_task(
+        title=item["title"],
+        description=item.get("objective") or "",
+        status=body.status,
+        priority=item.get("priority"),
+        labels=body.labels,
+        conversation_id=body.conversationId,
+        base_repo_path=base_repo_path,
+        base_branch=base_branch,
+        task_branch=body.taskBranch,
+        worktree_path=body.worktreePath,
+    )
+    updated = store.update_task_inbox_item(
+        item["id"],
+        {
+            "status": "materialized",
+            "materialized_task_id": task["id"],
+        },
+    ) or item
+    return {"task": task, "task_inbox_item": updated}
 
 
 def _merge_planner_structured_evidence(base: dict, extra: dict) -> dict:
@@ -1817,42 +1942,67 @@ def materialize_task_inbox_item(item_id: str, body: TaskInboxMaterializeRequest,
     item = store.get_task_inbox_item(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="task_inbox_item_not_found")
-    if item.get("materialized_task_id"):
-        existing = store.get_task(item["materialized_task_id"])
-        if existing is None:
-            raise HTTPException(status_code=404, detail="materialized_task_not_found")
-        return {"task": existing, "task_inbox_item": item}
-    if item.get("status") != "accepted_atomic":
-        raise HTTPException(status_code=400, detail="task_inbox_item_not_atomic")
-    target = _task_inbox_implementation_target(store, item)
-    base_repo_path = body.baseRepoPath or target.get("base_repo_path")
-    base_branch = body.baseBranch or target.get("base_branch")
-    if not _planner_repo_target_ready_path(base_repo_path or ""):
-        raise HTTPException(status_code=400, detail="implementation_repo_target_required")
     try:
-        task = store.create_task(
-            title=item["title"],
-            description=item.get("objective") or "",
-            status=body.status,
-            priority=item.get("priority"),
-            labels=body.labels,
-            conversation_id=body.conversationId,
-            base_repo_path=base_repo_path,
-            base_branch=base_branch,
-            task_branch=body.taskBranch,
-            worktree_path=body.worktreePath,
-        )
-        updated = store.update_task_inbox_item(
-            item_id,
-            {
-                "status": "materialized",
-                "materialized_task_id": task["id"],
-            },
-        ) or item
-        return {"task": task, "task_inbox_item": updated}
+        return _materialize_task_inbox_item(store, item, body)
     except Exception as err:
         _handle_store_error(err)
         raise
+
+
+@router.post("/task-inbox/process")
+def process_task_inbox(body: TaskInboxProcessRequest, request: Request) -> dict:
+    store = _store(request)
+    processed: list[dict[str, Any]] = []
+    for candidate in store.list_task_inbox_items(status="new")[:body.maxItems]:
+        item = store.claim_task_inbox_item(candidate["id"], locked_by=body.lockedBy)
+        if item is None:
+            continue
+        if item.get("status") != "claimed_by_em":
+            processed.append({"task_inbox_item": item, "action": "skipped", "reason": "not_claimable"})
+            continue
+
+        shape_verdict, shape_payload = _task_inbox_shape_decision(item)
+        shape_report = store.create_task_shape_report(
+            task_inbox_item_id=item["id"],
+            verdict=shape_verdict,
+            report=shape_payload,
+        )
+        item = store.get_task_inbox_item(item["id"]) or item
+        if shape_verdict != "valid":
+            processed.append({
+                "task_inbox_item": item,
+                "shape_report": shape_report,
+                "action": "needs_more_decomposition",
+            })
+            continue
+
+        em_verdict, em_payload = _task_inbox_em_decision(store, item, shape_report)
+        em_review = store.create_em_review(
+            task_inbox_item_id=item["id"],
+            verdict=em_verdict,
+            report=em_payload,
+        )
+        item = store.get_task_inbox_item(item["id"]) or item
+        result: dict[str, Any] = {
+            "task_inbox_item": item,
+            "shape_report": shape_report,
+            "em_review": em_review,
+            "action": item.get("status"),
+        }
+        if em_verdict == "atomic" and body.materialize:
+            materialized = _materialize_task_inbox_item(store, item, TaskInboxMaterializeRequest())
+            result["materialization"] = materialized
+            result["task_inbox_item"] = materialized["task_inbox_item"]
+            result["action"] = "materialized"
+        processed.append(result)
+
+    store.append_event(type="task_inbox_process_finished", payload={
+        "locked_by": body.lockedBy,
+        "max_items": body.maxItems,
+        "processed_count": len(processed),
+        "materialized_count": sum(1 for item in processed if item.get("action") == "materialized"),
+    })
+    return {"processed": processed}
 
 
 @router.get("/task-inbox/{item_id}")

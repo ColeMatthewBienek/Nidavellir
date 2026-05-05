@@ -298,6 +298,17 @@ interface TaskInboxItem {
   updated_at: string;
 }
 
+interface TaskInboxProcessResult {
+  processed: Array<{
+    action: string;
+    task_inbox_item: TaskInboxItem;
+    materialization?: {
+      task: OrchestrationTaskDetail;
+      task_inbox_item: TaskInboxItem;
+    };
+  }>;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -903,15 +914,21 @@ ${pending.length ? pending.map((title) => `- ${title}`).join('\n') : '- None'}
 function TaskInboxPanel({
   items,
   onMaterialize,
+  onProcess,
 }: {
   items: TaskInboxItem[];
   onMaterialize: (item: TaskInboxItem) => void;
+  onProcess: () => void;
 }) {
+  const hasNewItems = items.some((item) => item.status === 'new');
   return (
     <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 0, overflow: 'hidden' }}>
       <div style={{ borderBottom: '1px solid var(--bd)', padding: '9px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
         <span style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750 }}>Task Inbox</span>
-        <span style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>{items.length}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Btn small disabled={!hasNewItems} onClick={onProcess}>Process Inbox</Btn>
+          <span style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)' }}>{items.length}</span>
+        </div>
       </div>
       <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 246, overflow: 'auto' }}>
         {items.length === 0 ? (
@@ -2336,6 +2353,44 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'task_inbox_materialize_failed'));
   };
 
+  const processTaskInbox = () => {
+    fetch(`${API}/api/orchestration/task-inbox/process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lockedBy: 'plan-screen-em', maxItems: 5, materialize: true }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`task_inbox_process_${response.status}`);
+        return response.json() as Promise<TaskInboxProcessResult>;
+      })
+      .then((result) => {
+        const updatedItems = result.processed.map((item) => item.task_inbox_item);
+        const materializedTasks = result.processed
+          .map((item) => item.materialization?.task)
+          .filter((item): item is OrchestrationTaskDetail => Boolean(item));
+        setTaskInboxItems((current) => current.map((existing) => (
+          updatedItems.find((item) => item.id === existing.id) ?? existing
+        )));
+        if (materializedTasks.length > 0) {
+          setTasks((current) => [
+            ...materializedTasks,
+            ...current.filter((existing) => !materializedTasks.some((task) => task.id === existing.id)),
+          ]);
+          const selected = materializedTasks[0];
+          setSelectedTask({
+            ...selected,
+            nodes: selected.nodes ?? [],
+            edges: selected.edges ?? [],
+            steps: selected.steps ?? [],
+            worktrees: selected.worktrees ?? [],
+            readiness: selected.readiness ?? { runnable: [], blocked: [] },
+          });
+          setSelectedNodeId(null);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'task_inbox_process_failed'));
+  };
+
   const moveTask = (task: OrchestrationTaskSummary, status: string) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}`, {
       method: 'PATCH',
@@ -2771,7 +2826,7 @@ export function PlanScreen() {
               onCreate={createPlanInboxItem}
               loading={loading}
             />
-            <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} />
+            <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} onProcess={processTaskInbox} />
           </div>
         </div>
 

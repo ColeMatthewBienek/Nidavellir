@@ -45,6 +45,15 @@ const taskInboxItem = {
   updated_at: '2026-05-03T00:00:00Z',
 };
 
+const daemonTaskInboxItem = {
+  ...taskInboxItem,
+  id: 'task-inbox-daemon',
+  title: 'Process daemon inbox item',
+  objective: 'Run deterministic EM processing from the Plan UI.',
+  status: 'new',
+  materialized_task_id: null,
+};
+
 const detail = {
   ...task,
   nodes: [
@@ -217,7 +226,39 @@ describe('PlanScreen orchestration board', () => {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
       if (String(url).endsWith('/api/orchestration/task-inbox') && !options) {
-        return Promise.resolve({ ok: true, json: async () => [taskInboxItem] });
+        return Promise.resolve({ ok: true, json: async () => [taskInboxItem, daemonTaskInboxItem] });
+      }
+      if (String(url).endsWith('/api/orchestration/task-inbox/process') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            processed: [{
+              action: 'materialized',
+              task_inbox_item: {
+                ...daemonTaskInboxItem,
+                status: 'materialized',
+                materialized_task_id: 'task-daemon-materialized',
+                updated_at: '2026-05-03T00:02:00Z',
+              },
+              materialization: {
+                task: {
+                  ...detail,
+                  id: 'task-daemon-materialized',
+                  title: daemonTaskInboxItem.title,
+                  description: daemonTaskInboxItem.objective,
+                  base_repo_path: '/repo',
+                  base_branch: 'main',
+                },
+                task_inbox_item: {
+                  ...daemonTaskInboxItem,
+                  status: 'materialized',
+                  materialized_task_id: 'task-daemon-materialized',
+                  updated_at: '2026-05-03T00:02:00Z',
+                },
+              },
+            }],
+          }),
+        });
       }
       if (String(url).endsWith('/api/orchestration/task-inbox/task-inbox-1/materialize') && options?.method === 'POST') {
         return Promise.resolve({
@@ -708,6 +749,25 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('materialized')).toBeTruthy();
     expect(await screen.findByText('/repo')).toBeTruthy();
     expect(await screen.findByText('No task worktree yet. Node worktrees can still be created directly from the base repo.')).toBeTruthy();
+  });
+
+  it('processes new task inbox items through the EM daemon action', async () => {
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Process daemon inbox item')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Process Inbox' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/task-inbox/process') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.lockedBy).toBe('plan-screen-em');
+      expect(body.materialize).toBe(true);
+    });
+    expect((await screen.findAllByText('Run deterministic EM processing from the Plan UI.')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('/repo')).length).toBeGreaterThan(0);
   });
 
   it('moves tasks and completes manual steps through the orchestration API', async () => {
