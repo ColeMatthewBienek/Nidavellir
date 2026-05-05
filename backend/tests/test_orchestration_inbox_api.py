@@ -171,8 +171,18 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
         assert created.status_code == 200
         item = created.json()
         assert item["status"] == "new"
+        assert item["entry_mode"] == "new_project"
         assert item["constraints"] == ["Do not start execution before readiness."]
         assert item["acceptance_criteria"] == ["Vague specs are blocked."]
+
+        existing_project = await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Fix a flaky test in an established repo.",
+            "entryMode": "existing_project",
+            "repoPath": str(tmp_path / "repo"),
+            "baseBranch": "main",
+        })
+        assert existing_project.status_code == 200
+        assert existing_project.json()["entry_mode"] == "existing_project"
 
         claimed = await c.post(f"/api/orchestration/plan-inbox/{item['id']}/claim", json={"lockedBy": "daemon-1"})
         assert claimed.status_code == 200

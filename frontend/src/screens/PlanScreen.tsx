@@ -178,6 +178,7 @@ interface PlanInboxItem {
   base_branch?: string | null;
   provider?: string | null;
   model?: string | null;
+  entry_mode: string;
   automation_mode: string;
   max_concurrency: number;
   priority?: number | null;
@@ -544,11 +545,12 @@ function PlanInboxPanel({
   plannerModel: string;
   onSelect: (itemId: string) => void;
   onOpenPm: (itemId: string) => void;
-  onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string }) => void;
+  onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string }) => void;
   onArchive: (item: PlanInboxItem) => void;
   loading: boolean;
 }) {
   const [rawPlan, setRawPlan] = useState('');
+  const [entryMode, setEntryMode] = useState('new_project');
   const [repoPath, setRepoPath] = useState('');
   const [baseBranch, setBaseBranch] = useState('main');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
@@ -582,6 +584,15 @@ function PlanInboxPanel({
           style={{ width: '100%', boxSizing: 'border-box', minHeight: 74, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 8, resize: 'vertical', fontSize: 12 }}
         />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <select
+            aria-label="Plan entry mode"
+            value={entryMode}
+            onChange={(event) => setEntryMode(event.target.value)}
+            style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
+          >
+            <option value="new_project">New project · spec-first</option>
+            <option value="existing_project">Existing project · lane-first</option>
+          </select>
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 6 }}>
             <input
               aria-label="Plan repo path"
@@ -612,7 +623,7 @@ function PlanInboxPanel({
           primary
           disabled={disabled}
           onClick={() => {
-            onCreate({ rawPlan: rawPlan.trim(), repoPath: repoPath.trim(), baseBranch: baseBranch.trim(), acceptanceCriteria, provider: plannerProvider, model: plannerModel });
+            onCreate({ rawPlan: rawPlan.trim(), repoPath: repoPath.trim(), baseBranch: baseBranch.trim(), acceptanceCriteria, provider: plannerProvider, model: plannerModel, entryMode });
             setRawPlan('');
             setAcceptanceCriteria('');
           }}
@@ -662,7 +673,7 @@ function PlanInboxPanel({
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
               <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
+                {(item.entry_mode || 'new_project').replace(/_/g, ' ')} · {item.repo_path || 'repo not set'} · {item.base_branch || 'branch not set'}
               </div>
               <Btn
                 small
@@ -2243,7 +2254,7 @@ export function PlanScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const createPlanInboxItem = (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string }) => {
+  const createPlanInboxItem = (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string }) => {
     const acceptanceCriteria = values.acceptanceCriteria
       .split('\n')
       .map((line) => line.trim())
@@ -2257,6 +2268,7 @@ export function PlanScreen() {
         baseBranch: values.baseBranch || null,
         provider: values.provider || null,
         model: values.model || null,
+        entryMode: values.entryMode,
         automationMode: 'supervised',
         maxConcurrency: 1,
         acceptanceCriteria,

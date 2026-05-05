@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS orchestration_plan_inbox_items (
   base_branch TEXT,
   provider TEXT,
   model TEXT,
+  entry_mode TEXT NOT NULL DEFAULT 'new_project',
   automation_mode TEXT NOT NULL DEFAULT 'supervised',
   max_concurrency INTEGER NOT NULL DEFAULT 1,
   priority INTEGER,
@@ -331,6 +332,8 @@ class OrchestrationStore:
             conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
         if "deleted_at" not in plan_inbox_columns:
             conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN deleted_at TEXT")
+        if "entry_mode" not in plan_inbox_columns:
+            conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN entry_mode TEXT NOT NULL DEFAULT 'new_project'")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -354,6 +357,7 @@ class OrchestrationStore:
         base_branch: str | None = None,
         provider: str | None = None,
         model: str | None = None,
+        entry_mode: str = "new_project",
         automation_mode: str = "supervised",
         max_concurrency: int = 1,
         priority: int | None = None,
@@ -368,15 +372,17 @@ class OrchestrationStore:
             raise ValueError("raw_plan_required")
         if max_concurrency < 1:
             raise ValueError("max_concurrency_must_be_positive")
+        if entry_mode not in {"new_project", "existing_project"}:
+            raise ValueError("invalid_plan_inbox_entry_mode")
         item_id = str(uuid.uuid4())
         now = _now()
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO orchestration_plan_inbox_items
-                   (id, raw_plan, repo_path, base_branch, provider, model, automation_mode,
+                   (id, raw_plan, repo_path, base_branch, provider, model, entry_mode, automation_mode,
                     max_concurrency, priority, source, requested_by, constraints_json,
                     acceptance_criteria_json, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id,
                     raw_plan.strip(),
@@ -384,6 +390,7 @@ class OrchestrationStore:
                     base_branch,
                     provider,
                     model,
+                    entry_mode,
                     automation_mode,
                     max_concurrency,
                     priority,
@@ -484,7 +491,7 @@ class OrchestrationStore:
 
     def update_plan_inbox_item(self, item_id: str, updates: dict[str, Any]) -> dict | None:
         allowed = {
-            "raw_plan", "repo_path", "base_branch", "provider", "model", "automation_mode",
+            "raw_plan", "repo_path", "base_branch", "provider", "model", "entry_mode", "automation_mode",
             "max_concurrency", "priority", "source", "requested_by", "constraints",
             "acceptance_criteria", "status", "locked_by", "locked_at", "final_spec_id",
         }
@@ -495,6 +502,8 @@ class OrchestrationStore:
             self._require_status(values["status"], PLAN_INBOX_STATUSES, "plan_inbox_status")
         if "max_concurrency" in values and values["max_concurrency"] < 1:
             raise ValueError("max_concurrency_must_be_positive")
+        if "entry_mode" in values and values["entry_mode"] not in {"new_project", "existing_project"}:
+            raise ValueError("invalid_plan_inbox_entry_mode")
         assignments = []
         params: list[Any] = []
         for key, value in values.items():

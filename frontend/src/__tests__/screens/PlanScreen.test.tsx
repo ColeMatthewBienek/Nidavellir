@@ -695,7 +695,26 @@ describe('PlanScreen orchestration board', () => {
       expect(body.repoPath).toBe('/repo');
       expect(body.provider).toBe('claude');
       expect(body.model).toBe('claude-sonnet-4-6');
+      expect(body.entryMode).toBe('new_project');
       expect(body.acceptanceCriteria).toEqual(['Vague specs are blocked']);
+    });
+  });
+
+  it('submits existing project plans as lane-first intake', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Fix flaky auth test' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Plan entry mode' }), { target: { value: 'existing_project' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.rawPlan).toBe('Fix flaky auth test');
+      expect(body.entryMode).toBe('existing_project');
     });
   });
 
