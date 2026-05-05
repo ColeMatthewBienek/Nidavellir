@@ -232,6 +232,12 @@ class DecompositionRunCreateRequest(BaseModel):
     status: str = "created"
 
 
+class PlanInboxDecomposeRequest(BaseModel):
+    specId: str | None = None
+    maxTasks: int = Field(default=8, ge=1, le=20)
+    createTaskInboxItems: bool = True
+
+
 class TaskInboxCreateRequest(BaseModel):
     title: str = Field(min_length=1)
     objective: str = ""
@@ -518,6 +524,131 @@ def _planner_repo_target_ready_path(repo_path: str) -> str | None:
     if parent.exists() and parent.is_dir() and parent != Path(target.anchor) and os.access(parent, os.W_OK):
         return str(target)
     return None
+
+
+def _markdown_sections(markdown: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {"_root": []}
+    current = "_root"
+    for line in markdown.splitlines():
+        heading = re.match(r"^#{1,4}\s+(.+?)\s*$", line)
+        if heading:
+            current = re.sub(r"\s+", " ", heading.group(1).strip()).lower()
+            sections.setdefault(current, [])
+            continue
+        sections.setdefault(current, []).append(line)
+    return {key: "\n".join(value).strip() for key, value in sections.items()}
+
+
+def _section_text(sections: dict[str, str], names: list[str]) -> str:
+    for name in names:
+        normalized = name.lower()
+        for key, value in sections.items():
+            if normalized == key or normalized in key:
+                return value
+    return ""
+
+
+def _markdown_bullets(text: str) -> list[str]:
+    values: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$", line)
+        if not match:
+            continue
+        value = re.sub(r"\s+", " ", match.group(1)).strip()
+        value = re.sub(r"^\[[ xX]\]\s*", "", value).strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _decomposer_slug(value: str, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:64] or fallback
+
+
+def _spec_ready_for_decomposition(plan: dict, spec: dict | None) -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    if not spec or spec.get("status") != "ready":
+        missing.append("ready spec")
+    if not plan.get("final_spec_id"):
+        missing.append("final spec pointer")
+    for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+        if _checkpoint_status(plan, gate) != "agreed":
+            missing.append(gate)
+    if not _planner_repo_target_ready_path(str(plan.get("repo_path") or "")):
+        missing.append("valid repo target")
+    return not missing, missing
+
+
+def _decompose_spec_to_candidates(plan: dict, spec: dict, max_tasks: int) -> dict[str, Any]:
+    content = str(spec.get("content") or "")
+    sections = _markdown_sections(content)
+    explicit_tasks = _markdown_bullets(_section_text(sections, [
+        "tasks",
+        "task breakdown",
+        "implementation tasks",
+        "decomposition",
+        "work breakdown",
+    ]))
+    scope_items = _markdown_bullets(_section_text(sections, ["scope", "in scope"]))
+    acceptance = _markdown_bullets(_section_text(sections, ["acceptance criteria", "acceptance"]))
+    risks = _markdown_bullets(_section_text(sections, ["risks and dependencies", "dependencies", "risks"]))
+    verification_lines = _markdown_bullets(_section_text(sections, ["verification strategy", "verification", "tests"]))
+    if not acceptance:
+        acceptance = [str(item).strip() for item in plan.get("acceptance_criteria") or [] if str(item).strip()]
+
+    verification_steps: list[dict[str, str]] = []
+    for line in verification_lines:
+        command_match = re.search(r"`([^`]+)`", line)
+        command = (command_match.group(1) if command_match else line).strip()
+        if command and re.search(r"\b(?:pytest|vitest|npm|pnpm|uv|ruff|mypy|tsc|go test|cargo test)\b", command):
+            verification_steps.append({"type": "command", "command": command})
+    if not verification_steps:
+        verification_steps = [{"type": "manual", "command": "Review implementation against the approved spec acceptance criteria."}]
+
+    source_items = explicit_tasks or scope_items or acceptance or [str(plan.get("raw_plan") or "Implement approved spec")]
+    seen: set[str] = set()
+    candidates: list[dict[str, Any]] = []
+    for index, item in enumerate(source_items, start=1):
+        clean = re.sub(r"\s+", " ", item).strip(" -")
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        title = clean if len(clean) <= 96 else clean[:93].rstrip() + "..."
+        candidate_id = f"candidate-{index:02d}-{_decomposer_slug(clean, f'task-{index}')}"
+        candidates.append({
+            "candidate_task_id": candidate_id,
+            "title": title,
+            "objective": clean,
+            "dependencies": [],
+            "payload": {
+                "single_objective": clean,
+                "affected_areas": [],
+                "acceptance_criteria": acceptance,
+                "risks": risks,
+                "verification_steps": verification_steps,
+                "agent_prompt": "\n".join([
+                    "Implement this decomposed task from the approved PM spec.",
+                    "",
+                    f"Spec id: {spec.get('id')}",
+                    f"Task objective: {clean}",
+                    "",
+                    "Use the repo target and verification steps supplied in this Task Inbox payload.",
+                ]),
+            },
+        })
+        if len(candidates) >= max_tasks:
+            break
+
+    return {
+        "source": "deterministic_markdown_decomposer",
+        "spec_id": spec.get("id"),
+        "candidate_count": len(candidates),
+        "candidate_tasks": candidates,
+    }
 
 
 def _extract_repo_target_evidence(text: str) -> dict[str, str] | None:
@@ -2037,6 +2168,54 @@ def create_decomposition_run(item_id: str, body: DecompositionRunCreateRequest, 
             decomposer_output=body.decomposerOutput,
             status=body.status,
         )
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox/{item_id}/decompose")
+def decompose_approved_plan(item_id: str, body: PlanInboxDecomposeRequest, request: Request) -> dict:
+    store = _store(request)
+    plan = store.get_plan_inbox_item(item_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    spec = store.get_agentic_spec(body.specId) if body.specId else _latest_spec(plan)
+    if spec and spec.get("plan_inbox_item_id") != item_id:
+        raise HTTPException(status_code=400, detail="spec_does_not_belong_to_plan")
+    ready, missing = _spec_ready_for_decomposition(plan, spec)
+    if not ready:
+        raise HTTPException(status_code=400, detail={"code": "plan_not_ready_for_decomposition", "missing": missing})
+    try:
+        output = _decompose_spec_to_candidates(plan, spec or {}, body.maxTasks)
+        run = store.create_decomposition_run(
+            plan_inbox_item_id=item_id,
+            spec_id=spec["id"] if spec else None,
+            decomposer_output=output,
+            status="created",
+        )
+        task_items: list[dict] = []
+        if body.createTaskInboxItems:
+            for index, candidate in enumerate(output["candidate_tasks"], start=1):
+                task_items.append(store.create_task_inbox_item(
+                    plan_inbox_item_id=item_id,
+                    decomposition_run_id=run["id"],
+                    candidate_task_id=candidate["candidate_task_id"],
+                    title=candidate["title"],
+                    objective=candidate["objective"],
+                    payload=_task_payload_with_plan_target(store, candidate["payload"], item_id),
+                    dependencies=candidate["dependencies"],
+                    priority=index,
+                ))
+        plan = store.update_plan_inbox_item(item_id, {"status": "decomposed"}) or plan
+        store.append_event(
+            type="plan_decomposed_to_task_inbox",
+            payload={
+                "plan_inbox_item_id": item_id,
+                "decomposition_run_id": run["id"],
+                "task_inbox_item_ids": [item["id"] for item in task_items],
+            },
+        )
+        return {"plan": plan, "decomposition_run": run, "task_inbox_items": task_items}
     except Exception as err:
         _handle_store_error(err)
         raise

@@ -227,6 +227,17 @@ interface AgenticSpec {
   updated_at: string;
 }
 
+interface DecompositionRun {
+  id: string;
+  plan_inbox_item_id: string;
+  spec_id?: string | null;
+  pass_index: number;
+  decomposer_output: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 const CHECKPOINT_REQUIREMENTS: Record<string, string[]> = {
   intake: [
     'Raw goal captured',
@@ -266,6 +277,7 @@ interface PlanInboxDetail extends PlanInboxItem {
   discussion_messages: PlannerDiscussionMessage[];
   planning_checkpoints: PlanningCheckpoint[];
   specs: AgenticSpec[];
+  decomposition_runs?: DecompositionRun[];
 }
 
 function plannerStreamEvents(message: PlannerDiscussionMessage): StreamEvent[] {
@@ -283,6 +295,12 @@ function plannerHasActivity(events: StreamEvent[]): boolean {
 
 function plannerHasText(events: StreamEvent[]): boolean {
   return events.some((event) => (event.type === 'answer_delta' || event.type === 'text') && Boolean(event.content));
+}
+
+function planReadyForDecomposition(item: PlanInboxDetail | null): boolean {
+  if (!item?.final_spec_id) return false;
+  const required = ['repo_target', 'scope', 'acceptance', 'verification', 'risks', 'spec_draft', 'spec_approved'];
+  return required.every((key) => item.planning_checkpoints.some((checkpoint) => checkpoint.key === key && checkpoint.status === 'agreed'));
 }
 
 interface TaskInboxItem {
@@ -313,6 +331,12 @@ interface TaskInboxProcessResult {
       task_inbox_item: TaskInboxItem;
     };
   }>;
+}
+
+interface PlanDecomposeResult {
+  plan: PlanInboxDetail;
+  decomposition_run: DecompositionRun;
+  task_inbox_items: TaskInboxItem[];
 }
 
 function priorityLabel(priority?: number | null) {
@@ -856,6 +880,7 @@ function PlannerModal({
   onPlannerModelChange,
   onSend,
   onViewSpec,
+  onDecompose,
   onClose,
   loading,
 }: {
@@ -866,9 +891,11 @@ function PlannerModal({
   onPlannerModelChange: (values: { provider: string; model: string }) => void;
   onSend: (content: string) => void;
   onViewSpec: () => void;
+  onDecompose: () => void;
   onClose: () => void;
   loading: boolean;
 }) {
+  const canDecompose = planReadyForDecomposition(item);
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="planner-modal-title" style={{
       position: 'fixed',
@@ -887,6 +914,14 @@ function PlannerModal({
             <div id="planner-modal-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800 }}>PM Planning Session</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ color: 'var(--t1)', fontSize: 11 }}>Autosaved</span>
+              <Btn
+                small
+                disabled={!canDecompose || loading}
+                onClick={onDecompose}
+                title={canDecompose ? 'Create decomposer run and Task Inbox candidates' : 'Requires an approved ready spec and all PM gates'}
+              >
+                Send to Decomposer
+              </Btn>
               <Btn small onClick={onClose} title="Close this session. Messages and checkpoint changes are already saved.">Close</Btn>
             </div>
           </div>
@@ -2447,6 +2482,34 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'task_inbox_process_failed'));
   };
 
+  const decomposeSelectedPlan = () => {
+    if (!selectedPlanInboxItem) return;
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/decompose`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        specId: selectedPlanInboxItem.final_spec_id,
+        maxTasks: 8,
+        createTaskInboxItems: true,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_decompose_${response.status}`);
+        return response.json() as Promise<PlanDecomposeResult>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+        setTaskInboxItems((current) => [
+          ...result.task_inbox_items,
+          ...current.filter((item) => !result.task_inbox_items.some((created) => created.id === item.id)),
+        ]);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_decompose_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const moveTask = (task: OrchestrationTaskSummary, status: string) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}`, {
       method: 'PATCH',
@@ -2896,6 +2959,7 @@ export function PlanScreen() {
             onPlannerModelChange={updatePlannerModel}
             onSend={createPlannerDiscussionMessage}
             onViewSpec={() => setSpecViewerOpen(true)}
+            onDecompose={decomposeSelectedPlan}
             onClose={() => setPlannerModalOpen(false)}
             loading={loading}
           />
