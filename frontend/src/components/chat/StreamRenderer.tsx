@@ -8,9 +8,10 @@ interface StreamRendererProps {
   events:     StreamEvent[];
   streaming?: boolean;
   providerId: string;
+  markdownSize?: "normal" | "large";
 }
 
-export function StreamRenderer({ events, streaming = false, providerId: _p }: StreamRendererProps) {
+export function StreamRenderer({ events, streaming = false, providerId: _p, markdownSize = "normal" }: StreamRendererProps) {
   // Accumulate consecutive text events into one markdown render to avoid
   // paragraph-break artifacts at chunk boundaries.
   const rendered: ReactNode[] = [];
@@ -19,7 +20,7 @@ export function StreamRenderer({ events, streaming = false, providerId: _p }: St
 
   const flushText = () => {
     if (!textBuffer) return;
-    rendered.push(<MarkdownRenderer key={`text-${textKey++}`} content={formatAssistantAnswer(textBuffer)} />);
+    rendered.push(<MarkdownRenderer key={`text-${textKey++}`} content={formatAssistantAnswer(textBuffer)} size={markdownSize} />);
     textBuffer = "";
   };
 

@@ -62,10 +62,11 @@ artifact that satisfies it.
 ## Supervision Workflow
 
 1. Intake: identify repo, objective, expected output, risk, affected area, likely verification, and required approval mode.
-2. Plan: request or generate a plan only. The plan must cover objective, assumptions, affected files, steps, tests, risks, rollback, dependencies, and acceptance criteria.
-3. Execute: only after approval and EM acceptance, run coding agents in isolated worktrees unless direct edit mode is explicit.
-4. Validate: verify independently using tests, smoke checks, UI review when applicable, diff review, and acceptance mapping.
-5. Deliver: summarize changes, files, commits, tests, validation, risks, limitations, and merge/preserve options.
+2. Discover: read-only repo inspection is allowed when it helps planning. Summarize stack, repo readiness, constraints, and uncertainty. Do not modify files or run implementation/test loops.
+3. Plan: request or generate a plan only. The plan must cover objective, assumptions, affected files, steps, tests, risks, rollback, dependencies, and acceptance criteria.
+4. Handoff: after approval, pass the approved spec to decomposition/EM. The PM does not implement the task itself.
+5. Validate: after coding agents complete, verify independently using tests, smoke checks, UI review when applicable, diff review, and acceptance mapping.
+6. Deliver: summarize changes, files, commits, tests, validation, risks, limitations, and merge/preserve options.
 
 ## Supervised Agent Protocol
 
@@ -81,7 +82,9 @@ metadata, worktree policy, branch strategy, lifecycle hooks, or validation loops
 
 ## Forbidden
 
-- Do not write code by default.
+- Do not create, edit, delete, or commit project files during PM planning.
+- Do not run implementation or test loops as the PM.
+- Do not claim code, scripts, tests, or docs were built unless a coding agent/runner result exists.
 - Do not start execution before the approved spec and EM gate.
 - Do not use raw intake as decomposer input once a spec exists.
 - Do not bypass permission, approval, or checkpoint gates.

@@ -10,7 +10,7 @@ import { buildCodePreviewUrl, parseCodeRef, type CodeRef } from "@/lib/liveRefs"
 // All structural layout uses inline styles — Tailwind structural classes are broken in this build.
 // Colour-only Tailwind classes (text-*, bg-*, border-*) are kept where convenient.
 
-function CodeBlock({ language, children }: { language: string; children: string }) {
+function CodeBlock({ language, children, fontSize = "0.75rem" }: { language: string; children: string; fontSize?: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
@@ -88,12 +88,12 @@ function CodeBlock({ language, children }: { language: string; children: string 
           margin:       0,
           padding:      "12px 16px",
           background:   "#0d1117",
-          fontSize:     "0.75rem",
+          fontSize,
           lineHeight:   "1.6",
           borderRadius: 0,
         }}
         codeTagProps={{ style: { fontFamily: '"JetBrains Mono", "Fira Code", monospace' } }}
-        wrapLongLines={false}
+        wrapLongLines
       >
         {children}
       </SyntaxHighlighter>
@@ -251,11 +251,15 @@ function CodeRefLink({ refInfo, children }: { refInfo: CodeRef; children: React.
 interface MarkdownRendererProps {
   content:    string;
   className?: string;
+  size?: "normal" | "large";
 }
 
-export function MarkdownRenderer({ content, className }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, className, size = "normal" }: MarkdownRendererProps) {
+  const scale = size === "large"
+    ? { p: 14, li: 14, h1: 17, h2: 15.5, h3: 14.5, codeBlock: "0.8125rem" }
+    : { p: 13, li: 13, h1: 15, h2: 13.5, h3: 13, codeBlock: "0.75rem" };
   return (
-    <div className={["markdown-body", className].filter(Boolean).join(" ")}>
+    <div className={["markdown-body", className].filter(Boolean).join(" ")} style={{ maxWidth: "100%", overflowWrap: "anywhere" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={(url) => url}
@@ -266,7 +270,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
             const raw    = String(children).replace(/\n$/, "");
 
             if (isBlock) {
-              return <CodeBlock language={match![1]}>{raw}</CodeBlock>;
+              return <CodeBlock language={match![1]} fontSize={scale.codeBlock}>{raw}</CodeBlock>;
             }
             const refInfo = parseCodeRef(raw);
             if (refInfo) {
@@ -315,21 +319,21 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
           h1({ children }) {
             return (
-              <h1 style={{ fontSize: 15, fontWeight: 650, color: '#f0f6fc', marginTop: 14, marginBottom: 7, paddingBottom: 0, borderBottom: 'none', lineHeight: 1.35 }}>
+              <h1 style={{ fontSize: scale.h1, fontWeight: 650, color: '#f0f6fc', marginTop: 14, marginBottom: 7, paddingBottom: 0, borderBottom: 'none', lineHeight: 1.35 }}>
                 {children}
               </h1>
             );
           },
           h2({ children }) {
             return (
-              <h2 style={{ fontSize: 13.5, fontWeight: 650, color: '#f0f6fc', marginTop: 12, marginBottom: 5, lineHeight: 1.35 }}>
+              <h2 style={{ fontSize: scale.h2, fontWeight: 650, color: '#f0f6fc', marginTop: 12, marginBottom: 5, lineHeight: 1.35 }}>
                 {children}
               </h2>
             );
           },
           h3({ children }) {
             return (
-              <h3 style={{ fontSize: 13, fontWeight: 650, color: '#f0f6fc', marginTop: 8, marginBottom: 3, lineHeight: 1.35 }}>
+              <h3 style={{ fontSize: scale.h3, fontWeight: 650, color: '#f0f6fc', marginTop: 8, marginBottom: 3, lineHeight: 1.35 }}>
                 {children}
               </h3>
             );
@@ -337,7 +341,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
 
           p({ children }) {
             return (
-              <p style={{ fontSize: 13, color: '#d6dee6', lineHeight: 1.55, margin: '0 0 8px' }}>
+              <p style={{ fontSize: scale.p, color: '#d6dee6', lineHeight: 1.6, margin: '0 0 9px', maxWidth: '100%', overflowWrap: 'anywhere' }}>
                 {children}
               </p>
             );
@@ -364,7 +368,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
                 display: 'flex',
                 alignItems: 'flex-start',
                 gap: 8,
-                fontSize: 13,
+                fontSize: scale.li,
                 color: '#d6dee6',
                 lineHeight: 1.5,
                 listStyle: 'none',
