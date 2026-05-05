@@ -656,6 +656,15 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
         materialized_body = materialized.json()
         assert materialized_body["task"]["base_repo_path"] == str(target_repo)
         assert materialized_body["task"]["base_branch"] == "main"
+        assert [node["title"] for node in materialized_body["task"]["nodes"]] == ["Implementation"]
+        assert [step["type"] for step in materialized_body["task"]["steps"]] == ["agent", "command"]
+        assert materialized_body["task"]["steps"][0]["config"]["requires_worktree"] is True
+        assert materialized_body["task"]["steps"][1]["config"]["command"] == "uv run pytest backend/tests/test_orchestration_inbox_api.py"
+        assert materialized_body["task"]["readiness"]["runnable"] == [{
+            "node_id": materialized_body["task"]["nodes"][0]["id"],
+            "step_id": materialized_body["task"]["steps"][0]["id"],
+            "step_type": "agent",
+        }]
         assert materialized_body["task_inbox_item"]["status"] == "materialized"
         assert materialized_body["task_inbox_item"]["materialized_task_id"] == materialized_body["task"]["id"]
 
@@ -747,6 +756,9 @@ async def test_task_inbox_process_claims_em_reviews_and_materializes_atomic_item
         assert atomic_result["shape_report"]["verdict"] == "valid"
         assert atomic_result["em_review"]["verdict"] == "atomic"
         assert atomic_result["materialization"]["task"]["base_repo_path"] == str(target_repo)
+        assert [node["title"] for node in atomic_result["materialization"]["task"]["nodes"]] == ["Implementation"]
+        assert [step["type"] for step in atomic_result["materialization"]["task"]["steps"]] == ["agent", "command"]
+        assert atomic_result["materialization"]["task"]["readiness"]["runnable"][0]["step_type"] == "agent"
         assert atomic_result["task_inbox_item"]["status"] == "materialized"
 
         broad_result = by_id[broad["id"]]

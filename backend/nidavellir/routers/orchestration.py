@@ -954,6 +954,89 @@ def _task_inbox_em_decision(store: Any, item: dict, shape_report: dict) -> tuple
     }
 
 
+def _verification_step_command(step: Any) -> str:
+    if isinstance(step, str):
+        return step.strip()
+    if isinstance(step, dict):
+        return str(step.get("command") or step.get("cmd") or "").strip()
+    return ""
+
+
+def _seed_materialized_task_execution(store: Any, task: dict, item: dict) -> dict:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    provider = str(payload.get("provider") or "").strip() or None
+    model = str(payload.get("model") or "").strip() or None
+    prompt = str(payload.get("agent_prompt") or payload.get("prompt") or payload.get("single_objective") or item.get("objective") or "").strip()
+    acceptance = payload.get("acceptance_criteria") if isinstance(payload.get("acceptance_criteria"), list) else []
+    affected_areas = payload.get("affected_areas") if isinstance(payload.get("affected_areas"), list) else []
+    verification_steps = payload.get("verification_steps") if isinstance(payload.get("verification_steps"), list) else []
+    prompt_parts = [
+        f"Task: {item['title']}",
+        "",
+        str(item.get("objective") or "").strip(),
+    ]
+    if affected_areas:
+        prompt_parts.extend(["", "Affected areas:", *[f"- {area}" for area in affected_areas]])
+    if acceptance:
+        prompt_parts.extend(["", "Acceptance criteria:", *[f"- {criterion}" for criterion in acceptance]])
+    if prompt:
+        prompt_parts.extend(["", "Implementation direction:", prompt])
+
+    node = store.create_node(
+        task_id=task["id"],
+        title="Implementation",
+        description=item.get("objective") or "",
+        status="not_started",
+        provider=provider,
+        model=model,
+        position_x=48,
+        position_y=48,
+    )
+    steps = [
+        store.create_step(
+            node_id=node["id"],
+            type="agent",
+            title=f"Implement {item['title']}",
+            description=item.get("objective") or "",
+            status="pending",
+            config={
+                "prompt": "\n".join(part for part in prompt_parts if part is not None).strip(),
+                "task_inbox_item_id": item["id"],
+                "requires_worktree": True,
+            },
+        )
+    ]
+    for index, verification in enumerate(verification_steps, start=1):
+        command = _verification_step_command(verification)
+        if not command:
+            continue
+        title = verification.get("title") if isinstance(verification, dict) else None
+        steps.append(store.create_step(
+            node_id=node["id"],
+            type="command",
+            title=str(title or f"Verify {index}"),
+            description="Deterministic verification from Task Inbox payload.",
+            status="pending",
+            config={
+                "command": command,
+                "task_inbox_item_id": item["id"],
+                "source": "task_inbox_verification",
+            },
+        ))
+    task = store.get_task(task["id"]) or task
+    store.append_event(
+        task_id=task["id"],
+        node_id=node["id"],
+        type="task_execution_seeded",
+        payload={
+            "task_inbox_item_id": item["id"],
+            "node_id": node["id"],
+            "step_ids": [step["id"] for step in steps],
+        },
+    )
+    return task
+
+
 def _materialize_task_inbox_item(store: Any, item: dict, body: TaskInboxMaterializeRequest) -> dict:
     if item.get("materialized_task_id"):
         existing = store.get_task(item["materialized_task_id"])
@@ -979,6 +1062,7 @@ def _materialize_task_inbox_item(store: Any, item: dict, body: TaskInboxMaterial
         task_branch=body.taskBranch,
         worktree_path=body.worktreePath,
     )
+    task = _seed_materialized_task_execution(store, task, item)
     updated = store.update_task_inbox_item(
         item["id"],
         {
