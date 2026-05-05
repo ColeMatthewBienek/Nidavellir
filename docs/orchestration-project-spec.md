@@ -21,6 +21,36 @@ The orchestration layer should make these questions answerable inside Nidavellir
 - What changed?
 - What evidence exists for review?
 
+## 1.1 Intake Modes
+
+Nidavellir should support two first-class intake modes rather than forcing every job through the same ceremony.
+
+### New Project Mode
+
+New Project Mode is spec-first. Use it when the repo, architecture, project structure, or product direction is not already established.
+
+Required path:
+
+1. User and PM refine rough intent into an approved agentic-forward spec.
+2. Repo target or new-project setup path is locked.
+3. Decomposer turns the approved spec into candidate tasks.
+4. EM accepts only atomic worktree-sized tasks.
+5. Agents execute in isolated worktrees with checkpoint proof.
+
+### Existing Project Mode
+
+Existing Project Mode is lane-first. Use it when an established repo already supplies architecture, conventions, tests, scripts, and product gravity.
+
+Required path:
+
+1. User selects an existing repo.
+2. Nidavellir inspects repo shape, scripts, tests, branch state, and recent status.
+3. User chooses a lane such as feature, bugfix, chore, docs, review, triage, or research.
+4. PM produces a bounded task brief rather than a full project spec.
+5. EM still validates atomicity before worktree execution.
+
+Both modes feed the same Task Inbox, EM, worktree, execution, checkpoint, and review systems. Risky or externally visible actions still require Greenlight approval.
+
 ## 2. Design Sources
 
 This spec combines two architectural influences:

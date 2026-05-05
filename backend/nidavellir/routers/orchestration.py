@@ -159,6 +159,7 @@ class PlanInboxCreateRequest(BaseModel):
     baseBranch: str | None = None
     provider: str | None = None
     model: str | None = None
+    entryMode: str = "new_project"
     automationMode: str = "supervised"
     maxConcurrency: int = Field(default=1, ge=1)
     priority: int | None = None
@@ -175,6 +176,7 @@ class PlanInboxUpdateRequest(BaseModel):
     baseBranch: str | None = None
     provider: str | None = None
     model: str | None = None
+    entryMode: str | None = None
     automationMode: str | None = None
     maxConcurrency: int | None = Field(default=None, ge=1)
     priority: int | None = None
@@ -461,6 +463,7 @@ def _planner_pm_memory_context(plan: dict) -> str:
         checkpoints.append(f"- {checkpoint.get('key')}: {checkpoint.get('status')} - {summary}".rstrip(" -"))
     return "\n\n".join(part for part in [
         f"Plan inbox item: {plan.get('id')}",
+        f"Entry mode: {plan.get('entry_mode') or 'new_project'}",
         f"Raw intake:\n{plan.get('raw_plan') or ''}",
         f"Repo path: {plan.get('repo_path') or 'not captured'}",
         f"Base branch: {plan.get('base_branch') or 'not captured'}",
@@ -475,6 +478,7 @@ def _planner_pm_current_content(user_content: str) -> str:
     return "\n\n".join([
         "Use the Planner PM skill for this focused planning turn.",
         "The goal is an agentic-forward spec that can safely move to decomposition.",
+        "Nidavellir has two intake modes. new_project is spec-first and requires full PM gates before decomposition. existing_project is lane-first and should produce a bounded task brief against the selected repo before EM/worktree execution.",
         "Act as Nidavellir PM: co-create, critique, capture evidence, and block decomposition until required gates are satisfied.",
         "Read-only repo discovery is allowed when needed for planning, but do not create, edit, delete, or commit files.",
         "Do not run implementation or test loops as the PM. Do not write code. Do not claim files, tests, docs, or scripts were built.",
@@ -1907,6 +1911,7 @@ def create_plan_inbox_item(body: PlanInboxCreateRequest, request: Request) -> di
             base_branch=body.baseBranch,
             provider=body.provider,
             model=body.model,
+            entry_mode=body.entryMode,
             automation_mode=body.automationMode,
             max_concurrency=body.maxConcurrency,
             priority=body.priority,
@@ -1939,6 +1944,7 @@ def update_plan_inbox_item(item_id: str, body: PlanInboxUpdateRequest, request: 
         "base_branch": body.baseBranch,
         "provider": body.provider,
         "model": body.model,
+        "entry_mode": body.entryMode,
         "automation_mode": body.automationMode,
         "max_concurrency": body.maxConcurrency,
         "priority": body.priority,
