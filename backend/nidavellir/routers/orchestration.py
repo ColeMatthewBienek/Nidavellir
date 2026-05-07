@@ -262,6 +262,7 @@ class PlanInboxDecomposeRequest(BaseModel):
 class ExistingProjectBriefRequest(BaseModel):
     title: str | None = None
     maxVerificationSteps: int = Field(default=5, ge=0, le=10)
+    skipAgentStep: bool = False
 
 
 class TaskInboxCreateRequest(BaseModel):
@@ -814,7 +815,7 @@ def _existing_project_brief_title(plan: dict, override: str | None = None) -> st
     return f"{lane.title()}: {title}"
 
 
-def _existing_project_brief_payload(plan: dict, repo_profile: dict[str, Any], max_verification_steps: int) -> dict[str, Any]:
+def _existing_project_brief_payload(plan: dict, repo_profile: dict[str, Any], max_verification_steps: int, skip_agent_step: bool = False) -> dict[str, Any]:
     objective = re.sub(r"\s+", " ", str(plan.get("raw_plan") or "")).strip() or "Complete the requested existing-project work."
     verification_steps = [
         {"type": "command", "command": str(command)}
@@ -833,6 +834,7 @@ def _existing_project_brief_payload(plan: dict, repo_profile: dict[str, Any], ma
         "affected_areas": [],
         "acceptance_criteria": [str(item).strip() for item in plan.get("acceptance_criteria") or [] if str(item).strip()],
         "verification_steps": verification_steps,
+        "skip_agent_step": skip_agent_step,
         "repo_profile": repo_profile,
         "agent_prompt": "\n".join([
             "Implement this bounded existing-project task from the Nidavellir lane brief.",
@@ -2197,7 +2199,7 @@ def create_existing_project_brief_task(item_id: str, body: ExistingProjectBriefR
     if not repo_profile.get("ok"):
         raise HTTPException(status_code=400, detail={"code": "repo_profile_not_ready", "profile": repo_profile})
 
-    payload = _existing_project_brief_payload(plan, repo_profile, body.maxVerificationSteps)
+    payload = _existing_project_brief_payload(plan, repo_profile, body.maxVerificationSteps, body.skipAgentStep)
     try:
         task_item = store.create_task_inbox_item(
             plan_inbox_item_id=item_id,
