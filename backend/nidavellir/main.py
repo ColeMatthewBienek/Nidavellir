@@ -1,5 +1,7 @@
 import os
+import asyncio
 from contextlib import asynccontextmanager
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -53,7 +55,15 @@ async def lifespan(app: FastAPI):
     app.state.command_store = CommandRunStore(str(_COMMAND_DB))
     app.state.command_runner = CommandRunner()
     app.state.orchestration_store = OrchestrationStore(str(_ORCHESTRATION_DB))
+    app.state.orchestration_daemon_stop = asyncio.Event()
+    app.state.orchestration_daemon_task = asyncio.create_task(
+        orchestration_router.run_orchestration_daemon_loop(app, app.state.orchestration_daemon_stop)
+    )
     yield
+    app.state.orchestration_daemon_stop.set()
+    app.state.orchestration_daemon_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await app.state.orchestration_daemon_task
     # No explicit close needed — connections are per-operation
 
 
