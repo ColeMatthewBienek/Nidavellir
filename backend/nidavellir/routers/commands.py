@@ -36,6 +36,12 @@ def _preset_exists(cwd: Path, marker: str) -> bool:
 
 def _default_presets(cwd: Path) -> list[dict]:
     presets: list[dict] = []
+    if _preset_exists(cwd, "scripts/orchestration-small-project-smoke.sh"):
+        presets.append({
+            "id": "orchestration-smoke",
+            "label": "Orchestration smoke",
+            "command": "npm run smoke:orchestration",
+        })
     if _preset_exists(cwd, "frontend/package.json"):
         presets.extend([
             {"id": "frontend-typecheck", "label": "FE typecheck", "command": "cd frontend && npm run typecheck"},
