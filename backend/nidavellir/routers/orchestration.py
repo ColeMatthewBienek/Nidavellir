@@ -310,6 +310,17 @@ class TaskInboxProcessRequest(BaseModel):
     queueExecution: bool = False
 
 
+class OrchestrationDaemonTickRequest(BaseModel):
+    lockedBy: str = Field(default="orchestration-daemon", min_length=1)
+    autonomyMode: str = "supervised"
+    processInbox: bool = True
+    runQueue: bool = True
+    maxInboxItems: int = Field(default=5, ge=0, le=25)
+    maxQueuedTasks: int = Field(default=3, ge=0, le=10)
+    maxStepsPerTask: int = Field(default=10, ge=1, le=50)
+    permissionOverride: str | None = None
+
+
 def _store(request: Request) -> OrchestrationStore:
     store = getattr(request.app.state, "orchestration_store", None)
     if store is None:
@@ -1247,6 +1258,7 @@ def _seed_materialized_task_execution(store: Any, task: dict, item: dict) -> dic
     acceptance = payload.get("acceptance_criteria") if isinstance(payload.get("acceptance_criteria"), list) else []
     affected_areas = payload.get("affected_areas") if isinstance(payload.get("affected_areas"), list) else []
     verification_steps = payload.get("verification_steps") if isinstance(payload.get("verification_steps"), list) else []
+    skip_agent_step = payload.get("skip_agent_step") is True
     prompt_parts = [
         f"Task: {item['title']}",
         "",
@@ -1269,8 +1281,9 @@ def _seed_materialized_task_execution(store: Any, task: dict, item: dict) -> dic
         position_x=48,
         position_y=48,
     )
-    steps = [
-        store.create_step(
+    steps = []
+    if not skip_agent_step:
+        steps.append(store.create_step(
             node_id=node["id"],
             type="agent",
             title=f"Implement {item['title']}",
@@ -1281,8 +1294,7 @@ def _seed_materialized_task_execution(store: Any, task: dict, item: dict) -> dic
                 "task_inbox_item_id": item["id"],
                 "requires_worktree": True,
             },
-        )
-    ]
+        ))
     for index, verification in enumerate(verification_steps, start=1):
         command = _verification_step_command(verification)
         if not command:
@@ -1371,10 +1383,10 @@ def _provision_task_execution_worktrees(store: Any, task: dict) -> dict[str, Any
         for worktree in current_task.get("worktrees", [])
         if worktree.get("kind") == "execution" and worktree.get("status") != "removed"
     }
-    agent_steps_by_node = {
+    execution_steps_by_node = {
         step["node_id"]: step
         for step in current_task.get("steps", [])
-        if step.get("type") == "agent" and step.get("status") in {"pending", "running", "waiting_for_user", "failed"}
+        if step.get("type") in {"agent", "command"} and step.get("status") in {"pending", "running", "waiting_for_user", "failed"}
     }
     created: list[dict] = []
     skipped: list[dict] = []
@@ -1383,7 +1395,7 @@ def _provision_task_execution_worktrees(store: Any, task: dict) -> dict[str, Any
         if node_id in existing_node_worktrees:
             skipped.append({"node_id": node_id, "reason": "worktree_exists"})
             continue
-        step = agent_steps_by_node.get(node_id)
+        step = execution_steps_by_node.get(node_id)
         if not step:
             continue
         if step.get("config", {}).get("requires_worktree") is False:
@@ -1433,17 +1445,17 @@ def _provision_task_execution_worktrees(store: Any, task: dict) -> dict[str, Any
 
 def _task_ready_for_execution_queue(task: dict) -> tuple[bool, list[str]]:
     missing: list[str] = []
-    agent_node_ids = {
+    execution_node_ids = {
         step["node_id"]
         for step in task.get("steps", [])
-        if step.get("type") == "agent" and step.get("config", {}).get("requires_worktree") is not False
+        if step.get("type") in {"agent", "command"} and step.get("config", {}).get("requires_worktree") is not False
     }
     active_worktree_node_ids = {
         worktree.get("node_id")
         for worktree in task.get("worktrees", [])
         if worktree.get("kind") == "execution" and worktree.get("status") not in {"removed", "missing", "error"}
     }
-    for node_id in sorted(agent_node_ids - active_worktree_node_ids):
+    for node_id in sorted(execution_node_ids - active_worktree_node_ids):
         missing.append(f"execution worktree for node {node_id}")
     if not task.get("readiness", {}).get("runnable"):
         missing.append("runnable step")
@@ -2835,28 +2847,45 @@ async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Reques
     queued_tasks = [task for task in store.list_tasks() if task.get("status") == "queued_for_execution"][:body.maxTasks]
     processed: list[dict[str, Any]] = []
     for task in queued_tasks:
-        task = store.update_task(task["id"], {"status": "running"}) or task
-        result = await run_ready_steps(
-            task["id"],
-            TaskRunReadyRequest(
-                conversationId=task.get("conversation_id"),
-                includeInChat=body.includeInChat,
-                timeoutSeconds=body.timeoutSeconds,
-                maxSteps=body.maxStepsPerTask,
-                permissionOverride=body.permissionOverride,
-            ),
-            request,
-        )
-        refreshed = result.get("task") or store.get_task(task["id"]) or task
-        next_status = _task_status_after_queue_run(refreshed, result)
-        refreshed = store.update_task(task["id"], {"status": next_status}) or refreshed
-        processed.append({
-            "task": refreshed,
-            "executed": result.get("executed", 0),
-            "status": next_status,
-            "pending_manual": result.get("pending_manual", []),
-            "results": result.get("results", []),
-        })
+        try:
+            task = store.update_task(task["id"], {"status": "running"}) or task
+            result = await run_ready_steps(
+                task["id"],
+                TaskRunReadyRequest(
+                    conversationId=task.get("conversation_id"),
+                    includeInChat=body.includeInChat,
+                    timeoutSeconds=body.timeoutSeconds,
+                    maxSteps=body.maxStepsPerTask,
+                    permissionOverride=body.permissionOverride,
+                ),
+                request,
+            )
+            refreshed = result.get("task") or store.get_task(task["id"]) or task
+            next_status = _task_status_after_queue_run(refreshed, result)
+            refreshed = store.update_task(task["id"], {"status": next_status}) or refreshed
+            processed.append({
+                "task": refreshed,
+                "executed": result.get("executed", 0),
+                "status": next_status,
+                "pending_manual": result.get("pending_manual", []),
+                "results": result.get("results", []),
+            })
+        except Exception as err:
+            error = str(getattr(err, "detail", None) or err)
+            blocked = store.update_task(task["id"], {"status": "blocked"}) or task
+            store.append_event(
+                task_id=task["id"],
+                type="execution_queue_task_failed",
+                payload={"error": error, "locked_by": body.lockedBy},
+            )
+            processed.append({
+                "task": blocked,
+                "executed": 0,
+                "status": "blocked",
+                "error": error,
+                "pending_manual": [],
+                "results": [],
+            })
 
     store.append_event(type="execution_queue_run_finished", payload={
         "locked_by": body.lockedBy,
@@ -2866,6 +2895,47 @@ async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Reques
         "blocked_count": sum(1 for item in processed if item.get("status") == "blocked"),
     })
     return {"processed": processed}
+
+
+@router.post("/daemon/tick")
+async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, request: Request) -> dict:
+    inbox_result = {"processed": []}
+    queue_result = {"processed": []}
+    if body.processInbox and body.maxInboxItems > 0:
+        inbox_result = process_task_inbox(
+            TaskInboxProcessRequest(
+                lockedBy=body.lockedBy,
+                maxItems=body.maxInboxItems,
+                materialize=True,
+                provisionWorktrees=True,
+                queueExecution=True,
+            ),
+            request,
+        )
+    if body.runQueue and body.maxQueuedTasks > 0:
+        queue_result = await run_queued_execution_tasks(
+            TaskRunQueuedRequest(
+                lockedBy=body.lockedBy,
+                maxTasks=body.maxQueuedTasks,
+                maxStepsPerTask=body.maxStepsPerTask,
+                permissionOverride=body.permissionOverride,
+            ),
+            request,
+        )
+    event = _store(request).append_event(type="orchestration_daemon_tick_finished", payload={
+        "locked_by": body.lockedBy,
+        "autonomy_mode": body.autonomyMode,
+        "inbox_processed_count": len(inbox_result.get("processed", [])),
+        "queue_processed_count": len(queue_result.get("processed", [])),
+        "process_inbox": body.processInbox,
+        "run_queue": body.runQueue,
+    })
+    return {
+        "mode": body.autonomyMode,
+        "event": event,
+        "task_inbox": inbox_result,
+        "execution_queue": queue_result,
+    }
 
 
 @router.post("/tasks/{task_id}/nodes")
@@ -3838,3 +3908,8 @@ def delete_worktree(worktree_id: str, request: Request, removeGitWorktree: bool 
 @router.get("/tasks/{task_id}/events")
 def list_task_events(task_id: str, request: Request, limit: int = 100) -> list[dict]:
     return _store(request).list_events(task_id=task_id, limit=limit)
+
+
+@router.get("/events")
+def list_orchestration_events(request: Request, limit: int = 100) -> list[dict]:
+    return _store(request).list_events(limit=limit)
