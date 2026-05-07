@@ -171,6 +171,24 @@ interface OrchestrationEvent {
   created_at: string;
 }
 
+interface OrchestrationDaemonState {
+  id: string;
+  status: string;
+  autonomy_mode: 'supervised' | 'autonomous';
+  interval_seconds: number;
+  max_inbox_items: number;
+  max_queued_tasks: number;
+  max_steps_per_task: number;
+  process_inbox: boolean;
+  run_queue: boolean;
+  last_tick_started_at?: string | null;
+  last_tick_finished_at?: string | null;
+  last_tick_event_id?: string | null;
+  last_tick_summary: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 interface PlanInboxItem {
   id: string;
   raw_plan: string;
@@ -2184,6 +2202,7 @@ export function PlanScreen() {
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
   const [daemonEvents, setDaemonEvents] = useState<OrchestrationEvent[]>([]);
   const [daemonMode, setDaemonMode] = useState<'supervised' | 'autonomous'>('supervised');
+  const [daemonState, setDaemonState] = useState<OrchestrationDaemonState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -2273,10 +2292,25 @@ export function PlanScreen() {
       .catch(() => undefined);
   };
 
+  const loadDaemonState = () => {
+    if (typeof fetch !== 'function') return;
+    fetch(`${API}/api/orchestration/daemon/state`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_daemon_state_${response.status}`);
+        return response.json() as Promise<OrchestrationDaemonState>;
+      })
+      .then((state) => {
+        setDaemonState(state);
+        setDaemonMode(state.autonomy_mode);
+      })
+      .catch(() => undefined);
+  };
+
   const reloadAll = () => {
     loadInboxes();
     loadTasks();
     loadDaemonEvents();
+    loadDaemonState();
   };
 
   const loadPlanInboxDetail = (itemId: string) => {
@@ -3057,21 +3091,18 @@ export function PlanScreen() {
       body: JSON.stringify({
         lockedBy: 'plan-screen-orchestration-daemon',
         autonomyMode: daemonMode,
-        processInbox: true,
-        runQueue: true,
-        maxInboxItems: 5,
-        maxQueuedTasks: 3,
-        maxStepsPerTask: 10,
       }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_daemon_tick_${response.status}`);
         return response.json() as Promise<{
+          state: OrchestrationDaemonState;
           task_inbox: { processed: Array<{ task_inbox_item: TaskInboxItem; materialization?: { task: OrchestrationTaskDetail } }> };
           execution_queue: { processed: Array<{ task: OrchestrationTaskDetail }> };
         }>;
       })
       .then((result) => {
+        setDaemonState(result.state);
         const inboxItems = result.task_inbox.processed.map((item) => item.task_inbox_item).filter(Boolean);
         const materializedTasks = result.task_inbox.processed.map((item) => item.materialization?.task).filter(Boolean) as OrchestrationTaskDetail[];
         const queueTasks = result.execution_queue.processed.map((item) => item.task).filter(Boolean);
@@ -3096,10 +3127,35 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const updateDaemonState = (updates: Partial<{
+    status: string;
+    autonomyMode: 'supervised' | 'autonomous';
+    intervalSeconds: number;
+  }>) => {
+    setLoading(true);
+    fetch(`${API}/api/orchestration/daemon/state`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_daemon_state_${response.status}`);
+        return response.json() as Promise<OrchestrationDaemonState>;
+      })
+      .then((state) => {
+        setDaemonState(state);
+        setDaemonMode(state.autonomy_mode);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_daemon_state_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
   const queuedCount = tasks.filter((task) => task.status === 'queued_for_execution').length;
   const newInboxCount = taskInboxItems.filter((item) => item.status === 'new').length;
+  const daemonPaused = daemonState?.status !== 'active';
+  const lastTickSummary = daemonState?.last_tick_summary ?? {};
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
@@ -3109,17 +3165,27 @@ export function PlanScreen() {
           <select
             aria-label="Daemon mode"
             value={daemonMode}
-            onChange={(event) => setDaemonMode(event.target.value as 'supervised' | 'autonomous')}
+            onChange={(event) => updateDaemonState({ autonomyMode: event.target.value as 'supervised' | 'autonomous' })}
             style={{ height: 28, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 12, padding: '0 8px' }}
           >
             <option value="supervised">Supervised</option>
             <option value="autonomous">Autonomous</option>
           </select>
-          <Btn small onClick={runDaemonTick} disabled={loading || (queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
+          <Btn small onClick={() => updateDaemonState({ status: daemonPaused ? 'active' : 'paused' })} disabled={loading}>
+            {daemonPaused ? 'Resume Daemon' : 'Pause Daemon'}
+          </Btn>
+          <Btn small onClick={runDaemonTick} disabled={loading || daemonPaused || (queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
           <Btn small onClick={runExecutionQueue} disabled={loading || queuedCount === 0}>Run Queue</Btn>
           {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
         </TopBar>
+
+        <div style={{ borderBottom: '1px solid var(--bd)', padding: '8px 20px', display: 'flex', gap: 12, alignItems: 'center', color: 'var(--t1)', fontSize: 11, background: 'var(--bg1)' }}>
+          <span style={{ color: daemonPaused ? 'var(--yel)' : 'var(--grn)', fontWeight: 800 }}>{daemonState?.status ?? 'loading'}</span>
+          <span>interval {daemonState?.interval_seconds ?? 30}s</span>
+          <span>last tick {daemonState?.last_tick_finished_at ? new Date(daemonState.last_tick_finished_at).toLocaleTimeString() : 'never'}</span>
+          <span>{Number(lastTickSummary.inbox_processed_count ?? 0)} inbox · {Number(lastTickSummary.queue_processed_count ?? 0)} queue</span>
+        </div>
 
         {error && (
           <div style={{ color: 'var(--red)', fontSize: 12, padding: '8px 20px', borderBottom: '1px solid var(--bd)', background: '#f8514911' }}>

@@ -1031,17 +1031,40 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
             },
         })).json()
 
-        tick = await c.post("/api/orchestration/daemon/tick", json={
+        default_state = await c.get("/api/orchestration/daemon/state")
+        assert default_state.status_code == 200
+        assert default_state.json()["status"] == "paused"
+
+        skipped = await c.post("/api/orchestration/daemon/tick", json={
             "lockedBy": "daemon-small-project-test",
+            "maxInboxItems": 1,
+            "maxQueuedTasks": 1,
+        })
+        assert skipped.status_code == 200
+        assert skipped.json()["skipped"] is True
+
+        enabled = await c.patch("/api/orchestration/daemon/state", json={
+            "status": "active",
             "autonomyMode": "supervised",
+            "intervalSeconds": 15,
             "maxInboxItems": 1,
             "maxQueuedTasks": 1,
             "maxStepsPerTask": 3,
+        })
+        assert enabled.status_code == 200
+        assert enabled.json()["status"] == "active"
+        assert enabled.json()["interval_seconds"] == 15
+
+        tick = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "daemon-small-project-test",
             "permissionOverride": "allow_once",
         })
 
         assert tick.status_code == 200
         body = tick.json()
+        assert body["state"]["status"] == "active"
+        assert body["state"]["last_tick_event_id"] == body["event"]["id"]
+        assert body["state"]["last_tick_summary"]["queue_processed_count"] == 1
         assert body["task_inbox"]["processed"][0]["task_inbox_item"]["id"] == inbox_item["id"]
         assert body["task_inbox"]["processed"][0]["action"] == "queued_for_execution"
         assert body["execution_queue"]["processed"][0]["executed"] == 1

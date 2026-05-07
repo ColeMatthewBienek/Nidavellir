@@ -124,6 +124,24 @@ CREATE TABLE IF NOT EXISTS orchestration_events (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS orchestration_daemon_state (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'paused',
+  autonomy_mode TEXT NOT NULL DEFAULT 'supervised',
+  interval_seconds INTEGER NOT NULL DEFAULT 30,
+  max_inbox_items INTEGER NOT NULL DEFAULT 5,
+  max_queued_tasks INTEGER NOT NULL DEFAULT 3,
+  max_steps_per_task INTEGER NOT NULL DEFAULT 10,
+  process_inbox INTEGER NOT NULL DEFAULT 1,
+  run_queue INTEGER NOT NULL DEFAULT 1,
+  last_tick_started_at TEXT,
+  last_tick_finished_at TEXT,
+  last_tick_event_id TEXT,
+  last_tick_summary_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS orchestration_plan_inbox_items (
   id TEXT PRIMARY KEY,
   raw_plan TEXT NOT NULL,
@@ -279,6 +297,8 @@ PLANNING_CHECKPOINT_STATUSES = {"missing", "proposed", "agreed", "blocked"}
 SPEC_READINESS_VERDICTS = {"ready", "needs_clarification", "blocked"}
 TASK_SHAPE_VERDICTS = {"valid", "invalid"}
 EM_REVIEW_VERDICTS = {"atomic", "not_atomic", "needs_clarification", "blocked"}
+DAEMON_STATUSES = {"paused", "active", "running", "error"}
+DAEMON_AUTONOMY_MODES = {"supervised", "autonomous"}
 
 DEFAULT_PLANNING_CHECKPOINTS = [
     ("intake", "Intake captured"),
@@ -340,6 +360,17 @@ class OrchestrationStore:
             conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN work_lane TEXT NOT NULL DEFAULT 'project'")
         if "repo_profile_json" not in plan_inbox_columns:
             conn.execute("ALTER TABLE orchestration_plan_inbox_items ADD COLUMN repo_profile_json TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_daemon_state(conn)
+
+    def _ensure_daemon_state(self, conn: sqlite3.Connection) -> None:
+        now = _now()
+        conn.execute(
+            """INSERT OR IGNORE INTO orchestration_daemon_state
+               (id, status, autonomy_mode, interval_seconds, max_inbox_items, max_queued_tasks,
+                max_steps_per_task, process_inbox, run_queue, last_tick_summary_json, created_at, updated_at)
+               VALUES ('default', 'paused', 'supervised', 30, 5, 3, 10, 1, 1, '{}', ?, ?)""",
+            (now, now),
+        )
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -1640,6 +1671,56 @@ class OrchestrationStore:
                 ).fetchall()
         return [self._event_row(row) for row in rows]
 
+    def get_daemon_state(self) -> dict:
+        with self._conn() as conn:
+            self._ensure_daemon_state(conn)
+            row = conn.execute("SELECT * FROM orchestration_daemon_state WHERE id = 'default'").fetchone()
+        return self._daemon_state_row(row)
+
+    def update_daemon_state(self, values: dict[str, Any]) -> dict:
+        allowed = {
+            "status", "autonomy_mode", "interval_seconds", "max_inbox_items", "max_queued_tasks",
+            "max_steps_per_task", "process_inbox", "run_queue", "last_tick_started_at",
+            "last_tick_finished_at", "last_tick_event_id", "last_tick_summary",
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError("invalid_daemon_state_field")
+        if "status" in values:
+            self._require_status(str(values["status"]), DAEMON_STATUSES, "daemon_status")
+        if "autonomy_mode" in values:
+            self._require_status(str(values["autonomy_mode"]), DAEMON_AUTONOMY_MODES, "daemon_autonomy_mode")
+        numeric_ranges = {
+            "interval_seconds": (5, 3600),
+            "max_inbox_items": (0, 25),
+            "max_queued_tasks": (0, 10),
+            "max_steps_per_task": (1, 50),
+        }
+        for key, (minimum, maximum) in numeric_ranges.items():
+            if key in values and not (minimum <= int(values[key]) <= maximum):
+                raise ValueError(f"invalid_daemon_{key}")
+        if not values:
+            return self.get_daemon_state()
+        assignments: list[str] = []
+        params: list[Any] = []
+        column_map = {"last_tick_summary": "last_tick_summary_json"}
+        for key, value in values.items():
+            column = column_map.get(key, key)
+            assignments.append(f"{column} = ?")
+            if key == "last_tick_summary":
+                params.append(_json_dumps(value or {}))
+            elif key in {"process_inbox", "run_queue"}:
+                params.append(1 if value else 0)
+            else:
+                params.append(value)
+        assignments.append("updated_at = ?")
+        params.append(_now())
+        params.append("default")
+        with self._conn() as conn:
+            self._ensure_daemon_state(conn)
+            conn.execute(f"UPDATE orchestration_daemon_state SET {', '.join(assignments)} WHERE id = ?", params)
+        return self.get_daemon_state()
+
     def calculate_readiness(self, task_id: str) -> dict:
         with self._conn() as conn:
             node_rows = conn.execute("SELECT * FROM orchestration_nodes WHERE task_id = ?", (task_id,)).fetchall()
@@ -1789,6 +1870,13 @@ class OrchestrationStore:
     def _event_row(self, row: sqlite3.Row) -> dict:
         item = dict(row)
         item["payload"] = _json_loads(item.pop("payload_json"), {})
+        return item
+
+    def _daemon_state_row(self, row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["process_inbox"] = bool(item["process_inbox"])
+        item["run_queue"] = bool(item["run_queue"])
+        item["last_tick_summary"] = _json_loads(item.pop("last_tick_summary_json"), {})
         return item
 
     def _worktree_row(self, row: sqlite3.Row) -> dict:
