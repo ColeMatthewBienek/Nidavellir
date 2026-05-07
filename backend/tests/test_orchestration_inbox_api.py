@@ -1010,3 +1010,51 @@ async def test_run_queued_execution_tasks_runs_ready_command_steps(tmp_path: Pat
         assert result["results"][0]["step_type"] == "command"
         assert result["results"][0]["status"] == "complete"
         assert result["task"]["steps"][0]["output_summary"] == "queue-ok"
+
+
+@pytest.mark.asyncio
+async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "small-project")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        inbox_item = (await c.post("/api/orchestration/task-inbox", json={
+            "title": "Run tiny verification",
+            "objective": "Execute one deterministic verification command in a small project worktree.",
+            "payload": {
+                "single_objective": "Run tiny verification",
+                "base_repo_path": str(target_repo),
+                "base_branch": "main",
+                "affected_areas": ["README.md"],
+                "verification_steps": [{"type": "command", "command": "printf tiny-ok"}],
+                "skip_agent_step": True,
+            },
+        })).json()
+
+        tick = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "daemon-small-project-test",
+            "autonomyMode": "supervised",
+            "maxInboxItems": 1,
+            "maxQueuedTasks": 1,
+            "maxStepsPerTask": 3,
+            "permissionOverride": "allow_once",
+        })
+
+        assert tick.status_code == 200
+        body = tick.json()
+        assert body["task_inbox"]["processed"][0]["task_inbox_item"]["id"] == inbox_item["id"]
+        assert body["task_inbox"]["processed"][0]["action"] == "queued_for_execution"
+        assert body["execution_queue"]["processed"][0]["executed"] == 1
+        assert body["execution_queue"]["processed"][0]["status"] == "review"
+        task = body["execution_queue"]["processed"][0]["task"]
+        assert task["status"] == "review"
+        assert [step["type"] for step in task["steps"]] == ["command"]
+        assert task["steps"][0]["status"] == "complete"
+        assert task["steps"][0]["output_summary"] == "tiny-ok"
+
+        events = await c.get("/api/orchestration/events", params={"limit": 20})
+        assert events.status_code == 200
+        event_types = [event["type"] for event in events.json()]
+        assert "orchestration_daemon_tick_finished" in event_types
+        assert "task_inbox_process_finished" in event_types
+        assert "execution_queue_run_finished" in event_types

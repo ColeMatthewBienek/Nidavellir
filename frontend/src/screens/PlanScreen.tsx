@@ -1283,6 +1283,7 @@ function DagView({
 function TaskDetail({
   task,
   events,
+  daemonEvents,
   selectedNodeId,
   onSelectNode,
   onAddNode,
@@ -1309,6 +1310,7 @@ function TaskDetail({
 }: {
   task: OrchestrationTaskDetail;
   events: OrchestrationEvent[];
+  daemonEvents: OrchestrationEvent[];
   selectedNodeId?: string | null;
   onSelectNode: (nodeId: string) => void;
   onAddNode: () => void;
@@ -1655,6 +1657,19 @@ function TaskDetail({
               </div>
             ))}
             {events.length === 0 && <div style={{ color: 'var(--t1)', fontSize: 12 }}>No events yet.</div>}
+          </div>
+        </section>
+
+        <section>
+          <SectionTitle>Daemon Events</SectionTitle>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 9 }}>
+            {daemonEvents.slice(0, 8).map((event) => (
+              <div key={event.id} style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
+                <span style={{ color: 'var(--t0)', fontFamily: 'var(--mono)' }}>{event.type}</span>
+                {' '}· {new Date(event.created_at).toLocaleTimeString()}
+              </div>
+            ))}
+            {daemonEvents.length === 0 && <div style={{ color: 'var(--t1)', fontSize: 12 }}>No daemon events yet.</div>}
           </div>
         </section>
       </div>
@@ -2167,6 +2182,8 @@ export function PlanScreen() {
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
+  const [daemonEvents, setDaemonEvents] = useState<OrchestrationEvent[]>([]);
+  const [daemonMode, setDaemonMode] = useState<'supervised' | 'autonomous'>('supervised');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -2245,9 +2262,21 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const loadDaemonEvents = () => {
+    if (typeof fetch !== 'function') return;
+    fetch(`${API}/api/orchestration/events?limit=20`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_events_${response.status}`);
+        return response.json() as Promise<OrchestrationEvent[]>;
+      })
+      .then(setDaemonEvents)
+      .catch(() => undefined);
+  };
+
   const reloadAll = () => {
     loadInboxes();
     loadTasks();
+    loadDaemonEvents();
   };
 
   const loadPlanInboxDetail = (itemId: string) => {
@@ -2286,6 +2315,7 @@ export function PlanScreen() {
         setSelectedTask(task);
         setSelectedNodeId((current) => current && task.nodes.some((node) => node.id === current) ? current : task.nodes[0]?.id ?? null);
         setEvents(nextEvents);
+        loadDaemonEvents();
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_task_failed'));
   };
@@ -3019,15 +3049,73 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const runDaemonTick = () => {
+    setLoading(true);
+    fetch(`${API}/api/orchestration/daemon/tick`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lockedBy: 'plan-screen-orchestration-daemon',
+        autonomyMode: daemonMode,
+        processInbox: true,
+        runQueue: true,
+        maxInboxItems: 5,
+        maxQueuedTasks: 3,
+        maxStepsPerTask: 10,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_daemon_tick_${response.status}`);
+        return response.json() as Promise<{
+          task_inbox: { processed: Array<{ task_inbox_item: TaskInboxItem; materialization?: { task: OrchestrationTaskDetail } }> };
+          execution_queue: { processed: Array<{ task: OrchestrationTaskDetail }> };
+        }>;
+      })
+      .then((result) => {
+        const inboxItems = result.task_inbox.processed.map((item) => item.task_inbox_item).filter(Boolean);
+        const materializedTasks = result.task_inbox.processed.map((item) => item.materialization?.task).filter(Boolean) as OrchestrationTaskDetail[];
+        const queueTasks = result.execution_queue.processed.map((item) => item.task).filter(Boolean);
+        const updatedTasks = [...queueTasks, ...materializedTasks];
+        if (inboxItems.length > 0) {
+          setTaskInboxItems((current) => [
+            ...inboxItems,
+            ...current.filter((item) => !inboxItems.some((updated) => updated.id === item.id)),
+          ]);
+        }
+        if (updatedTasks.length > 0) {
+          setTasks((current) => [
+            ...updatedTasks,
+            ...current.filter((task) => !updatedTasks.some((updated) => updated.id === task.id)),
+          ]);
+          const selectedUpdate = updatedTasks.find((task) => task.id === selectedTask?.id);
+          if (selectedUpdate) setSelectedTask(selectedUpdate);
+        }
+        reloadAll();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_daemon_tick_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
   const queuedCount = tasks.filter((task) => task.status === 'queued_for_execution').length;
+  const newInboxCount = taskInboxItems.filter((item) => item.status === 'new').length;
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <TopBar title="Plan" sub={`${tasks.length} tasks · ${readyCount} ready · ${runningCount} running`}>
           <Btn small onClick={reloadAll} disabled={loading}>Reload</Btn>
+          <select
+            aria-label="Daemon mode"
+            value={daemonMode}
+            onChange={(event) => setDaemonMode(event.target.value as 'supervised' | 'autonomous')}
+            style={{ height: 28, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 12, padding: '0 8px' }}
+          >
+            <option value="supervised">Supervised</option>
+            <option value="autonomous">Autonomous</option>
+          </select>
+          <Btn small onClick={runDaemonTick} disabled={loading || (queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
           <Btn small onClick={runExecutionQueue} disabled={loading || queuedCount === 0}>Run Queue</Btn>
           {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
@@ -3140,6 +3228,7 @@ export function PlanScreen() {
         <TaskDetail
           task={selectedTask}
           events={events}
+          daemonEvents={daemonEvents}
           selectedNodeId={selectedNodeId}
           onSelectNode={setSelectedNodeId}
           onAddNode={() => setEditingNode(null)}
