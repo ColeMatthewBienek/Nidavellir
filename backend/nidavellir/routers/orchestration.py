@@ -696,6 +696,24 @@ def _decomposer_slug(value: str, fallback: str) -> str:
     return slug[:64] or fallback
 
 
+def _plan_execution_route(plan: dict | None) -> dict[str, Any]:
+    if not plan:
+        return {}
+    provider = str(plan.get("provider") or "").strip()
+    model = str(plan.get("model") or "").strip()
+    route: dict[str, Any] = {}
+    routing: dict[str, Any] = {"source": "plan_inbox_defaults"}
+    if provider:
+        route["provider"] = provider
+        routing["execution_provider"] = provider
+    if model:
+        route["model"] = model
+        routing["execution_model"] = model
+    if provider or model:
+        route["routing"] = routing
+    return route
+
+
 def _spec_ready_for_decomposition(plan: dict, spec: dict | None) -> tuple[bool, list[str]]:
     missing: list[str] = []
     if not spec or spec.get("status") != "ready":
@@ -735,6 +753,7 @@ def _decompose_spec_to_candidates(plan: dict, spec: dict, max_tasks: int) -> dic
             verification_steps.append({"type": "command", "command": command})
     if not verification_steps:
         verification_steps = [{"type": "manual", "command": "Review implementation against the approved spec acceptance criteria."}]
+    route = _plan_execution_route(plan)
 
     source_items = explicit_tasks or scope_items or acceptance or [str(plan.get("raw_plan") or "Implement approved spec")]
     seen: set[str] = set()
@@ -755,6 +774,7 @@ def _decompose_spec_to_candidates(plan: dict, spec: dict, max_tasks: int) -> dic
             "objective": clean,
             "dependencies": [],
             "payload": {
+                **route,
                 "single_objective": clean,
                 "affected_areas": [],
                 "acceptance_criteria": acceptance,
@@ -803,7 +823,9 @@ def _existing_project_brief_payload(plan: dict, repo_profile: dict[str, Any], ma
     ]
     if not verification_steps:
         verification_steps = [{"type": "manual", "command": "Review the implementation against the task brief and repo conventions."}]
+    route = _plan_execution_route(plan)
     return {
+        **route,
         "source": "existing_project_lane_brief",
         "single_objective": objective,
         "work_lane": str(plan.get("work_lane") or "feature"),
@@ -1150,12 +1172,19 @@ def _task_payload_with_plan_target(store: Any, payload: dict[str, Any] | None, p
     merged = dict(payload or {})
     if not plan_inbox_item_id:
         return merged
-    target = _implementation_target_from_plan(store.get_plan_inbox_item(plan_inbox_item_id))
+    plan = store.get_plan_inbox_item(plan_inbox_item_id)
+    target = _implementation_target_from_plan(plan)
     if target:
         merged.setdefault("base_repo_path", target["base_repo_path"])
         merged.setdefault("implementation_cwd", target["base_repo_path"])
         if target.get("base_branch"):
             merged.setdefault("base_branch", target["base_branch"])
+    for key, value in _plan_execution_route(plan).items():
+        if key == "routing" and isinstance(value, dict):
+            existing = merged.get("routing") if isinstance(merged.get("routing"), dict) else {}
+            merged["routing"] = {**value, **existing}
+        else:
+            merged.setdefault(key, value)
     return merged
 
 

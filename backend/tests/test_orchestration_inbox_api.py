@@ -188,6 +188,8 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
             "workLane": "bugfix",
             "repoPath": str(existing_repo),
             "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
         })
         assert existing_project.status_code == 200
         existing_body = existing_project.json()
@@ -214,6 +216,9 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
         assert brief_body["task_inbox_item"]["payload"]["work_lane"] == "bugfix"
         assert brief_body["task_inbox_item"]["payload"]["base_repo_path"] == str(existing_repo)
         assert brief_body["task_inbox_item"]["payload"]["base_branch"] == "main"
+        assert brief_body["task_inbox_item"]["payload"]["provider"] == "codex"
+        assert brief_body["task_inbox_item"]["payload"]["model"] == "gpt-5.5"
+        assert brief_body["task_inbox_item"]["payload"]["routing"]["source"] == "plan_inbox_defaults"
         assert brief_body["task_inbox_item"]["payload"]["verification_steps"] == [{
             "type": "command",
             "command": "npm run test",
@@ -703,6 +708,8 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
             "rawPlan": "Build queue-backed orchestration intake.",
             "repoPath": str(target_repo),
             "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
         })).json()
         spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
             "content": "# Goal\nBuild queue-backed orchestration intake.",
@@ -735,6 +742,8 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
         assert task_body["payload"]["base_repo_path"] == str(target_repo)
         assert task_body["payload"]["base_branch"] == "main"
         assert task_body["payload"]["implementation_cwd"] == str(target_repo)
+        assert task_body["payload"]["provider"] == "codex"
+        assert task_body["payload"]["model"] == "gpt-5.5"
 
         claimed = await c.post(f"/api/orchestration/task-inbox/{task_body['id']}/claim", json={"lockedBy": "em-1"})
         assert claimed.status_code == 200
@@ -776,6 +785,8 @@ async def test_task_inbox_shape_and_em_review_flow(tmp_path: Path):
         assert materialized_body["task"]["base_repo_path"] == str(target_repo)
         assert materialized_body["task"]["base_branch"] == "main"
         assert [node["title"] for node in materialized_body["task"]["nodes"]] == ["Implementation"]
+        assert materialized_body["task"]["nodes"][0]["provider"] == "codex"
+        assert materialized_body["task"]["nodes"][0]["model"] == "gpt-5.5"
         assert [step["type"] for step in materialized_body["task"]["steps"]] == ["agent", "command"]
         assert materialized_body["task"]["steps"][0]["config"]["requires_worktree"] is True
         assert materialized_body["task"]["steps"][1]["config"]["command"] == "uv run pytest backend/tests/test_orchestration_inbox_api.py"
@@ -829,6 +840,8 @@ async def test_decompose_approved_plan_creates_task_inbox_candidates(tmp_path: P
             "rawPlan": "Build queue-backed orchestration intake.",
             "repoPath": str(target_repo),
             "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
             "acceptanceCriteria": ["Plan decomposition produces Task Inbox candidates."],
         })).json()
         for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
@@ -874,6 +887,13 @@ async def test_decompose_approved_plan_creates_task_inbox_candidates(tmp_path: P
         assert first["decomposition_run_id"] == body["decomposition_run"]["id"]
         assert first["payload"]["base_repo_path"] == str(target_repo)
         assert first["payload"]["base_branch"] == "main"
+        assert first["payload"]["provider"] == "codex"
+        assert first["payload"]["model"] == "gpt-5.5"
+        assert first["payload"]["routing"] == {
+            "execution_provider": "codex",
+            "execution_model": "gpt-5.5",
+            "source": "plan_inbox_defaults",
+        }
         assert first["payload"]["verification_steps"] == [{
             "type": "command",
             "command": "uv run pytest tests/test_orchestration_inbox_api.py",
