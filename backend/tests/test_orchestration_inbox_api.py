@@ -1161,3 +1161,83 @@ async def test_daemon_loop_once_runs_when_active(tmp_path: Path):
         state = app.state.orchestration_store.get_daemon_state()
         assert state["status"] == "active"
         assert state["last_tick_summary"]["queue_processed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_existing_project_full_pipeline_supervised_then_autonomous(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "full-pipeline-project")
+    (target_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node -e \"console.log('full-pipeline-ok')\""}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json"], cwd=target_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Add package scripts"], cwd=target_repo, check=True, capture_output=True, text=True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Run the existing project smoke verification.",
+            "entryMode": "existing_project",
+            "workLane": "chore",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })).json()
+
+        brief = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/brief-task", json={
+            "maxVerificationSteps": 1,
+            "skipAgentStep": True,
+        })
+        assert brief.status_code == 200
+        task_inbox_item = brief.json()["task_inbox_item"]
+        assert task_inbox_item["payload"]["source"] == "existing_project_lane_brief"
+        assert task_inbox_item["payload"]["provider"] == "codex"
+        assert task_inbox_item["payload"]["model"] == "gpt-5.5"
+        assert task_inbox_item["payload"]["skip_agent_step"] is True
+        assert task_inbox_item["payload"]["verification_steps"] == [{
+            "type": "command",
+            "command": "npm run test",
+        }]
+
+        await c.patch("/api/orchestration/daemon/state", json={
+            "status": "active",
+            "autonomyMode": "supervised",
+            "maxInboxItems": 1,
+            "maxQueuedTasks": 1,
+            "maxStepsPerTask": 3,
+        })
+        supervised = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "full-pipeline-test",
+            "permissionOverride": "allow_once",
+        })
+        assert supervised.status_code == 200
+        supervised_body = supervised.json()
+        assert supervised_body["task_inbox"]["processed"][0]["action"] == "queued_for_execution"
+        assert supervised_body["execution_queue"]["processed"][0]["executed"] == 0
+        assert supervised_body["execution_queue"]["processed"][0]["waiting_for_autonomy"] is True
+        queued_task = supervised_body["execution_queue"]["processed"][0]["task"]
+        assert queued_task["status"] == "queued_for_execution"
+        assert queued_task["nodes"][0]["provider"] == "codex"
+        assert queued_task["nodes"][0]["model"] == "gpt-5.5"
+        assert len(queued_task["worktrees"]) == 1
+
+        await c.patch("/api/orchestration/daemon/state", json={"autonomyMode": "autonomous"})
+        autonomous = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "full-pipeline-test",
+            "permissionOverride": "allow_once",
+        })
+        assert autonomous.status_code == 200
+        autonomous_body = autonomous.json()
+        assert autonomous_body["execution_queue"]["processed"][0]["executed"] == 1
+        final_task = autonomous_body["execution_queue"]["processed"][0]["task"]
+        assert final_task["status"] == "review"
+        assert final_task["steps"][0]["type"] == "command"
+        assert final_task["steps"][0]["status"] == "complete"
+        assert "full-pipeline-ok" in final_task["steps"][0]["output_summary"]
+
+        events = (await c.get("/api/orchestration/events", params={"limit": 50})).json()
+        event_types = [event["type"] for event in events]
+        assert "existing_project_brief_sent_to_task_inbox" in event_types
+        assert "task_inbox_process_finished" in event_types
+        assert "execution_queue_task_waiting_for_autonomy" in event_types
