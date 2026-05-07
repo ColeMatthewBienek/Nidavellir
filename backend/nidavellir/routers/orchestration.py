@@ -7,6 +7,7 @@ import re
 import sqlite3
 import tomllib
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -43,6 +44,10 @@ from nidavellir.routers.tool_requests import _continuation_content
 from nidavellir.workspace import effective_default_working_directory, normalize_working_directory
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class TaskCreateRequest(BaseModel):
@@ -311,14 +316,26 @@ class TaskInboxProcessRequest(BaseModel):
 
 
 class OrchestrationDaemonTickRequest(BaseModel):
-    lockedBy: str = Field(default="orchestration-daemon", min_length=1)
-    autonomyMode: str = "supervised"
-    processInbox: bool = True
-    runQueue: bool = True
-    maxInboxItems: int = Field(default=5, ge=0, le=25)
-    maxQueuedTasks: int = Field(default=3, ge=0, le=10)
-    maxStepsPerTask: int = Field(default=10, ge=1, le=50)
+    lockedBy: str | None = Field(default=None, min_length=1)
+    autonomyMode: str | None = None
+    processInbox: bool | None = None
+    runQueue: bool | None = None
+    maxInboxItems: int | None = Field(default=None, ge=0, le=25)
+    maxQueuedTasks: int | None = Field(default=None, ge=0, le=10)
+    maxStepsPerTask: int | None = Field(default=None, ge=1, le=50)
     permissionOverride: str | None = None
+    ignorePaused: bool = False
+
+
+class OrchestrationDaemonStateUpdateRequest(BaseModel):
+    status: str | None = None
+    autonomyMode: str | None = None
+    intervalSeconds: int | None = Field(default=None, ge=5, le=3600)
+    maxInboxItems: int | None = Field(default=None, ge=0, le=25)
+    maxQueuedTasks: int | None = Field(default=None, ge=0, le=10)
+    maxStepsPerTask: int | None = Field(default=None, ge=1, le=50)
+    processInbox: bool | None = None
+    runQueue: bool | None = None
 
 
 def _store(request: Request) -> OrchestrationStore:
@@ -2897,41 +2914,106 @@ async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Reques
     return {"processed": processed}
 
 
+@router.get("/daemon/state")
+def get_orchestration_daemon_state(request: Request) -> dict:
+    return _store(request).get_daemon_state()
+
+
+@router.patch("/daemon/state")
+def update_orchestration_daemon_state(body: OrchestrationDaemonStateUpdateRequest, request: Request) -> dict:
+    updates = {
+        "status": body.status,
+        "autonomy_mode": body.autonomyMode,
+        "interval_seconds": body.intervalSeconds,
+        "max_inbox_items": body.maxInboxItems,
+        "max_queued_tasks": body.maxQueuedTasks,
+        "max_steps_per_task": body.maxStepsPerTask,
+        "process_inbox": body.processInbox,
+        "run_queue": body.runQueue,
+    }
+    try:
+        return _store(request).update_daemon_state({key: value for key, value in updates.items() if value is not None})
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
 @router.post("/daemon/tick")
 async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, request: Request) -> dict:
+    store = _store(request)
+    state = store.get_daemon_state()
+    if state["status"] == "paused" and not body.ignorePaused:
+        event = store.append_event(type="orchestration_daemon_tick_skipped", payload={
+            "reason": "paused",
+            "locked_by": body.lockedBy or "orchestration-daemon",
+        })
+        summary = {"skipped": True, "reason": "paused", "event_id": event["id"]}
+        state = store.update_daemon_state({
+            "last_tick_started_at": event["created_at"],
+            "last_tick_finished_at": event["created_at"],
+            "last_tick_event_id": event["id"],
+            "last_tick_summary": summary,
+        })
+        return {"mode": state["autonomy_mode"], "state": state, "event": event, "skipped": True, "task_inbox": {"processed": []}, "execution_queue": {"processed": []}}
+
+    locked_by = body.lockedBy or "orchestration-daemon"
+    autonomy_mode = body.autonomyMode or state["autonomy_mode"]
+    process_inbox = state["process_inbox"] if body.processInbox is None else body.processInbox
+    run_queue = state["run_queue"] if body.runQueue is None else body.runQueue
+    max_inbox_items = state["max_inbox_items"] if body.maxInboxItems is None else body.maxInboxItems
+    max_queued_tasks = state["max_queued_tasks"] if body.maxQueuedTasks is None else body.maxQueuedTasks
+    max_steps_per_task = state["max_steps_per_task"] if body.maxStepsPerTask is None else body.maxStepsPerTask
+    started_at = _utc_now()
+    store.update_daemon_state({"status": "running", "last_tick_started_at": started_at})
     inbox_result = {"processed": []}
     queue_result = {"processed": []}
-    if body.processInbox and body.maxInboxItems > 0:
+    if process_inbox and max_inbox_items > 0:
         inbox_result = process_task_inbox(
             TaskInboxProcessRequest(
-                lockedBy=body.lockedBy,
-                maxItems=body.maxInboxItems,
+                lockedBy=locked_by,
+                maxItems=max_inbox_items,
                 materialize=True,
                 provisionWorktrees=True,
                 queueExecution=True,
             ),
             request,
         )
-    if body.runQueue and body.maxQueuedTasks > 0:
+    if run_queue and max_queued_tasks > 0:
         queue_result = await run_queued_execution_tasks(
             TaskRunQueuedRequest(
-                lockedBy=body.lockedBy,
-                maxTasks=body.maxQueuedTasks,
-                maxStepsPerTask=body.maxStepsPerTask,
+                lockedBy=locked_by,
+                maxTasks=max_queued_tasks,
+                maxStepsPerTask=max_steps_per_task,
                 permissionOverride=body.permissionOverride,
             ),
             request,
         )
-    event = _store(request).append_event(type="orchestration_daemon_tick_finished", payload={
-        "locked_by": body.lockedBy,
-        "autonomy_mode": body.autonomyMode,
+    event = store.append_event(type="orchestration_daemon_tick_finished", payload={
+        "locked_by": locked_by,
+        "autonomy_mode": autonomy_mode,
         "inbox_processed_count": len(inbox_result.get("processed", [])),
         "queue_processed_count": len(queue_result.get("processed", [])),
-        "process_inbox": body.processInbox,
-        "run_queue": body.runQueue,
+        "process_inbox": process_inbox,
+        "run_queue": run_queue,
+    })
+    summary = {
+        "skipped": False,
+        "event_id": event["id"],
+        "inbox_processed_count": len(inbox_result.get("processed", [])),
+        "queue_processed_count": len(queue_result.get("processed", [])),
+        "review_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "review"),
+        "blocked_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "blocked"),
+    }
+    state = store.update_daemon_state({
+        "status": "active" if state["status"] == "active" else state["status"],
+        "autonomy_mode": autonomy_mode,
+        "last_tick_finished_at": event["created_at"],
+        "last_tick_event_id": event["id"],
+        "last_tick_summary": summary,
     })
     return {
-        "mode": body.autonomyMode,
+        "mode": autonomy_mode,
+        "state": state,
         "event": event,
         "task_inbox": inbox_result,
         "execution_queue": queue_result,
