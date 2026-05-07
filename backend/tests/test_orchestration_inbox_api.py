@@ -1034,6 +1034,7 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         default_state = await c.get("/api/orchestration/daemon/state")
         assert default_state.status_code == 200
         assert default_state.json()["status"] == "paused"
+        assert default_state.json()["health"]["state"] == "paused"
 
         skipped = await c.post("/api/orchestration/daemon/tick", json={
             "lockedBy": "daemon-small-project-test",
@@ -1054,6 +1055,8 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         assert enabled.status_code == 200
         assert enabled.json()["status"] == "active"
         assert enabled.json()["interval_seconds"] == 15
+        assert enabled.json()["health"]["is_active"] is True
+        assert enabled.json()["health"]["next_tick_at"]
 
         tick = await c.post("/api/orchestration/daemon/tick", json={
             "lockedBy": "daemon-small-project-test",
@@ -1065,6 +1068,8 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         assert body["state"]["status"] == "active"
         assert body["state"]["last_tick_event_id"] == body["event"]["id"]
         assert body["state"]["last_tick_summary"]["queue_processed_count"] == 1
+        assert body["state"]["health"]["state"] == "healthy"
+        assert body["state"]["health"]["next_tick_at"]
         assert body["task_inbox"]["processed"][0]["task_inbox_item"]["id"] == inbox_item["id"]
         assert body["task_inbox"]["processed"][0]["action"] == "queued_for_execution"
         assert body["execution_queue"]["processed"][0]["executed"] == 1

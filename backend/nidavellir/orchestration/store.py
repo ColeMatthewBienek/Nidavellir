@@ -4,7 +4,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -315,6 +315,15 @@ PLANNING_CHECKPOINT_ORDER = {key: index for index, (key, _title) in enumerate(DE
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _json_dumps(value: Any) -> str:
@@ -1877,6 +1886,20 @@ class OrchestrationStore:
         item["process_inbox"] = bool(item["process_inbox"])
         item["run_queue"] = bool(item["run_queue"])
         item["last_tick_summary"] = _json_loads(item.pop("last_tick_summary_json"), {})
+        last_finished = _parse_dt(item.get("last_tick_finished_at"))
+        next_tick = None
+        if item["status"] == "active" and last_finished is not None:
+            next_tick = (last_finished + timedelta(seconds=int(item["interval_seconds"]))).isoformat()
+        elif item["status"] == "active":
+            next_tick = _now()
+        last_summary = item["last_tick_summary"] if isinstance(item["last_tick_summary"], dict) else {}
+        item["health"] = {
+            "state": "error" if item["status"] == "error" else ("paused" if item["status"] == "paused" else "healthy"),
+            "next_tick_at": next_tick,
+            "last_error": str(last_summary.get("error") or "") or None,
+            "last_reason": str(last_summary.get("reason") or "") or None,
+            "is_active": item["status"] == "active",
+        }
         return item
 
     def _worktree_row(self, row: sqlite3.Row) -> dict:

@@ -185,6 +185,13 @@ interface OrchestrationDaemonState {
   last_tick_finished_at?: string | null;
   last_tick_event_id?: string | null;
   last_tick_summary: Record<string, unknown>;
+  health: {
+    state: string;
+    next_tick_at?: string | null;
+    last_error?: string | null;
+    last_reason?: string | null;
+    is_active: boolean;
+  };
   created_at: string;
   updated_at: string;
 }
@@ -2359,6 +2366,19 @@ export function PlanScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!daemonState?.health?.is_active && daemonState?.status !== 'running') return undefined;
+    const interval = window.setInterval(() => {
+      loadDaemonState();
+      loadDaemonEvents();
+      loadInboxes();
+      loadTasks();
+      if (selectedTask?.id) loadTask(selectedTask.id);
+    }, 5000);
+    return () => window.clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daemonState?.health?.is_active, daemonState?.status, selectedTask?.id]);
+
   const createPlanInboxItem = (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string; workLane: string }) => {
     const acceptanceCriteria = values.acceptanceCriteria
       .split('\n')
@@ -3156,6 +3176,8 @@ export function PlanScreen() {
   const newInboxCount = taskInboxItems.filter((item) => item.status === 'new').length;
   const daemonPaused = daemonState?.status !== 'active';
   const lastTickSummary = daemonState?.last_tick_summary ?? {};
+  const daemonHealth = daemonState?.health;
+  const daemonIssue = daemonHealth?.last_error || daemonHealth?.last_reason;
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
@@ -3181,10 +3203,12 @@ export function PlanScreen() {
         </TopBar>
 
         <div style={{ borderBottom: '1px solid var(--bd)', padding: '8px 20px', display: 'flex', gap: 12, alignItems: 'center', color: 'var(--t1)', fontSize: 11, background: 'var(--bg1)' }}>
-          <span style={{ color: daemonPaused ? 'var(--yel)' : 'var(--grn)', fontWeight: 800 }}>{daemonState?.status ?? 'loading'}</span>
+          <span style={{ color: daemonHealth?.state === 'error' ? 'var(--red)' : (daemonPaused ? 'var(--yel)' : 'var(--grn)'), fontWeight: 800 }}>{daemonState?.status ?? 'loading'}</span>
           <span>interval {daemonState?.interval_seconds ?? 30}s</span>
           <span>last tick {daemonState?.last_tick_finished_at ? new Date(daemonState.last_tick_finished_at).toLocaleTimeString() : 'never'}</span>
+          <span>next {daemonHealth?.next_tick_at ? new Date(daemonHealth.next_tick_at).toLocaleTimeString() : 'paused'}</span>
           <span>{Number(lastTickSummary.inbox_processed_count ?? 0)} inbox · {Number(lastTickSummary.queue_processed_count ?? 0)} queue</span>
+          {daemonIssue && <span style={{ color: daemonHealth?.last_error ? 'var(--red)' : 'var(--yel)' }}>{daemonIssue}</span>}
         </div>
 
         {error && (
