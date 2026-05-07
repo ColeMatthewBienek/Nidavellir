@@ -322,7 +322,12 @@ describe('PlanScreen orchestration board', () => {
             model: body.model ?? null,
             entry_mode: body.entryMode ?? 'new_project',
             work_lane: body.workLane ?? 'project',
-            repo_profile: {},
+            repo_profile: body.entryMode === 'existing_project' ? {
+              ok: true,
+              package_manager: 'npm',
+              test_commands: ['npm test'],
+              git: { current_branch: 'main' },
+            } : {},
             automation_mode: 'supervised',
             max_concurrency: 1,
             priority: null,
@@ -377,6 +382,45 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/inspect-repo') && options?.method === 'POST') {
+        const inspectedPlan = {
+          id: 'plan-1',
+          raw_plan: 'Fix flaky auth test',
+          repo_path: '/repo',
+          base_branch: 'main',
+          provider: 'claude',
+          model: 'claude-sonnet-4-6',
+          entry_mode: 'existing_project',
+          work_lane: 'bugfix',
+          repo_profile: {
+            ok: true,
+            package_manager: 'npm',
+            test_commands: ['npm test', 'npm run lint'],
+            git: { current_branch: 'main' },
+          },
+          automation_mode: 'supervised',
+          max_concurrency: 1,
+          priority: null,
+          source: 'plan_tab',
+          constraints: [],
+          acceptance_criteria: [],
+          status: 'planning',
+          locked_by: null,
+          locked_at: null,
+          final_spec_id: null,
+          created_at: '2026-05-03T00:00:00Z',
+          updated_at: '2026-05-03T00:01:00Z',
+          discussion_messages: [],
+          planning_checkpoints: planningCheckpoints,
+        };
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            plan: inspectedPlan,
+            repo_profile: inspectedPlan.repo_profile,
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1') && !options) {
         const created = planInboxCreateBody ?? {};
         return Promise.resolve({
@@ -390,7 +434,12 @@ describe('PlanScreen orchestration board', () => {
             model: created.model ?? null,
             entry_mode: created.entryMode ?? 'new_project',
             work_lane: created.workLane ?? 'project',
-            repo_profile: {},
+            repo_profile: created.entryMode === 'existing_project' ? {
+              ok: true,
+              package_manager: 'npm',
+              test_commands: ['npm test'],
+              git: { current_branch: 'main' },
+            } : {},
             automation_mode: 'supervised',
             max_concurrency: 1,
             priority: null,
@@ -825,6 +874,28 @@ describe('PlanScreen orchestration board', () => {
       expect(body.maxVerificationSteps).toBe(5);
       expect(body.skipAgentStep).toBe(true);
     });
+  });
+
+  it('shows and refreshes repo inspection details in existing-project PM sessions', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Fix flaky auth test' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Plan entry mode' }), { target: { value: 'existing_project' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Existing project lane' }), { target: { value: 'bugfix' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('Repo inspected')).toBeTruthy();
+    expect(screen.getByText('npm · main · 1 checks')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect Repo' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/inspect-repo') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+    });
+    expect(await screen.findByText('npm · main · 2 checks')).toBeTruthy();
+    expect(screen.getByText('npm run lint')).toBeTruthy();
   });
 
   it('shows a compact daemon run result from the last tick summary', async () => {

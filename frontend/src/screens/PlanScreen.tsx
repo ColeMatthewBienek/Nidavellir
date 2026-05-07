@@ -378,6 +378,11 @@ interface PlanBriefTaskOptions {
   skipAgentStep: boolean;
 }
 
+interface PlanRepoInspectResult {
+  plan: PlanInboxDetail;
+  repo_profile: Record<string, unknown>;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -808,6 +813,7 @@ function PlannerDiscussionPanel({
   onPlannerModelChange,
   onSend,
   onViewSpec,
+  onInspectRepo,
   loading,
 }: {
   item: PlanInboxDetail | null;
@@ -817,12 +823,20 @@ function PlannerDiscussionPanel({
   onPlannerModelChange: (values: { provider: string; model: string }) => void;
   onSend: (content: string) => void;
   onViewSpec: () => void;
+  onInspectRepo: () => void;
   loading: boolean;
 }) {
   const [content, setContent] = useState('');
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const disabled = !item || !content.trim() || loading;
   const discussionMessages = item?.discussion_messages ?? [];
+  const repoProfile = item?.repo_profile ?? {};
+  const repoProfileOk = Boolean(repoProfile.ok);
+  const repoProfileError = typeof repoProfile.error === 'string' ? repoProfile.error : null;
+  const packageManager = typeof repoProfile.package_manager === 'string' ? repoProfile.package_manager : null;
+  const testCommands = Array.isArray(repoProfile.test_commands) ? repoProfile.test_commands.filter((command): command is string => typeof command === 'string') : [];
+  const gitProfile = repoProfile.git && typeof repoProfile.git === 'object' && !Array.isArray(repoProfile.git) ? repoProfile.git as Record<string, unknown> : {};
+  const currentBranch = typeof gitProfile.current_branch === 'string' ? gitProfile.current_branch : null;
   const send = () => {
     if (disabled) return;
     onSend(content.trim());
@@ -863,6 +877,23 @@ function PlannerDiscussionPanel({
               </div>
               <Btn small onClick={onViewSpec}>View Spec</Btn>
             </div>
+            {item.entry_mode === 'existing_project' && (
+              <div style={{ border: `1px solid ${repoProfileOk ? 'var(--grnd)' : 'var(--bd)'}`, borderRadius: 7, background: repoProfileOk ? '#23863612' : 'var(--bg0)', padding: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flex: '0 0 auto' }}>
+                <span style={{ color: repoProfileOk ? 'var(--grn)' : 'var(--yel)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' }}>
+                  {repoProfileOk ? 'Repo inspected' : 'Repo needs inspection'}
+                </span>
+                <span style={{ color: 'var(--t1)', fontSize: 11 }}>
+                  {packageManager ?? 'unknown stack'} · {currentBranch ?? item.base_branch ?? 'branch unknown'} · {testCommands.length} checks
+                </span>
+                {testCommands.slice(0, 2).map((command) => (
+                  <code key={command} style={{ color: 'var(--t0)', fontSize: 11, background: 'var(--bg2)', border: '1px solid var(--bd)', borderRadius: 5, padding: '2px 6px', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {command}
+                  </code>
+                ))}
+                {repoProfileError && <span style={{ color: 'var(--red)', fontSize: 11 }}>{repoProfileError}</span>}
+                <Btn small onClick={onInspectRepo} disabled={loading || !item.repo_path}>Inspect Repo</Btn>
+              </div>
+            )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 4 }}>
               {discussionMessages.length === 0 ? (
                 <div style={{ color: 'var(--t1)', fontSize: 12 }}>No discussion yet.</div>
@@ -953,6 +984,7 @@ function PlannerModal({
   onViewSpec,
   onDecompose,
   onBriefTask,
+  onInspectRepo,
   onClose,
   loading,
 }: {
@@ -965,6 +997,7 @@ function PlannerModal({
   onViewSpec: () => void;
   onDecompose: () => void;
   onBriefTask: (options: PlanBriefTaskOptions) => void;
+  onInspectRepo: () => void;
   onClose: () => void;
   loading: boolean;
 }) {
@@ -1029,6 +1062,7 @@ function PlannerModal({
             onPlannerModelChange={onPlannerModelChange}
             onSend={onSend}
             onViewSpec={onViewSpec}
+            onInspectRepo={onInspectRepo}
             loading={loading}
           />
         </div>
@@ -2691,6 +2725,22 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const inspectSelectedPlanRepo = () => {
+    if (!selectedPlanInboxItem) return;
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/inspect-repo`, { method: 'POST' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_inspect_repo_${response.status}`);
+        return response.json() as Promise<PlanRepoInspectResult>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_inspect_repo_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const moveTask = (task: OrchestrationTaskSummary, status: string) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}`, {
       method: 'PATCH',
@@ -3276,6 +3326,7 @@ export function PlanScreen() {
             onViewSpec={() => setSpecViewerOpen(true)}
             onDecompose={decomposeSelectedPlan}
             onBriefTask={briefSelectedExistingProjectPlan}
+            onInspectRepo={inspectSelectedPlanRepo}
             onClose={() => setPlannerModalOpen(false)}
             loading={loading}
           />
