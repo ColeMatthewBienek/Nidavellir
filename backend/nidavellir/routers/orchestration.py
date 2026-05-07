@@ -9,6 +9,7 @@ import tomllib
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request
@@ -3018,6 +3019,56 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
         "task_inbox": inbox_result,
         "execution_queue": queue_result,
     }
+
+
+async def run_orchestration_daemon_loop_once(app: Any) -> dict:
+    store = getattr(app.state, "orchestration_store", None)
+    if store is None:
+        return {"ran": False, "reason": "orchestration_store_not_available"}
+    state = store.get_daemon_state()
+    if state.get("status") != "active":
+        return {"ran": False, "reason": f"daemon_{state.get('status')}", "state": state}
+    request = SimpleNamespace(app=app)
+    result = await run_orchestration_daemon_tick(
+        OrchestrationDaemonTickRequest(
+            lockedBy="orchestration-daemon-loop",
+            ignorePaused=True,
+        ),
+        request,  # type: ignore[arg-type]
+    )
+    return {"ran": True, "result": result}
+
+
+async def run_orchestration_daemon_loop(app: Any, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        sleep_seconds = 5
+        try:
+            store = getattr(app.state, "orchestration_store", None)
+            if store is not None:
+                state = store.get_daemon_state()
+                sleep_seconds = max(5, int(state.get("interval_seconds") or 30))
+                if state.get("status") == "active":
+                    await run_orchestration_daemon_loop_once(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            store = getattr(app.state, "orchestration_store", None)
+            if store is not None:
+                error = str(err)
+                event = store.append_event(type="orchestration_daemon_loop_failed", payload={"error": error})
+                try:
+                    store.update_daemon_state({
+                        "status": "error",
+                        "last_tick_finished_at": event["created_at"],
+                        "last_tick_event_id": event["id"],
+                        "last_tick_summary": {"skipped": False, "error": error, "event_id": event["id"]},
+                    })
+                except Exception:
+                    pass
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
+        except asyncio.TimeoutError:
+            continue
 
 
 @router.post("/tasks/{task_id}/nodes")

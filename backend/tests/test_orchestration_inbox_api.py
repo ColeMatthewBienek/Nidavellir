@@ -1081,3 +1081,40 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         assert "orchestration_daemon_tick_finished" in event_types
         assert "task_inbox_process_finished" in event_types
         assert "execution_queue_run_finished" in event_types
+
+
+@pytest.mark.asyncio
+async def test_daemon_loop_once_runs_when_active(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "loop-project")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await c.post("/api/orchestration/task-inbox", json={
+            "title": "Loop daemon verification",
+            "objective": "Execute one deterministic verification command from the loop.",
+            "payload": {
+                "single_objective": "Loop daemon verification",
+                "base_repo_path": str(target_repo),
+                "base_branch": "main",
+                "affected_areas": ["README.md"],
+                "verification_steps": [{"type": "command", "command": "printf loop-ok"}],
+                "skip_agent_step": True,
+            },
+        })
+        await c.patch("/api/orchestration/daemon/state", json={
+            "status": "active",
+            "maxInboxItems": 1,
+            "maxQueuedTasks": 1,
+            "maxStepsPerTask": 3,
+        })
+
+        result = await orchestration_router.run_orchestration_daemon_loop_once(app)
+
+        assert result["ran"] is True
+        processed = result["result"]["execution_queue"]["processed"][0]
+        assert processed["executed"] == 1
+        assert processed["task"]["status"] == "review"
+        assert processed["task"]["steps"][0]["output_summary"] == "loop-ok"
+        state = app.state.orchestration_store.get_daemon_state()
+        assert state["status"] == "active"
+        assert state["last_tick_summary"]["queue_processed_count"] == 1
