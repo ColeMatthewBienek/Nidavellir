@@ -374,6 +374,10 @@ interface PlanBriefTaskResult {
   task_inbox_item: TaskInboxItem;
 }
 
+interface PlanBriefTaskOptions {
+  skipAgentStep: boolean;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -818,6 +822,7 @@ function PlannerDiscussionPanel({
   const [content, setContent] = useState('');
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const disabled = !item || !content.trim() || loading;
+  const discussionMessages = item?.discussion_messages ?? [];
   const send = () => {
     if (disabled) return;
     onSend(content.trim());
@@ -825,7 +830,7 @@ function PlannerDiscussionPanel({
   };
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [item?.discussion_messages.length, item?.discussion_messages.at(-1)?.content]);
+  }, [discussionMessages.length, discussionMessages.at(-1)?.content]);
 
   return (
     <section style={{ background: 'var(--bg1)', minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto auto minmax(0, 1fr) auto', flex: 1 }}>
@@ -859,9 +864,9 @@ function PlannerDiscussionPanel({
               <Btn small onClick={onViewSpec}>View Spec</Btn>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 4 }}>
-              {item.discussion_messages.length === 0 ? (
+              {discussionMessages.length === 0 ? (
                 <div style={{ color: 'var(--t1)', fontSize: 12 }}>No discussion yet.</div>
-              ) : item.discussion_messages.map((message) => {
+              ) : discussionMessages.map((message) => {
                 const streamEvents = plannerStreamEvents(message);
                 const streaming = plannerMessageStreaming(message);
                 const renderStreamText = message.role === 'planner' && plannerHasText(streamEvents);
@@ -959,12 +964,13 @@ function PlannerModal({
   onSend: (content: string) => void;
   onViewSpec: () => void;
   onDecompose: () => void;
-  onBriefTask: () => void;
+  onBriefTask: (options: PlanBriefTaskOptions) => void;
   onClose: () => void;
   loading: boolean;
 }) {
   const canDecompose = planReadyForDecomposition(item);
   const canBriefTask = item?.entry_mode === 'existing_project' && item?.work_lane !== 'project' && Boolean(item?.repo_path);
+  const [briefVerificationOnly, setBriefVerificationOnly] = useState(true);
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="planner-modal-title" style={{
       position: 'fixed',
@@ -992,14 +998,25 @@ function PlannerModal({
                 Send to Decomposer
               </Btn>
               {item?.entry_mode === 'existing_project' && (
-                <Btn
-                  small
-                  disabled={!canBriefTask || loading}
-                  onClick={onBriefTask}
-                  title={canBriefTask ? 'Create a bounded existing-project Task Inbox brief for EM' : 'Requires an existing-project lane and repo target'}
-                >
-                  Send Brief to EM
-                </Btn>
+                <>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--t1)', fontSize: 11, whiteSpace: 'nowrap' }}>
+                    <input
+                      type="checkbox"
+                      checked={briefVerificationOnly}
+                      onChange={(event) => setBriefVerificationOnly(event.target.checked)}
+                      style={{ accentColor: 'var(--blue)' }}
+                    />
+                    Verify only
+                  </label>
+                  <Btn
+                    small
+                    disabled={!canBriefTask || loading}
+                    onClick={() => onBriefTask({ skipAgentStep: briefVerificationOnly })}
+                    title={canBriefTask ? 'Create a bounded existing-project Task Inbox brief for EM' : 'Requires an existing-project lane and repo target'}
+                  >
+                    Send Brief to EM
+                  </Btn>
+                </>
               )}
               <Btn small onClick={onClose} title="Close this session. Messages and checkpoint changes are already saved.">Close</Btn>
             </div>
@@ -2650,13 +2667,13 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
-  const briefSelectedExistingProjectPlan = () => {
+  const briefSelectedExistingProjectPlan = (options: PlanBriefTaskOptions = { skipAgentStep: true }) => {
     if (!selectedPlanInboxItem) return;
     setLoading(true);
     fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/brief-task`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ maxVerificationSteps: 5 }),
+      body: JSON.stringify({ maxVerificationSteps: 5, skipAgentStep: options.skipAgentStep }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`plan_brief_task_${response.status}`);
@@ -3178,6 +3195,11 @@ export function PlanScreen() {
   const lastTickSummary = daemonState?.last_tick_summary ?? {};
   const daemonHealth = daemonState?.health;
   const daemonIssue = daemonHealth?.last_error || daemonHealth?.last_reason;
+  const inboxProcessedCount = Number(lastTickSummary.inbox_processed_count ?? 0);
+  const queueProcessedCount = Number(lastTickSummary.queue_processed_count ?? 0);
+  const reviewCount = Number(lastTickSummary.review_count ?? 0);
+  const blockedCount = Number(lastTickSummary.blocked_count ?? 0);
+  const waitingForAutonomyCount = Number(lastTickSummary.waiting_for_autonomy_count ?? 0);
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
@@ -3207,7 +3229,8 @@ export function PlanScreen() {
           <span>interval {daemonState?.interval_seconds ?? 30}s</span>
           <span>last tick {daemonState?.last_tick_finished_at ? new Date(daemonState.last_tick_finished_at).toLocaleTimeString() : 'never'}</span>
           <span>next {daemonHealth?.next_tick_at ? new Date(daemonHealth.next_tick_at).toLocaleTimeString() : 'paused'}</span>
-          <span>{Number(lastTickSummary.inbox_processed_count ?? 0)} inbox · {Number(lastTickSummary.queue_processed_count ?? 0)} queue</span>
+          <span>{inboxProcessedCount} inbox · {queueProcessedCount} queue</span>
+          <span>{reviewCount} review · {blockedCount} blocked · {waitingForAutonomyCount} waiting</span>
           <span>{daemonMode === 'autonomous' ? 'executes ready steps' : 'queues only'}</span>
           {daemonIssue && <span style={{ color: daemonHealth?.last_error ? 'var(--red)' : 'var(--yel)' }}>{daemonIssue}</span>}
         </div>

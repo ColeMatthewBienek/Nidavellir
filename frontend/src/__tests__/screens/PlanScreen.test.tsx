@@ -194,6 +194,7 @@ describe('PlanScreen orchestration board', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     delete window.nidavellir;
+    let planInboxCreateBody: Record<string, unknown> | null = null;
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
       if (String(url).endsWith('/api/agents/models')) {
         return Promise.resolve({
@@ -224,6 +225,32 @@ describe('PlanScreen orchestration board', () => {
       }
       if (String(url).endsWith('/api/orchestration/plan-inbox') && !options) {
         return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).endsWith('/api/orchestration/daemon/state') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: 'active',
+            autonomy_mode: 'supervised',
+            interval_seconds: 30,
+            last_tick_started_at: '2026-05-03T00:01:00Z',
+            last_tick_finished_at: '2026-05-03T00:01:02Z',
+            last_tick_summary: {
+              inbox_processed_count: 1,
+              queue_processed_count: 2,
+              review_count: 3,
+              blocked_count: 4,
+              waiting_for_autonomy_count: 5,
+            },
+            health: {
+              is_active: true,
+              state: 'idle',
+              next_tick_at: '2026-05-03T00:01:32Z',
+              last_reason: null,
+              last_error: null,
+            },
+          }),
+        });
       }
       if (String(url).endsWith('/api/orchestration/task-inbox') && !options) {
         return Promise.resolve({ ok: true, json: async () => [taskInboxItem, daemonTaskInboxItem] });
@@ -282,17 +309,19 @@ describe('PlanScreen orchestration board', () => {
         });
       }
       if (String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST') {
+        const body = JSON.parse(String(options.body));
+        planInboxCreateBody = body;
         return Promise.resolve({
           ok: true,
           json: async () => ({
             id: 'plan-1',
-            raw_plan: 'Automate orchestration',
-            repo_path: '/repo',
-            base_branch: 'main',
-            provider: null,
-            model: null,
-            entry_mode: 'new_project',
-            work_lane: 'project',
+            raw_plan: body.rawPlan ?? 'Automate orchestration',
+            repo_path: body.repoPath ?? '/repo',
+            base_branch: body.baseBranch ?? 'main',
+            provider: body.provider ?? null,
+            model: body.model ?? null,
+            entry_mode: body.entryMode ?? 'new_project',
+            work_lane: body.workLane ?? 'project',
             repo_profile: {},
             automation_mode: 'supervised',
             max_concurrency: 1,
@@ -310,18 +339,57 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/brief-task') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            plan: {
+              id: 'plan-1',
+              raw_plan: 'Fix flaky auth test',
+              repo_path: '/repo',
+              base_branch: 'main',
+              provider: 'claude',
+              model: 'claude-sonnet-4-6',
+              entry_mode: 'existing_project',
+              work_lane: 'bugfix',
+              repo_profile: {},
+              automation_mode: 'supervised',
+              max_concurrency: 1,
+              priority: null,
+              source: 'plan_tab',
+              constraints: [],
+              acceptance_criteria: [],
+              status: 'ready',
+              locked_by: null,
+              locked_at: null,
+              final_spec_id: null,
+              created_at: '2026-05-03T00:00:00Z',
+              updated_at: '2026-05-03T00:01:00Z',
+              planning_checkpoints: planningCheckpoints,
+            },
+            task_inbox_item: {
+              ...taskInboxItem,
+              id: 'task-inbox-brief',
+              title: 'Fix flaky auth test',
+              objective: 'Verify the existing project brief.',
+              status: 'new',
+            },
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1') && !options) {
+        const created = planInboxCreateBody ?? {};
         return Promise.resolve({
           ok: true,
           json: async () => ({
             id: 'plan-1',
-            raw_plan: 'Automate orchestration',
-            repo_path: '/repo',
-            base_branch: 'main',
-            provider: null,
-            model: null,
-            entry_mode: 'new_project',
-            work_lane: 'project',
+            raw_plan: created.rawPlan ?? 'Automate orchestration',
+            repo_path: created.repoPath ?? '/repo',
+            base_branch: created.baseBranch ?? 'main',
+            provider: created.provider ?? null,
+            model: created.model ?? null,
+            entry_mode: created.entryMode ?? 'new_project',
+            work_lane: created.workLane ?? 'project',
             repo_profile: {},
             automation_mode: 'supervised',
             max_concurrency: 1,
@@ -733,6 +801,37 @@ describe('PlanScreen orchestration board', () => {
       expect(body.entryMode).toBe('existing_project');
       expect(body.workLane).toBe('bugfix');
     });
+  });
+
+  it('creates verification-only Task Inbox briefs for existing-project plans', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Fix flaky auth test' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Plan entry mode' }), { target: { value: 'existing_project' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Existing project lane' }), { target: { value: 'bugfix' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('PM Planning Session')).toBeTruthy();
+    const verifyOnly = screen.getByLabelText('Verify only') as HTMLInputElement;
+    expect(verifyOnly.checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Send Brief to EM' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/brief-task') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.maxVerificationSteps).toBe(5);
+      expect(body.skipAgentStep).toBe(true);
+    });
+  });
+
+  it('shows a compact daemon run result from the last tick summary', async () => {
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('1 inbox · 2 queue')).toBeTruthy();
+    expect(screen.getByText('3 review · 4 blocked · 5 waiting')).toBeTruthy();
   });
 
   it('archives plans from the visible Plan Inbox', async () => {
