@@ -1068,17 +1068,34 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         assert body["state"]["status"] == "active"
         assert body["state"]["last_tick_event_id"] == body["event"]["id"]
         assert body["state"]["last_tick_summary"]["queue_processed_count"] == 1
+        assert body["state"]["last_tick_summary"]["waiting_for_autonomy_count"] == 1
+        assert body["state"]["last_tick_summary"]["run_steps"] is False
         assert body["state"]["health"]["state"] == "healthy"
         assert body["state"]["health"]["next_tick_at"]
         assert body["task_inbox"]["processed"][0]["task_inbox_item"]["id"] == inbox_item["id"]
         assert body["task_inbox"]["processed"][0]["action"] == "queued_for_execution"
-        assert body["execution_queue"]["processed"][0]["executed"] == 1
-        assert body["execution_queue"]["processed"][0]["status"] == "review"
+        assert body["execution_queue"]["processed"][0]["executed"] == 0
+        assert body["execution_queue"]["processed"][0]["waiting_for_autonomy"] is True
+        assert body["execution_queue"]["processed"][0]["status"] == "queued_for_execution"
         task = body["execution_queue"]["processed"][0]["task"]
-        assert task["status"] == "review"
+        assert task["status"] == "queued_for_execution"
         assert [step["type"] for step in task["steps"]] == ["command"]
-        assert task["steps"][0]["status"] == "complete"
-        assert task["steps"][0]["output_summary"] == "tiny-ok"
+        assert task["steps"][0]["status"] == "pending"
+
+        autonomous = await c.patch("/api/orchestration/daemon/state", json={
+            "autonomyMode": "autonomous",
+        })
+        assert autonomous.status_code == 200
+        autonomous_tick = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "daemon-small-project-test",
+            "permissionOverride": "allow_once",
+        })
+        assert autonomous_tick.status_code == 200
+        autonomous_body = autonomous_tick.json()
+        assert autonomous_body["state"]["last_tick_summary"]["run_steps"] is True
+        assert autonomous_body["execution_queue"]["processed"][0]["executed"] == 1
+        assert autonomous_body["execution_queue"]["processed"][0]["status"] == "review"
+        assert autonomous_body["execution_queue"]["processed"][0]["task"]["steps"][0]["output_summary"] == "tiny-ok"
 
         events = await c.get("/api/orchestration/events", params={"limit": 20})
         assert events.status_code == 200
@@ -1108,6 +1125,7 @@ async def test_daemon_loop_once_runs_when_active(tmp_path: Path):
         })
         await c.patch("/api/orchestration/daemon/state", json={
             "status": "active",
+            "autonomyMode": "autonomous",
             "maxInboxItems": 1,
             "maxQueuedTasks": 1,
             "maxStepsPerTask": 3,
