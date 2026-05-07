@@ -149,6 +149,7 @@ class TaskRunQueuedRequest(BaseModel):
     includeInChat: bool = False
     timeoutSeconds: int = Field(default=120, ge=1, le=600)
     permissionOverride: str | None = None
+    runSteps: bool = True
 
 
 class WorktreeCreateRequest(BaseModel):
@@ -2865,6 +2866,22 @@ async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Reques
     queued_tasks = [task for task in store.list_tasks() if task.get("status") == "queued_for_execution"][:body.maxTasks]
     processed: list[dict[str, Any]] = []
     for task in queued_tasks:
+        if not body.runSteps:
+            detailed_task = store.get_task(task["id"]) or task
+            store.append_event(
+                task_id=task["id"],
+                type="execution_queue_task_waiting_for_autonomy",
+                payload={"locked_by": body.lockedBy, "reason": "supervised_mode"},
+            )
+            processed.append({
+                "task": detailed_task,
+                "executed": 0,
+                "status": detailed_task.get("status"),
+                "waiting_for_autonomy": True,
+                "pending_manual": [],
+                "results": [],
+            })
+            continue
         try:
             task = store.update_task(task["id"], {"status": "running"}) or task
             result = await run_ready_steps(
@@ -2908,6 +2925,7 @@ async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Reques
     store.append_event(type="execution_queue_run_finished", payload={
         "locked_by": body.lockedBy,
         "max_tasks": body.maxTasks,
+        "run_steps": body.runSteps,
         "processed_count": len(processed),
         "completed_count": sum(1 for item in processed if item.get("status") == "review"),
         "blocked_count": sum(1 for item in processed if item.get("status") == "blocked"),
@@ -2964,6 +2982,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
     max_inbox_items = state["max_inbox_items"] if body.maxInboxItems is None else body.maxInboxItems
     max_queued_tasks = state["max_queued_tasks"] if body.maxQueuedTasks is None else body.maxQueuedTasks
     max_steps_per_task = state["max_steps_per_task"] if body.maxStepsPerTask is None else body.maxStepsPerTask
+    run_steps = autonomy_mode == "autonomous"
     started_at = _utc_now()
     store.update_daemon_state({"status": "running", "last_tick_started_at": started_at})
     inbox_result = {"processed": []}
@@ -2986,6 +3005,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
                 maxTasks=max_queued_tasks,
                 maxStepsPerTask=max_steps_per_task,
                 permissionOverride=body.permissionOverride,
+                runSteps=run_steps,
             ),
             request,
         )
@@ -2996,6 +3016,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
         "queue_processed_count": len(queue_result.get("processed", [])),
         "process_inbox": process_inbox,
         "run_queue": run_queue,
+        "run_steps": run_steps,
     })
     summary = {
         "skipped": False,
@@ -3004,6 +3025,8 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
         "queue_processed_count": len(queue_result.get("processed", [])),
         "review_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "review"),
         "blocked_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "blocked"),
+        "waiting_for_autonomy_count": sum(1 for item in queue_result.get("processed", []) if item.get("waiting_for_autonomy")),
+        "run_steps": run_steps,
     }
     state = store.update_daemon_state({
         "status": "active" if state["status"] == "active" else state["status"],

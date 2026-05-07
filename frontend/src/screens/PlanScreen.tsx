@@ -3208,6 +3208,7 @@ export function PlanScreen() {
           <span>last tick {daemonState?.last_tick_finished_at ? new Date(daemonState.last_tick_finished_at).toLocaleTimeString() : 'never'}</span>
           <span>next {daemonHealth?.next_tick_at ? new Date(daemonHealth.next_tick_at).toLocaleTimeString() : 'paused'}</span>
           <span>{Number(lastTickSummary.inbox_processed_count ?? 0)} inbox · {Number(lastTickSummary.queue_processed_count ?? 0)} queue</span>
+          <span>{daemonMode === 'autonomous' ? 'executes ready steps' : 'queues only'}</span>
           {daemonIssue && <span style={{ color: daemonHealth?.last_error ? 'var(--red)' : 'var(--yel)' }}>{daemonIssue}</span>}
         </div>
 
