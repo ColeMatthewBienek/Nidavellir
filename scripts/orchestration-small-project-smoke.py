@@ -25,9 +25,7 @@ def run(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
 
 
-def create_git_repo(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    run(["git", "init", "-b", "main"], path)
+def configure_git_repo(path: Path) -> Path:
     run(["git", "config", "user.email", "nidavellir@example.test"], path)
     run(["git", "config", "user.name", "Nidavellir Smoke"], path)
     (path / "README.md").write_text("# smoke\n", encoding="utf-8")
@@ -70,13 +68,13 @@ async def main() -> None:
     with tempfile.TemporaryDirectory(prefix="nidavellir-orchestration-smoke-") as temp:
         root = Path(temp)
         setup_isolated_app(root / "data")
-        target_repo = create_git_repo(root / "small-project")
+        target_repo = root / "small-project"
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             plan_response = await client.post("/api/orchestration/plan-inbox", json={
-                "rawPlan": "Run an autonomous existing-project smoke verification.",
-                "entryMode": "existing_project",
-                "workLane": "chore",
+                "rawPlan": "Create and verify a tiny autonomous new-project smoke.",
+                "entryMode": "new_project",
+                "workLane": "project",
                 "repoPath": str(target_repo),
                 "baseBranch": "main",
                 "provider": "codex",
@@ -89,26 +87,85 @@ async def main() -> None:
             )
             plan = plan_response.json()
 
-            brief_response = await client.post(
-                f"/api/orchestration/plan-inbox/{plan['id']}/brief-task",
+            preview_response = await client.post("/api/orchestration/plan-inbox/repo-target/preview", json={
+                "repoPath": str(target_repo),
+                "entryMode": "new_project",
+                "baseBranch": "main",
+            })
+            require(
+                preview_response.status_code == 200,
+                "repo target preview failed",
+                preview_response.json(),
+            )
+            preview = preview_response.json()
+            require(preview["can_create"] is True, "new project target should be creatable", preview)
+
+            readiness_before_response = await client.get("/api/orchestration/readiness")
+            require(
+                readiness_before_response.status_code == 200,
+                "readiness before setup failed",
+                readiness_before_response.json(),
+            )
+            readiness_before = readiness_before_response.json()
+            require(
+                readiness_before["counts"]["repo_setup_required_count"] == 1,
+                "readiness should flag repo setup before initialization",
+                readiness_before,
+            )
+
+            setup_response = await client.post(
+                f"/api/orchestration/plan-inbox/{plan['id']}/repo-target/setup",
                 json={
-                    "maxVerificationSteps": 1,
-                    "skipAgentStep": True,
+                    "createDirectory": True,
+                    "initializeGit": True,
+                    "baseBranch": "main",
+                    "lockedBy": "orchestration-smoke",
                 },
             )
             require(
-                brief_response.status_code == 200,
-                "existing-project brief failed",
-                brief_response.json(),
+                setup_response.status_code == 200,
+                "new-project repo setup failed",
+                setup_response.json(),
             )
-            brief = brief_response.json()
+            setup = setup_response.json()
+            require(target_repo.exists(), "setup did not create target repo")
+            require((target_repo / ".git").exists(), "setup did not initialize git", setup)
+
+            configure_git_repo(target_repo)
+
+            readiness_after_response = await client.get("/api/orchestration/readiness")
             require(
-                brief["task_inbox_item"]["payload"]["verification_steps"] == [
-                    {"type": "command", "command": "npm run test"}
-                ],
-                "repo inspection did not detect npm test",
-                brief["task_inbox_item"]["payload"],
+                readiness_after_response.status_code == 200,
+                "readiness after setup failed",
+                readiness_after_response.json(),
             )
+            readiness_after = readiness_after_response.json()
+            require(
+                readiness_after["counts"]["repo_setup_required_count"] == 0,
+                "readiness should clear repo setup blocker after initialization",
+                readiness_after,
+            )
+
+            task_inbox_response = await client.post("/api/orchestration/task-inbox", json={
+                "planInboxItemId": plan["id"],
+                "title": "Run tiny verification",
+                "objective": "Execute one deterministic verification command in the new project worktree.",
+                "payload": {
+                    "single_objective": "Run tiny verification",
+                    "base_repo_path": str(target_repo),
+                    "base_branch": "main",
+                    "implementation_cwd": str(target_repo),
+                    "affected_areas": ["README.md"],
+                    "verification_steps": [{"type": "command", "command": "npm run test"}],
+                    "skip_agent_step": True,
+                },
+            })
+            require(
+                task_inbox_response.status_code == 200,
+                "task inbox create failed",
+                task_inbox_response.json(),
+            )
+            task_inbox_item = task_inbox_response.json()
 
             state_response = await client.patch("/api/orchestration/daemon/state", json={
                 "status": "active",
@@ -136,6 +193,11 @@ async def main() -> None:
             require(
                 supervised["execution_queue"]["processed"][0]["waiting_for_autonomy"] is True,
                 "supervised mode should queue without executing",
+                supervised,
+            )
+            require(
+                supervised["task_inbox"]["processed"][0]["task_inbox_item"]["id"] == task_inbox_item["id"],
+                "daemon did not process the expected task inbox item",
                 supervised,
             )
 

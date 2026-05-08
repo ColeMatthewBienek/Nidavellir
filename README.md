@@ -53,7 +53,7 @@ For a focused orchestration pipeline smoke:
 npm run smoke:orchestration
 ```
 
-This creates a disposable git repo and isolated Nidavellir data store, sends an existing-project plan through PM brief creation, runs one supervised daemon tick, then switches to autonomous mode and verifies the queued command reaches review.
+This creates an isolated Nidavellir data store, starts from a missing new-project repo path, previews and sets up the repo, clears readiness blockers, runs one supervised daemon tick, then switches to autonomous mode and verifies the queued command reaches review.
 
 ## Ports
 
