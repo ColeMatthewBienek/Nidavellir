@@ -153,6 +153,11 @@ class TaskRunQueuedRequest(BaseModel):
     runSteps: bool = True
 
 
+class TaskCleanupRequest(BaseModel):
+    statuses: list[str] = Field(default_factory=lambda: ["done", "cancelled"])
+    removeWorktrees: bool = False
+
+
 class WorktreeCreateRequest(BaseModel):
     nodeId: str | None = None
     repoPath: str | None = None
@@ -3024,6 +3029,43 @@ def create_em_review(item_id: str, body: EmReviewCreateRequest, request: Request
 @router.get("/tasks")
 def list_tasks(request: Request) -> list[dict]:
     return _store(request).list_tasks()
+
+
+@router.post("/tasks/cleanup")
+def cleanup_terminal_tasks(body: TaskCleanupRequest, request: Request) -> dict:
+    store = _store(request)
+    statuses = [status for status in body.statuses if status in {"done", "cancelled"}]
+    if not statuses:
+        raise HTTPException(status_code=400, detail="cleanup_statuses_required")
+    archived: list[dict] = []
+    removed_worktrees: list[dict] = []
+    errors: list[dict] = []
+    for task in store.list_tasks():
+        if task.get("status") not in statuses:
+            continue
+        detail = store.get_task(task["id"]) or task
+        if body.removeWorktrees:
+            for worktree in detail.get("worktrees", []):
+                if worktree.get("status") == "removed":
+                    continue
+                try:
+                    remove_git_worktree(repo_path=Path(worktree["repo_path"]), worktree_path=Path(worktree["worktree_path"]))
+                    updated_worktree = store.mark_worktree_removed(worktree["id"])
+                    if updated_worktree:
+                        removed_worktrees.append(updated_worktree)
+                except Exception as err:
+                    errors.append({"task_id": task["id"], "worktree_id": worktree.get("id"), "error": str(err)})
+        archived_task = store.archive_task(task["id"])
+        if archived_task:
+            archived.append(archived_task)
+    event = store.append_event(type="orchestration_tasks_cleanup_finished", payload={
+        "statuses": statuses,
+        "remove_worktrees": body.removeWorktrees,
+        "archived_count": len(archived),
+        "removed_worktree_count": len(removed_worktrees),
+        "error_count": len(errors),
+    })
+    return {"archived": archived, "removed_worktrees": removed_worktrees, "errors": errors, "event": event}
 
 
 @router.post("/tasks")

@@ -399,6 +399,30 @@ async def test_plan_repo_target_setup_creates_and_initializes_new_project_repo(t
 
 
 @pytest.mark.asyncio
+async def test_task_cleanup_archives_terminal_tasks(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        done = (await c.post("/api/orchestration/tasks", json={"title": "Finished", "status": "done"})).json()
+        cancelled = (await c.post("/api/orchestration/tasks", json={"title": "Cancelled", "status": "cancelled"})).json()
+        backlog = (await c.post("/api/orchestration/tasks", json={"title": "Keep working", "status": "backlog"})).json()
+
+        cleanup = await c.post("/api/orchestration/tasks/cleanup", json={
+            "statuses": ["done", "cancelled"],
+            "removeWorktrees": False,
+        })
+        remaining = await c.get("/api/orchestration/tasks")
+
+    assert cleanup.status_code == 200
+    body = cleanup.json()
+    assert {task["id"] for task in body["archived"]} == {done["id"], cancelled["id"]}
+    assert body["removed_worktrees"] == []
+    assert body["errors"] == []
+    assert body["event"]["type"] == "orchestration_tasks_cleanup_finished"
+    assert [task["id"] for task in remaining.json()] == [backlog["id"]]
+
+
+@pytest.mark.asyncio
 async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     agent = PlannerPmFakeAgent()
