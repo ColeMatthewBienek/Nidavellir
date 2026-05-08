@@ -3046,6 +3046,30 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_archive_failed'));
   };
 
+  const cleanupTerminalTasks = () => {
+    if (typeof window !== 'undefined' && !window.confirm('Archive all done and cancelled tasks?')) return;
+    fetch(`${API}/api/orchestration/tasks/cleanup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ statuses: ['done', 'cancelled'], removeWorktrees: false }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_cleanup_${response.status}`);
+        return response.json() as Promise<{ archived: OrchestrationTaskSummary[] }>;
+      })
+      .then((result) => {
+        const archivedIds = new Set(result.archived.map((task) => task.id));
+        setTasks((current) => current.filter((task) => !archivedIds.has(task.id)));
+        if (selectedTask && archivedIds.has(selectedTask.id)) {
+          setSelectedTask(null);
+          setSelectedNodeId(null);
+          setEvents([]);
+        }
+        loadDaemonEvents();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_cleanup_failed'));
+  };
+
   const addNode = (values: {
     title: string;
     description: string;
@@ -3522,6 +3546,7 @@ export function PlanScreen() {
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
   const queuedCount = tasks.filter((task) => task.status === 'queued_for_execution').length;
+  const cleanupCount = tasks.filter((task) => task.status === 'done' || task.status === 'cancelled').length;
   const newInboxCount = taskInboxItems.filter((item) => item.status === 'new').length;
   const daemonPaused = daemonState?.status !== 'active';
   const lastTickSummary = daemonState?.last_tick_summary ?? {};
@@ -3561,6 +3586,9 @@ export function PlanScreen() {
           </Btn>
           <Btn small onClick={runDaemonTick} disabled={loading || daemonPaused || (queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
           <Btn small onClick={runExecutionQueue} disabled={loading || queuedCount === 0}>Run Queue</Btn>
+          <Btn small onClick={cleanupTerminalTasks} disabled={loading || cleanupCount === 0} title="Archive done and cancelled tasks">
+            Clean Done
+          </Btn>
           {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
         </TopBar>

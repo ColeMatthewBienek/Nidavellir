@@ -802,6 +802,17 @@ describe('PlanScreen orchestration board', () => {
           json: async () => ({ ...detail, id: 'task-new', title: 'New task', nodes: [], steps: [], edges: [] }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/tasks/cleanup') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            archived: [{ ...cancelledTask, archived: 1, deleted_at: '2026-05-03T00:00:00Z' }],
+            removed_worktrees: [],
+            errors: [],
+            event: { id: 'cleanup-event', type: 'orchestration_tasks_cleanup_finished', payload: {}, created_at: '2026-05-03T00:00:00Z' },
+          }),
+        });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1/events')) {
         return Promise.resolve({
           ok: true,
@@ -1317,6 +1328,25 @@ describe('PlanScreen orchestration board', () => {
         String(url).includes('/api/orchestration/tasks/task-cancelled/archive') && options?.method === 'POST'
       );
       expect(calls.length).toBe(1);
+      expect(screen.queryByText('Cancelled clutter')).toBeNull();
+    });
+  });
+
+  it('bulk cleans done and cancelled tasks from the board', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Cancelled clutter')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Clean Done' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/tasks/cleanup') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.statuses).toEqual(['done', 'cancelled']);
+      expect(body.removeWorktrees).toBe(false);
       expect(screen.queryByText('Cancelled clutter')).toBeNull();
     });
   });
