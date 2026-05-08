@@ -406,6 +406,21 @@ interface PlanRepoInspectResult {
   repo_profile: Record<string, unknown>;
 }
 
+interface PlanRepoTargetPreview {
+  status: 'ready' | 'watch' | 'blocked';
+  reason: string;
+  repo_path: string;
+  parent_path: string;
+  entry_mode: string;
+  base_branch: string;
+  exists: boolean;
+  is_directory?: boolean | null;
+  can_use: boolean;
+  can_create: boolean;
+  requires_setup: boolean;
+  detail?: string;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -705,6 +720,7 @@ function PlanInboxPanel({
   onOpenPm,
   onCreate,
   onArchive,
+  onPreviewRepoTarget,
   loading,
 }: {
   items: PlanInboxItem[];
@@ -715,6 +731,7 @@ function PlanInboxPanel({
   onOpenPm: (itemId: string) => void;
   onCreate: (values: { rawPlan: string; repoPath: string; baseBranch: string; acceptanceCriteria: string; provider: string; model: string; entryMode: string; workLane: string }) => void;
   onArchive: (item: PlanInboxItem) => void;
+  onPreviewRepoTarget: (values: { repoPath: string; entryMode: string; baseBranch: string }) => Promise<PlanRepoTargetPreview | null>;
   loading: boolean;
 }) {
   const [rawPlan, setRawPlan] = useState('');
@@ -723,12 +740,23 @@ function PlanInboxPanel({
   const [repoPath, setRepoPath] = useState('');
   const [baseBranch, setBaseBranch] = useState('main');
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
+  const [repoPreview, setRepoPreview] = useState<PlanRepoTargetPreview | null>(null);
+  const [previewingRepo, setPreviewingRepo] = useState(false);
   const disabled = !rawPlan.trim() || loading;
   const repoPickerAvailable = Boolean(window.nidavellir?.pickDirectory);
 
   const pickRepoPath = async () => {
     const picked = await window.nidavellir?.pickDirectory?.();
     if (picked) setRepoPath(picked);
+    if (picked) setRepoPreview(null);
+  };
+
+  const checkRepoTarget = async () => {
+    if (!repoPath.trim()) return;
+    setPreviewingRepo(true);
+    const result = await onPreviewRepoTarget({ repoPath: repoPath.trim(), entryMode, baseBranch: baseBranch.trim() || 'main' });
+    setRepoPreview(result);
+    setPreviewingRepo(false);
   };
 
   return (
@@ -758,6 +786,7 @@ function PlanInboxPanel({
             value={entryMode}
             onChange={(event) => {
               setEntryMode(event.target.value);
+              setRepoPreview(null);
               if (event.target.value === 'new_project') setWorkLane('project');
               else if (workLane === 'project') setWorkLane('feature');
             }}
@@ -786,8 +815,11 @@ function PlanInboxPanel({
             <input
               aria-label="Plan repo path"
               value={repoPath}
-              onChange={(event) => setRepoPath(event.target.value)}
-              placeholder="Repo path"
+              onChange={(event) => {
+                setRepoPath(event.target.value);
+                setRepoPreview(null);
+              }}
+              placeholder={entryMode === 'new_project' ? 'New project path' : 'Existing repo path'}
               style={{ minWidth: 0, width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
             />
             <Btn
@@ -799,10 +831,37 @@ function PlanInboxPanel({
               Browse
             </Btn>
           </div>
+          <Btn
+            small
+            disabled={!repoPath.trim() || previewingRepo}
+            onClick={checkRepoTarget}
+          >
+            {previewingRepo ? 'Checking...' : 'Check target'}
+          </Btn>
+          {repoPreview && (
+            <div style={{
+              border: `1px solid ${repoPreview.status === 'ready' ? '#3fb95066' : repoPreview.status === 'watch' ? '#d2992266' : '#f8514966'}`,
+              borderRadius: 6,
+              background: repoPreview.status === 'ready' ? '#23863614' : repoPreview.status === 'watch' ? '#d2992214' : '#f8514911',
+              color: 'var(--t1)',
+              padding: '7px 8px',
+              fontSize: 11,
+              lineHeight: 1.35,
+            }}>
+              <strong style={{ color: repoPreview.status === 'ready' ? 'var(--grn)' : repoPreview.status === 'watch' ? 'var(--yel)' : 'var(--red)' }}>
+                {repoPreview.status.toUpperCase()}
+              </strong>
+              {' '}· {repoPreview.reason.replace(/_/g, ' ')}
+              <div style={{ marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repoPreview.repo_path}</div>
+            </div>
+          )}
           <input
             aria-label="Plan base branch"
             value={baseBranch}
-            onChange={(event) => setBaseBranch(event.target.value)}
+            onChange={(event) => {
+              setBaseBranch(event.target.value);
+              setRepoPreview(null);
+            }}
             placeholder="Base branch"
             style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)', color: 'var(--t0)', padding: 7, fontSize: 12 }}
           />
@@ -2597,6 +2656,26 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_create_failed'));
   };
 
+  const previewRepoTarget = (values: { repoPath: string; entryMode: string; baseBranch: string }) => {
+    return fetch(`${API}/api/orchestration/plan-inbox/repo-target/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        repoPath: values.repoPath,
+        entryMode: values.entryMode,
+        baseBranch: values.baseBranch || null,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`repo_target_preview_${response.status}`);
+        return response.json() as Promise<PlanRepoTargetPreview>;
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'repo_target_preview_failed');
+        return null;
+      });
+  };
+
   const archivePlanInboxItem = (item: PlanInboxItem) => {
     fetch(`${API}/api/orchestration/plan-inbox/${item.id}/archive`, { method: 'POST' })
       .then(async (response) => {
@@ -3471,6 +3550,7 @@ export function PlanScreen() {
               onOpenPm={openPlannerModal}
               onCreate={createPlanInboxItem}
               onArchive={archivePlanInboxItem}
+              onPreviewRepoTarget={previewRepoTarget}
               loading={loading}
             />
             <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} onProcess={processTaskInbox} />
