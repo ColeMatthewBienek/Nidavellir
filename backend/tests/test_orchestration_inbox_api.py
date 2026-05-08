@@ -1129,6 +1129,7 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         events = await c.get("/api/orchestration/events", params={"limit": 20})
         assert events.status_code == 200
         event_types = [event["type"] for event in events.json()]
+        assert "orchestration_daemon_state_updated" in event_types
         assert "orchestration_daemon_tick_finished" in event_types
         assert "task_inbox_process_finished" in event_types
         assert "execution_queue_run_finished" in event_types

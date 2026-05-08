@@ -331,6 +331,7 @@ class OrchestrationDaemonTickRequest(BaseModel):
 
 
 class OrchestrationDaemonStateUpdateRequest(BaseModel):
+    lockedBy: str | None = Field(default=None, min_length=1)
     status: str | None = None
     autonomyMode: str | None = None
     intervalSeconds: int | None = Field(default=None, ge=5, le=3600)
@@ -2994,6 +2995,8 @@ def get_orchestration_daemon_state(request: Request) -> dict:
 
 @router.patch("/daemon/state")
 def update_orchestration_daemon_state(body: OrchestrationDaemonStateUpdateRequest, request: Request) -> dict:
+    store = _store(request)
+    previous = store.get_daemon_state()
     updates = {
         "status": body.status,
         "autonomy_mode": body.autonomyMode,
@@ -3005,7 +3008,34 @@ def update_orchestration_daemon_state(body: OrchestrationDaemonStateUpdateReques
         "run_queue": body.runQueue,
     }
     try:
-        return _store(request).update_daemon_state({key: value for key, value in updates.items() if value is not None})
+        applied = {key: value for key, value in updates.items() if value is not None}
+        updated = store.update_daemon_state(applied)
+        if applied:
+            store.append_event(type="orchestration_daemon_state_updated", payload={
+                "locked_by": body.lockedBy or "unknown",
+                "updates": applied,
+                "previous": {
+                    "status": previous.get("status"),
+                    "autonomy_mode": previous.get("autonomy_mode"),
+                    "interval_seconds": previous.get("interval_seconds"),
+                    "max_inbox_items": previous.get("max_inbox_items"),
+                    "max_queued_tasks": previous.get("max_queued_tasks"),
+                    "max_steps_per_task": previous.get("max_steps_per_task"),
+                    "process_inbox": previous.get("process_inbox"),
+                    "run_queue": previous.get("run_queue"),
+                },
+                "current": {
+                    "status": updated.get("status"),
+                    "autonomy_mode": updated.get("autonomy_mode"),
+                    "interval_seconds": updated.get("interval_seconds"),
+                    "max_inbox_items": updated.get("max_inbox_items"),
+                    "max_queued_tasks": updated.get("max_queued_tasks"),
+                    "max_steps_per_task": updated.get("max_steps_per_task"),
+                    "process_inbox": updated.get("process_inbox"),
+                    "run_queue": updated.get("run_queue"),
+                },
+            })
+        return updated
     except Exception as err:
         _handle_store_error(err)
         raise

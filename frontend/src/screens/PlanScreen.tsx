@@ -3223,7 +3223,7 @@ export function PlanScreen() {
     fetch(`${API}/api/orchestration/daemon/state`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates),
+      body: JSON.stringify({ lockedBy: 'plan-screen-daemon-controls', ...updates }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_daemon_state_${response.status}`);
