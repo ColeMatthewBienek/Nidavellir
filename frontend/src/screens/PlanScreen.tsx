@@ -446,6 +446,64 @@ function OrchestrationEventRow({ event }: { event: OrchestrationEvent }) {
   );
 }
 
+function ReadinessRow({ label, value, tone }: { label: string; value: string; tone: 'ready' | 'watch' | 'blocked' }) {
+  const color = tone === 'ready' ? 'var(--grn)' : tone === 'watch' ? 'var(--yel)' : 'var(--red)';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, minWidth: 0 }}>
+      <span style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ color, fontSize: 11, fontWeight: 800, textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '60%' }}>{value}</span>
+    </div>
+  );
+}
+
+function OrchestrationReadinessPanel({
+  daemonPaused,
+  daemonState,
+  daemonHealthState,
+  daemonIssue,
+  daemonMode,
+  newInboxCount,
+  queuedCount,
+  selectedTask,
+}: {
+  daemonPaused: boolean;
+  daemonState?: string | null;
+  daemonHealthState?: string | null;
+  daemonIssue?: string | null;
+  daemonMode: 'supervised' | 'autonomous';
+  newInboxCount: number;
+  queuedCount: number;
+  selectedTask?: OrchestrationTaskDetail | null;
+}) {
+  const selectedWorktrees = selectedTask?.worktrees?.filter((worktree) => worktree.status !== 'removed') ?? [];
+  const runnableCount = selectedTask?.readiness?.runnable?.length ?? 0;
+  const blockedCount = selectedTask?.readiness?.blocked?.length ?? 0;
+  const daemonTone = daemonHealthState === 'error' ? 'blocked' : daemonPaused ? 'watch' : 'ready';
+  const queueTone = queuedCount > 0 && daemonMode === 'supervised' ? 'watch' : 'ready';
+  const worktreeTone = !selectedTask ? 'watch' : selectedWorktrees.length > 0 ? 'ready' : 'watch';
+  const runnableTone = blockedCount > 0 ? 'blocked' : runnableCount > 0 ? 'ready' : 'watch';
+
+  return (
+    <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 260, width: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ borderBottom: '1px solid var(--bd)', padding: '9px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <span style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750 }}>Orchestration Readiness</span>
+        <span style={{ color: daemonTone === 'ready' ? 'var(--grn)' : daemonTone === 'watch' ? 'var(--yel)' : 'var(--red)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
+          {daemonTone === 'ready' ? 'Ready' : daemonTone === 'watch' ? 'Watch' : 'Blocked'}
+        </span>
+      </div>
+      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <ReadinessRow label="Daemon" value={daemonPaused ? `Paused${daemonState ? ` · ${daemonState}` : ''}` : 'Daemon active'} tone={daemonTone} />
+        <ReadinessRow label="Mode" value={daemonMode === 'autonomous' ? 'Autonomous armed' : 'Supervised queueing'} tone={daemonMode === 'autonomous' ? 'watch' : 'ready'} />
+        <ReadinessRow label="Inbox" value={`${newInboxCount} new inbox`} tone={newInboxCount > 0 ? 'watch' : 'ready'} />
+        <ReadinessRow label="Queue" value={`${queuedCount} queued tasks`} tone={queueTone} />
+        <ReadinessRow label="Selected worktree" value={!selectedTask ? 'No task selected' : selectedWorktrees.length > 0 ? `${selectedWorktrees.length} available` : 'No selected worktree'} tone={worktreeTone} />
+        <ReadinessRow label="Selected readiness" value={blockedCount > 0 ? `${blockedCount} blocked` : `${runnableCount} runnable`} tone={runnableTone} />
+        {daemonIssue && <ReadinessRow label="Daemon issue" value={daemonIssue} tone="blocked" />}
+      </div>
+    </section>
+  );
+}
+
 function preferredPlannerModel(models: AgentModelDef[]) {
   const available = models.filter((model) => model.available);
   return available.find((model) => model.provider_id === 'claude')
@@ -3373,6 +3431,16 @@ export function PlanScreen() {
             />
             <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} onProcess={processTaskInbox} />
           </div>
+          <OrchestrationReadinessPanel
+            daemonPaused={daemonPaused}
+            daemonState={daemonState?.status}
+            daemonHealthState={daemonHealth?.state}
+            daemonIssue={daemonIssue}
+            daemonMode={daemonMode}
+            newInboxCount={newInboxCount}
+            queuedCount={queuedCount}
+            selectedTask={selectedTask}
+          />
         </div>
 
         {plannerModalOpen && (

@@ -968,6 +968,18 @@ describe('PlanScreen orchestration board', () => {
     expect(screen.getByText('last result: Run tiny verification · review · 1 ran · tiny-ok')).toBeTruthy();
   });
 
+  it('shows orchestration readiness from daemon, inbox, queue, and selected task state', async () => {
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Orchestration Readiness')).toBeTruthy();
+    expect(screen.getByText('Daemon active')).toBeTruthy();
+    expect(screen.getByText('Supervised queueing')).toBeTruthy();
+    expect(screen.getByText('1 new inbox')).toBeTruthy();
+    expect(screen.getByText('0 queued tasks')).toBeTruthy();
+    expect(screen.getByText('No selected worktree')).toBeTruthy();
+    expect(screen.getByText('1 runnable')).toBeTruthy();
+  });
+
   it('renders readable daemon event summaries', async () => {
     render(<PlanScreen />);
 
