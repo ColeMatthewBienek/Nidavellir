@@ -3237,6 +3237,17 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const changeDaemonMode = (nextMode: 'supervised' | 'autonomous') => {
+    if (nextMode === daemonMode) return;
+    if (nextMode === 'autonomous') {
+      const accepted = window.confirm(
+        'Switch daemon to autonomous mode? Queued tasks may execute ready command steps on the next daemon tick.'
+      );
+      if (!accepted) return;
+    }
+    updateDaemonState({ autonomyMode: nextMode });
+  };
+
   const runningCount = tasks.filter((task) => task.status === 'running').length;
   const readyCount = tasks.filter((task) => task.status === 'ready').length;
   const queuedCount = tasks.filter((task) => task.status === 'queued_for_execution').length;
@@ -3268,7 +3279,7 @@ export function PlanScreen() {
           <select
             aria-label="Daemon mode"
             value={daemonMode}
-            onChange={(event) => updateDaemonState({ autonomyMode: event.target.value as 'supervised' | 'autonomous' })}
+            onChange={(event) => changeDaemonMode(event.target.value as 'supervised' | 'autonomous')}
             style={{ height: 28, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 12, padding: '0 8px' }}
           >
             <option value="supervised">Supervised</option>
