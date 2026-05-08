@@ -260,6 +260,29 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/readiness') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: 'watch',
+            generated_at: '2026-05-03T00:01:02Z',
+            checks: [
+              { key: 'command_runner', label: 'Command runner', status: 'ready', value: 'Available', detail: 'execution commands can be dispatched' },
+              { key: 'git_worktree', label: 'Git worktree', status: 'ready', value: 'Available', detail: 'worktree command is available' },
+              { key: 'queue_pressure', label: 'Queue pressure', status: 'watch', value: '1 inbox · 0 queued', detail: '0 running · 0 blocked' },
+            ],
+            counts: {
+              plan_inbox_count: 0,
+              task_count: 1,
+              new_task_inbox_count: 1,
+              queued_task_count: 0,
+              running_task_count: 0,
+              blocked_task_count: 0,
+              active_worktree_count: 0,
+            },
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/daemon/state') && options?.method === 'PATCH') {
         const body = JSON.parse(String(options.body));
         return Promise.resolve({
@@ -972,6 +995,9 @@ describe('PlanScreen orchestration board', () => {
     render(<PlanScreen />);
 
     expect(await screen.findByText('Orchestration Readiness')).toBeTruthy();
+    expect(screen.getByText('Command runner')).toBeTruthy();
+    expect(screen.getByText('Git worktree')).toBeTruthy();
+    expect(screen.getAllByText('Available').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Daemon active')).toBeTruthy();
     expect(screen.getByText('Supervised queueing')).toBeTruthy();
     expect(screen.getByText('1 new inbox')).toBeTruthy();
