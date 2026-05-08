@@ -390,6 +390,33 @@ function priorityLabel(priority?: number | null) {
   return `P${priority}`;
 }
 
+function orchestrationEventSummary(event: OrchestrationEvent): string | null {
+  const payload = event.payload ?? {};
+  if (event.type === 'orchestration_daemon_state_updated') {
+    const updates = payload.updates && typeof payload.updates === 'object' && !Array.isArray(payload.updates)
+      ? payload.updates as Record<string, unknown>
+      : {};
+    const current = payload.current && typeof payload.current === 'object' && !Array.isArray(payload.current)
+      ? payload.current as Record<string, unknown>
+      : {};
+    const mode = typeof current.autonomy_mode === 'string' ? current.autonomy_mode : updates.autonomy_mode;
+    const status = typeof current.status === 'string' ? current.status : updates.status;
+    const actor = typeof payload.locked_by === 'string' ? payload.locked_by : 'unknown';
+    const changed = Object.keys(updates).map((key) => key.replace(/_/g, ' ')).join(', ');
+    return `${actor}${changed ? ` changed ${changed}` : ' changed daemon state'}${mode ? ` · ${mode}` : ''}${status ? ` · ${status}` : ''}`;
+  }
+  if (event.type === 'orchestration_daemon_tick_finished') {
+    const inbox = Number(payload.inbox_processed_count ?? 0);
+    const queue = Number(payload.queue_processed_count ?? 0);
+    const runSteps = Boolean(payload.run_steps);
+    return `${inbox} inbox · ${queue} queue · ${runSteps ? 'autonomous' : 'supervised'}`;
+  }
+  if (event.type === 'execution_queue_run_finished') {
+    return `${Number(payload.processed_count ?? 0)} processed · ${Number(payload.completed_count ?? 0)} review · ${Number(payload.blocked_count ?? 0)} blocked`;
+  }
+  return null;
+}
+
 function StatusPill({ status }: { status: string }) {
   return (
     <span style={{
@@ -405,6 +432,17 @@ function StatusPill({ status }: { status: string }) {
     }}>
       {status.replace(/_/g, ' ')}
     </span>
+  );
+}
+
+function OrchestrationEventRow({ event }: { event: OrchestrationEvent }) {
+  const summary = orchestrationEventSummary(event);
+  return (
+    <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
+      <span style={{ color: 'var(--t0)', fontFamily: 'var(--mono)' }}>{event.type}</span>
+      {' '}· {new Date(event.created_at).toLocaleTimeString()}
+      {summary && <div style={{ marginTop: 2 }}>{summary}</div>}
+    </div>
   );
 }
 
@@ -1727,10 +1765,7 @@ function TaskDetail({
           <SectionTitle>Recent Events</SectionTitle>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 9 }}>
             {events.slice(0, 8).map((event) => (
-              <div key={event.id} style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
-                <span style={{ color: 'var(--t0)', fontFamily: 'var(--mono)' }}>{event.type}</span>
-                {' '}· {new Date(event.created_at).toLocaleTimeString()}
-              </div>
+              <OrchestrationEventRow key={event.id} event={event} />
             ))}
             {events.length === 0 && <div style={{ color: 'var(--t1)', fontSize: 12 }}>No events yet.</div>}
           </div>
@@ -1740,10 +1775,7 @@ function TaskDetail({
           <SectionTitle>Daemon Events</SectionTitle>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 9 }}>
             {daemonEvents.slice(0, 8).map((event) => (
-              <div key={event.id} style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
-                <span style={{ color: 'var(--t0)', fontFamily: 'var(--mono)' }}>{event.type}</span>
-                {' '}· {new Date(event.created_at).toLocaleTimeString()}
-              </div>
+              <OrchestrationEventRow key={event.id} event={event} />
             ))}
             {daemonEvents.length === 0 && <div style={{ color: 'var(--t1)', fontSize: 12 }}>No daemon events yet.</div>}
           </div>

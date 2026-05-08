@@ -710,6 +710,33 @@ describe('PlanScreen orchestration board', () => {
           json: async () => [{ id: 'event-1', type: 'task_created', payload: {}, created_at: '2026-05-02T00:00:00Z' }],
         });
       }
+      if (String(url).includes('/api/orchestration/events')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              id: 'daemon-event-1',
+              type: 'orchestration_daemon_state_updated',
+              payload: {
+                locked_by: 'plan-screen-daemon-controls',
+                updates: { autonomy_mode: 'autonomous' },
+                current: { autonomy_mode: 'autonomous', status: 'active' },
+              },
+              created_at: '2026-05-03T00:02:00Z',
+            },
+            {
+              id: 'daemon-event-2',
+              type: 'orchestration_daemon_tick_finished',
+              payload: {
+                inbox_processed_count: 1,
+                queue_processed_count: 2,
+                run_steps: true,
+              },
+              created_at: '2026-05-03T00:01:00Z',
+            },
+          ],
+        });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1') && options?.method === 'PATCH') {
         return Promise.resolve({ ok: true, json: async () => ({ ...detail, status: 'ready' }) });
       }
@@ -939,6 +966,13 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('1 inbox · 2 queue')).toBeTruthy();
     expect(screen.getByText('3 review · 4 blocked · 5 waiting')).toBeTruthy();
     expect(screen.getByText('last result: Run tiny verification · review · 1 ran · tiny-ok')).toBeTruthy();
+  });
+
+  it('renders readable daemon event summaries', async () => {
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('plan-screen-daemon-controls changed autonomy mode · autonomous · active')).toBeTruthy();
+    expect(screen.getByText('1 inbox · 2 queue · autonomous')).toBeTruthy();
   });
 
   it('requires confirmation before switching the daemon to autonomous mode', async () => {
