@@ -216,6 +216,8 @@ interface OrchestrationReadinessReport {
     running_task_count: number;
     blocked_task_count: number;
     active_worktree_count: number;
+    repo_target_missing_count?: number;
+    repo_setup_required_count?: number;
   };
 }
 
@@ -531,7 +533,7 @@ function OrchestrationReadinessPanel({
   const runnableTone = blockedCount > 0 ? 'blocked' : runnableCount > 0 ? 'ready' : 'watch';
   const panelTone = report?.status ?? daemonTone;
   const reportChecks = Array.isArray(report?.checks) ? report.checks : [];
-  const environmentChecks = reportChecks.filter((check) => ['command_runner', 'git_worktree', 'queue_pressure'].includes(check.key));
+  const environmentChecks = reportChecks.filter((check) => ['command_runner', 'git_worktree', 'repo_setup', 'queue_pressure'].includes(check.key));
 
   return (
     <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 260, width: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

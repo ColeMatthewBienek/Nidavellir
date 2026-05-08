@@ -296,6 +296,13 @@ async def test_orchestration_readiness_reports_environment_and_counts(tmp_path: 
     setup_app(tmp_path)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new project.",
+            "repoPath": str(tmp_path / "uninitialized-project"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "workLane": "project",
+        })
         await c.post("/api/orchestration/task-inbox", json={
             "title": "Prepare autonomous execution smoke",
             "objective": "Verify readiness reports queue pressure before daemon execution.",
@@ -310,9 +317,13 @@ async def test_orchestration_readiness_reports_environment_and_counts(tmp_path: 
     assert body["status"] in {"ready", "watch", "blocked"}
     assert body["counts"]["new_task_inbox_count"] == 1
     assert body["counts"]["queued_task_count"] == 0
+    assert body["counts"]["repo_setup_required_count"] == 1
+    assert body["counts"]["repo_target_missing_count"] == 0
     checks = {check["key"]: check for check in body["checks"]}
     assert checks["command_store"]["status"] == "ready"
     assert checks["command_runner"]["status"] == "ready"
+    assert checks["repo_setup"]["status"] == "watch"
+    assert checks["repo_setup"]["value"] == "1 setup · 0 missing"
     assert checks["queue_pressure"]["value"] == "1 inbox · 0 queued"
     assert checks["git"]["status"] in {"ready", "blocked"}
     assert checks["git_worktree"]["status"] in {"ready", "blocked"}

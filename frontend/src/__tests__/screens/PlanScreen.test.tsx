@@ -288,6 +288,7 @@ describe('PlanScreen orchestration board', () => {
             checks: [
               { key: 'command_runner', label: 'Command runner', status: 'ready', value: 'Available', detail: 'execution commands can be dispatched' },
               { key: 'git_worktree', label: 'Git worktree', status: 'ready', value: 'Available', detail: 'worktree command is available' },
+              { key: 'repo_setup', label: 'Repo setup', status: 'watch', value: '1 setup · 0 missing', detail: 'new-project plans must have an initialized repo before autonomous execution' },
               { key: 'queue_pressure', label: 'Queue pressure', status: 'watch', value: '1 inbox · 0 queued', detail: '0 running · 0 blocked' },
             ],
             counts: {
@@ -298,6 +299,8 @@ describe('PlanScreen orchestration board', () => {
               running_task_count: 0,
               blocked_task_count: 0,
               active_worktree_count: 0,
+              repo_target_missing_count: 0,
+              repo_setup_required_count: 1,
             },
           }),
         });
@@ -1114,6 +1117,8 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('Orchestration Readiness')).toBeTruthy();
     expect(screen.getByText('Command runner')).toBeTruthy();
     expect(screen.getByText('Git worktree')).toBeTruthy();
+    expect(screen.getByText('Repo setup')).toBeTruthy();
+    expect(screen.getByText('1 setup · 0 missing')).toBeTruthy();
     expect(screen.getAllByText('Available').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Daemon active')).toBeTruthy();
     expect(screen.getByText('Supervised queueing')).toBeTruthy();
