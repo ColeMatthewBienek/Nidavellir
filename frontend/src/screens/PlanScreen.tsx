@@ -196,6 +196,29 @@ interface OrchestrationDaemonState {
   updated_at: string;
 }
 
+interface OrchestrationReadinessCheck {
+  key: string;
+  label: string;
+  status: 'ready' | 'watch' | 'blocked';
+  value: string;
+  detail?: string;
+}
+
+interface OrchestrationReadinessReport {
+  status: 'ready' | 'watch' | 'blocked';
+  generated_at: string;
+  checks: OrchestrationReadinessCheck[];
+  counts: {
+    plan_inbox_count: number;
+    task_count: number;
+    new_task_inbox_count: number;
+    queued_task_count: number;
+    running_task_count: number;
+    blocked_task_count: number;
+    active_worktree_count: number;
+  };
+}
+
 interface PlanInboxItem {
   id: string;
   raw_plan: string;
@@ -457,6 +480,7 @@ function ReadinessRow({ label, value, tone }: { label: string; value: string; to
 }
 
 function OrchestrationReadinessPanel({
+  report,
   daemonPaused,
   daemonState,
   daemonHealthState,
@@ -466,6 +490,7 @@ function OrchestrationReadinessPanel({
   queuedCount,
   selectedTask,
 }: {
+  report?: OrchestrationReadinessReport | null;
   daemonPaused: boolean;
   daemonState?: string | null;
   daemonHealthState?: string | null;
@@ -482,16 +507,22 @@ function OrchestrationReadinessPanel({
   const queueTone = queuedCount > 0 && daemonMode === 'supervised' ? 'watch' : 'ready';
   const worktreeTone = !selectedTask ? 'watch' : selectedWorktrees.length > 0 ? 'ready' : 'watch';
   const runnableTone = blockedCount > 0 ? 'blocked' : runnableCount > 0 ? 'ready' : 'watch';
+  const panelTone = report?.status ?? daemonTone;
+  const reportChecks = Array.isArray(report?.checks) ? report.checks : [];
+  const environmentChecks = reportChecks.filter((check) => ['command_runner', 'git_worktree', 'queue_pressure'].includes(check.key));
 
   return (
     <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 260, width: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ borderBottom: '1px solid var(--bd)', padding: '9px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
         <span style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750 }}>Orchestration Readiness</span>
-        <span style={{ color: daemonTone === 'ready' ? 'var(--grn)' : daemonTone === 'watch' ? 'var(--yel)' : 'var(--red)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
-          {daemonTone === 'ready' ? 'Ready' : daemonTone === 'watch' ? 'Watch' : 'Blocked'}
+        <span style={{ color: panelTone === 'ready' ? 'var(--grn)' : panelTone === 'watch' ? 'var(--yel)' : 'var(--red)', fontSize: 10, fontWeight: 800, textTransform: 'uppercase' }}>
+          {panelTone === 'ready' ? 'Ready' : panelTone === 'watch' ? 'Watch' : 'Blocked'}
         </span>
       </div>
       <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {environmentChecks.map((check) => (
+          <ReadinessRow key={check.key} label={check.label} value={check.value} tone={check.status} />
+        ))}
         <ReadinessRow label="Daemon" value={daemonPaused ? `Paused${daemonState ? ` · ${daemonState}` : ''}` : 'Daemon active'} tone={daemonTone} />
         <ReadinessRow label="Mode" value={daemonMode === 'autonomous' ? 'Autonomous armed' : 'Supervised queueing'} tone={daemonMode === 'autonomous' ? 'watch' : 'ready'} />
         <ReadinessRow label="Inbox" value={`${newInboxCount} new inbox`} tone={newInboxCount > 0 ? 'watch' : 'ready'} />
@@ -2351,6 +2382,7 @@ export function PlanScreen() {
   const [daemonEvents, setDaemonEvents] = useState<OrchestrationEvent[]>([]);
   const [daemonMode, setDaemonMode] = useState<'supervised' | 'autonomous'>('supervised');
   const [daemonState, setDaemonState] = useState<OrchestrationDaemonState | null>(null);
+  const [readinessReport, setReadinessReport] = useState<OrchestrationReadinessReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -2454,11 +2486,23 @@ export function PlanScreen() {
       .catch(() => undefined);
   };
 
+  const loadReadinessReport = () => {
+    if (typeof fetch !== 'function') return;
+    fetch(`${API}/api/orchestration/readiness`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_readiness_${response.status}`);
+        return response.json() as Promise<OrchestrationReadinessReport>;
+      })
+      .then(setReadinessReport)
+      .catch(() => undefined);
+  };
+
   const reloadAll = () => {
     loadInboxes();
     loadTasks();
     loadDaemonEvents();
     loadDaemonState();
+    loadReadinessReport();
   };
 
   const loadPlanInboxDetail = (itemId: string) => {
@@ -3432,6 +3476,7 @@ export function PlanScreen() {
             <TaskInboxPanel items={taskInboxItems} onMaterialize={materializeTaskInboxItem} onProcess={processTaskInbox} />
           </div>
           <OrchestrationReadinessPanel
+            report={readinessReport}
             daemonPaused={daemonPaused}
             daemonState={daemonState?.status}
             daemonHealthState={daemonHealth?.state}

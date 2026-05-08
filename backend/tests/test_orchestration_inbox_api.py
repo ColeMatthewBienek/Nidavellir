@@ -292,6 +292,33 @@ async def test_plan_inbox_spec_and_readiness_report_flow(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_orchestration_readiness_reports_environment_and_counts(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await c.post("/api/orchestration/task-inbox", json={
+            "title": "Prepare autonomous execution smoke",
+            "objective": "Verify readiness reports queue pressure before daemon execution.",
+            "payload": {"implementation_cwd": str(tmp_path)},
+            "status": "new",
+        })
+
+        response = await c.get("/api/orchestration/readiness")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] in {"ready", "watch", "blocked"}
+    assert body["counts"]["new_task_inbox_count"] == 1
+    assert body["counts"]["queued_task_count"] == 0
+    checks = {check["key"]: check for check in body["checks"]}
+    assert checks["command_store"]["status"] == "ready"
+    assert checks["command_runner"]["status"] == "ready"
+    assert checks["queue_pressure"]["value"] == "1 inbox · 0 queued"
+    assert checks["git"]["status"] in {"ready", "blocked"}
+    assert checks["git_worktree"]["status"] in {"ready", "blocked"}
+
+
+@pytest.mark.asyncio
 async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     agent = PlannerPmFakeAgent()

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import tomllib
 import uuid
 from datetime import UTC, datetime
@@ -362,6 +363,55 @@ def _command_runner(request: Request) -> CommandRunner:
         runner = CommandRunner()
         request.app.state.command_runner = runner
     return runner
+
+
+def _readiness_check(key: str, label: str, status: str, value: str, detail: str = "") -> dict:
+    return {"key": key, "label": label, "status": status, "value": value, "detail": detail}
+
+
+def _git_readiness_checks() -> list[dict]:
+    try:
+        version = subprocess.run(
+            ["git", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError) as err:
+        return [
+            _readiness_check("git", "Git", "blocked", "Unavailable", str(err)),
+            _readiness_check("git_worktree", "Git worktree", "blocked", "Unavailable", "git is required before worktree support can be checked"),
+        ]
+
+    git_value = version.stdout.strip() or version.stderr.strip() or "git"
+    if version.returncode != 0:
+        return [
+            _readiness_check("git", "Git", "blocked", "Unavailable", git_value),
+            _readiness_check("git_worktree", "Git worktree", "blocked", "Unavailable", "git is required before worktree support can be checked"),
+        ]
+
+    try:
+        worktree = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.SubprocessError as err:
+        return [
+            _readiness_check("git", "Git", "ready", "Available", git_value),
+            _readiness_check("git_worktree", "Git worktree", "blocked", "Unavailable", str(err)),
+        ]
+
+    worktree_status = "ready" if worktree.returncode == 0 else "blocked"
+    worktree_value = "Available" if worktree.returncode == 0 else "Unavailable"
+    worktree_detail = worktree.stderr.strip() if worktree.returncode != 0 else "worktree command is available"
+    return [
+        _readiness_check("git", "Git", "ready", "Available", git_value),
+        _readiness_check("git_worktree", "Git worktree", worktree_status, worktree_value, worktree_detail),
+    ]
 
 
 def _handle_store_error(err: Exception) -> None:
@@ -2991,6 +3041,93 @@ async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Reques
 @router.get("/daemon/state")
 def get_orchestration_daemon_state(request: Request) -> dict:
     return _store(request).get_daemon_state()
+
+
+@router.get("/readiness")
+def get_orchestration_readiness(request: Request) -> dict:
+    store = _store(request)
+    daemon_state = store.get_daemon_state()
+    tasks = store.list_tasks()
+    task_inbox_items = store.list_task_inbox_items()
+    worktrees = store.list_worktrees()
+
+    checks: list[dict] = []
+
+    command_store = getattr(request.app.state, "command_store", None)
+    checks.append(_readiness_check(
+        "command_store",
+        "Command store",
+        "ready" if command_store is not None else "blocked",
+        "Available" if command_store is not None else "Missing",
+        "command runs can be persisted" if command_store is not None else "command_store is not configured on app state",
+    ))
+
+    try:
+        _command_runner(request)
+        checks.append(_readiness_check("command_runner", "Command runner", "ready", "Available", "execution commands can be dispatched"))
+    except Exception as err:
+        checks.append(_readiness_check("command_runner", "Command runner", "blocked", "Unavailable", str(err)))
+
+    checks.extend(_git_readiness_checks())
+
+    daemon_health = daemon_state.get("health") or {}
+    daemon_status = str(daemon_state.get("status") or "unknown")
+    daemon_health_state = str(daemon_health.get("state") or "unknown")
+    daemon_check_status = "blocked" if daemon_health_state == "error" else "ready" if daemon_status == "active" else "watch"
+    daemon_detail = str(daemon_health.get("last_error") or daemon_health.get("last_reason") or "")
+    checks.append(_readiness_check(
+        "daemon",
+        "Daemon",
+        daemon_check_status,
+        f"{daemon_status} · {daemon_state.get('autonomy_mode', 'supervised')}",
+        daemon_detail,
+    ))
+
+    new_inbox_count = sum(1 for item in task_inbox_items if item.get("status") == "new")
+    queued_task_count = sum(1 for task in tasks if task.get("status") == "queued_for_execution")
+    running_task_count = sum(1 for task in tasks if task.get("status") == "running")
+    blocked_task_count = sum(1 for task in tasks if task.get("status") == "blocked")
+    active_worktree_count = sum(1 for worktree in worktrees if worktree.get("status") != "removed")
+
+    counts = {
+        "plan_inbox_count": len(store.list_plan_inbox_items()),
+        "task_count": len(tasks),
+        "new_task_inbox_count": new_inbox_count,
+        "queued_task_count": queued_task_count,
+        "running_task_count": running_task_count,
+        "blocked_task_count": blocked_task_count,
+        "active_worktree_count": active_worktree_count,
+    }
+
+    checks.append(_readiness_check(
+        "queue_pressure",
+        "Queue pressure",
+        "watch" if new_inbox_count or queued_task_count else "ready",
+        f"{new_inbox_count} inbox · {queued_task_count} queued",
+        f"{running_task_count} running · {blocked_task_count} blocked",
+    ))
+    checks.append(_readiness_check(
+        "worktrees",
+        "Worktrees",
+        "ready" if active_worktree_count else "watch",
+        f"{active_worktree_count} active",
+        "execution worktrees currently tracked",
+    ))
+
+    if any(check["status"] == "blocked" for check in checks):
+        status = "blocked"
+    elif any(check["status"] == "watch" for check in checks):
+        status = "watch"
+    else:
+        status = "ready"
+
+    return {
+        "status": status,
+        "generated_at": _utc_now(),
+        "checks": checks,
+        "counts": counts,
+        "daemon": daemon_state,
+    }
 
 
 @router.patch("/daemon/state")
