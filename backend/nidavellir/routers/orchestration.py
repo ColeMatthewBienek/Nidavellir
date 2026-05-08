@@ -216,6 +216,13 @@ class PlanRepoTargetPreviewRequest(BaseModel):
     baseBranch: str | None = None
 
 
+class PlanRepoSetupRequest(BaseModel):
+    createDirectory: bool = True
+    initializeGit: bool = True
+    baseBranch: str | None = None
+    lockedBy: str | None = Field(default=None, min_length=1)
+
+
 class ClaimRequest(BaseModel):
     lockedBy: str = Field(default="daemon", min_length=1)
 
@@ -790,6 +797,66 @@ def _preview_plan_repo_target(repo_path: str, entry_mode: str, base_branch: str 
         return response
     response.update(reason="new_project_nonempty_not_git")
     return response
+
+
+def _initialize_new_project_repo(path: Path, base_branch: str) -> list[dict[str, Any]]:
+    operations: list[dict[str, Any]] = []
+    if not (path / ".git").exists():
+        result = subprocess.run(["git", "init"], cwd=path, check=False, capture_output=True, text=True, timeout=30)
+        operations.append({"operation": "git_init", "returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()})
+        if result.returncode != 0:
+            raise WorktreeError(f"git_init_failed: {result.stderr.strip() or result.stdout.strip()}")
+    result = subprocess.run(["git", "symbolic-ref", "HEAD", f"refs/heads/{base_branch}"], cwd=path, check=False, capture_output=True, text=True, timeout=10)
+    operations.append({"operation": "set_default_branch", "returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": result.stderr.strip(), "branch": base_branch})
+    if result.returncode != 0:
+        raise WorktreeError(f"git_default_branch_failed: {result.stderr.strip() or result.stdout.strip()}")
+    return operations
+
+
+def _setup_plan_repo_target(store: OrchestrationStore, plan: dict, body: PlanRepoSetupRequest) -> dict[str, Any]:
+    if plan.get("entry_mode") != "new_project":
+        raise ValueError("repo_setup_requires_new_project")
+    repo_path = str(plan.get("repo_path") or "").strip()
+    if not repo_path:
+        raise ValueError("repo_path_required")
+    base_branch = (body.baseBranch or plan.get("base_branch") or "main").strip() or "main"
+    preview = _preview_plan_repo_target(repo_path, "new_project", base_branch)
+    if preview["status"] == "blocked":
+        raise ValueError(f"repo_target_blocked:{preview['reason']}")
+
+    target = Path(preview["repo_path"]).expanduser().resolve(strict=False)
+    operations: list[dict[str, Any]] = []
+    if preview.get("can_create"):
+        if not body.createDirectory and not target.exists():
+            raise ValueError("repo_directory_missing")
+        target.mkdir(parents=True, exist_ok=True)
+        operations.append({"operation": "ensure_directory", "path": str(target)})
+        if body.initializeGit:
+            operations.extend(_initialize_new_project_repo(target, base_branch))
+    elif not preview.get("can_use"):
+        raise ValueError(f"repo_target_not_usable:{preview['reason']}")
+
+    repo_profile = _inspect_existing_project_repo(str(target), base_branch)
+    updated = store.update_plan_inbox_item(plan["id"], {
+        "repo_path": str(target),
+        "base_branch": base_branch,
+        "repo_profile": repo_profile,
+    })
+    event = store.append_event(type="plan_repo_target_setup_finished", payload={
+        "plan_inbox_item_id": plan["id"],
+        "locked_by": body.lockedBy or "plan-repo-setup",
+        "repo_path": str(target),
+        "base_branch": base_branch,
+        "operations": operations,
+        "preview_reason": preview.get("reason"),
+    })
+    return {
+        "plan": updated,
+        "repo_profile": repo_profile,
+        "preview": _preview_plan_repo_target(str(target), "existing_project", base_branch),
+        "operations": operations,
+        "event": event,
+    }
 
 
 def _markdown_sections(markdown: str) -> dict[str, str]:
@@ -2323,6 +2390,19 @@ def inspect_plan_inbox_repo(item_id: str, request: Request) -> dict:
     profile = _inspect_existing_project_repo(item.get("repo_path"), item.get("base_branch"))
     updated = store.update_plan_inbox_item(item_id, {"repo_profile": profile})
     return {"plan": updated, "repo_profile": profile}
+
+
+@router.post("/plan-inbox/{item_id}/repo-target/setup")
+def setup_plan_inbox_repo_target(item_id: str, body: PlanRepoSetupRequest, request: Request) -> dict:
+    store = _store(request)
+    item = store.get_plan_inbox_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    try:
+        return _setup_plan_repo_target(store, item, body)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
 
 
 @router.post("/plan-inbox/{item_id}/brief-task")

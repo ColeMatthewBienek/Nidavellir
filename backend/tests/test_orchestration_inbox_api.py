@@ -356,6 +356,38 @@ async def test_plan_repo_target_preview_for_new_and_existing_projects(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_plan_repo_target_setup_creates_and_initializes_new_project_repo(tmp_path: Path):
+    setup_app(tmp_path)
+    target = tmp_path / "setup-project"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a new project.",
+            "repoPath": str(target),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "workLane": "project",
+        })).json()
+        setup = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/repo-target/setup", json={
+            "createDirectory": True,
+            "initializeGit": True,
+            "baseBranch": "main",
+            "lockedBy": "test",
+        })
+
+    assert setup.status_code == 200
+    body = setup.json()
+    assert target.exists()
+    assert (target / ".git").exists()
+    assert body["plan"]["repo_path"] == str(target)
+    assert body["plan"]["base_branch"] == "main"
+    assert body["repo_profile"]["ok"] is True
+    assert any(item["operation"] == "git_init" for item in body["operations"])
+    head = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=target, check=True, capture_output=True, text=True)
+    assert head.stdout.strip() == "main"
+
+
+@pytest.mark.asyncio
 async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     agent = PlannerPmFakeAgent()

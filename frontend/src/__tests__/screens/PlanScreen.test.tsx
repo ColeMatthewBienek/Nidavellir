@@ -498,6 +498,59 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/repo-target/setup') && options?.method === 'POST') {
+        const setupPlan = {
+          id: 'plan-1',
+          raw_plan: 'Automate orchestration',
+          repo_path: '/repo',
+          base_branch: 'main',
+          provider: 'claude',
+          model: 'claude-sonnet-4-6',
+          entry_mode: 'new_project',
+          work_lane: 'project',
+          repo_profile: {
+            ok: true,
+            package_manager: null,
+            test_commands: [],
+            git: { current_branch: 'main' },
+          },
+          automation_mode: 'supervised',
+          max_concurrency: 1,
+          priority: null,
+          source: 'plan_tab',
+          constraints: [],
+          acceptance_criteria: ['Vague specs are blocked'],
+          status: 'new',
+          locked_by: null,
+          locked_at: null,
+          final_spec_id: null,
+          created_at: '2026-05-03T00:00:00Z',
+          updated_at: '2026-05-03T00:01:00Z',
+          discussion_messages: [],
+          planning_checkpoints: planningCheckpoints,
+        };
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            plan: setupPlan,
+            repo_profile: setupPlan.repo_profile,
+            preview: {
+              status: 'ready',
+              reason: 'existing_project_ready',
+              repo_path: '/repo',
+              parent_path: '/',
+              entry_mode: 'existing_project',
+              base_branch: 'main',
+              exists: true,
+              is_directory: true,
+              can_use: true,
+              can_create: false,
+              requires_setup: false,
+            },
+            operations: [{ operation: 'ensure_directory', path: '/repo' }],
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1') && !options) {
         const created = planInboxCreateBody ?? {};
         return Promise.resolve({
@@ -974,6 +1027,30 @@ describe('PlanScreen orchestration board', () => {
       expect(body.repoPath).toBe('/picked/new-project');
       expect(body.entryMode).toBe('new_project');
       expect(body.baseBranch).toBe('main');
+    });
+  });
+
+  it('sets up a new project repo from the PM modal', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Automate orchestration' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Plan repo path' }), { target: { value: '/repo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('Repo setup needed')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Set Up Repo' }));
+
+    expect(await screen.findByText('Repo ready')).toBeTruthy();
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/repo-target/setup') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.createDirectory).toBe(true);
+      expect(body.initializeGit).toBe(true);
+      expect(body.baseBranch).toBe('main');
+      expect(body.lockedBy).toBe('plan-screen-repo-setup');
     });
   });
 
