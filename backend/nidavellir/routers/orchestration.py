@@ -3220,6 +3220,7 @@ def get_orchestration_daemon_state(request: Request) -> dict:
 def get_orchestration_readiness(request: Request) -> dict:
     store = _store(request)
     daemon_state = store.get_daemon_state()
+    plans = store.list_plan_inbox_items()
     tasks = store.list_tasks()
     task_inbox_items = store.list_task_inbox_items()
     worktrees = store.list_worktrees()
@@ -3261,15 +3262,25 @@ def get_orchestration_readiness(request: Request) -> dict:
     running_task_count = sum(1 for task in tasks if task.get("status") == "running")
     blocked_task_count = sum(1 for task in tasks if task.get("status") == "blocked")
     active_worktree_count = sum(1 for worktree in worktrees if worktree.get("status") != "removed")
+    repo_target_missing_count = sum(1 for plan in plans if plan.get("entry_mode") == "new_project" and not str(plan.get("repo_path") or "").strip())
+    repo_setup_required_count = sum(
+        1
+        for plan in plans
+        if plan.get("entry_mode") == "new_project"
+        and str(plan.get("repo_path") or "").strip()
+        and not bool((plan.get("repo_profile") or {}).get("ok"))
+    )
 
     counts = {
-        "plan_inbox_count": len(store.list_plan_inbox_items()),
+        "plan_inbox_count": len(plans),
         "task_count": len(tasks),
         "new_task_inbox_count": new_inbox_count,
         "queued_task_count": queued_task_count,
         "running_task_count": running_task_count,
         "blocked_task_count": blocked_task_count,
         "active_worktree_count": active_worktree_count,
+        "repo_target_missing_count": repo_target_missing_count,
+        "repo_setup_required_count": repo_setup_required_count,
     }
 
     checks.append(_readiness_check(
@@ -3278,6 +3289,13 @@ def get_orchestration_readiness(request: Request) -> dict:
         "watch" if new_inbox_count or queued_task_count else "ready",
         f"{new_inbox_count} inbox · {queued_task_count} queued",
         f"{running_task_count} running · {blocked_task_count} blocked",
+    ))
+    checks.append(_readiness_check(
+        "repo_setup",
+        "Repo setup",
+        "watch" if repo_target_missing_count or repo_setup_required_count else "ready",
+        f"{repo_setup_required_count} setup · {repo_target_missing_count} missing",
+        "new-project plans must have an initialized repo before autonomous execution",
     ))
     checks.append(_readiness_check(
         "worktrees",
