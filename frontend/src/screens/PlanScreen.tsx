@@ -3250,6 +3250,15 @@ export function PlanScreen() {
   const reviewCount = Number(lastTickSummary.review_count ?? 0);
   const blockedCount = Number(lastTickSummary.blocked_count ?? 0);
   const waitingForAutonomyCount = Number(lastTickSummary.waiting_for_autonomy_count ?? 0);
+  const processedTasks = Array.isArray(lastTickSummary.processed_tasks)
+    ? lastTickSummary.processed_tasks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const latestProcessedTask = processedTasks[0];
+  const latestProcessedTitle = typeof latestProcessedTask?.title === 'string' ? latestProcessedTask.title : null;
+  const latestProcessedStatus = typeof latestProcessedTask?.status === 'string' ? latestProcessedTask.status : null;
+  const latestProcessedOutput = typeof latestProcessedTask?.latest_output === 'string' ? latestProcessedTask.latest_output : '';
+  const latestProcessedExecuted = Number(latestProcessedTask?.executed ?? 0);
+  const latestProcessedWaiting = Boolean(latestProcessedTask?.waiting_for_autonomy);
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', background: 'var(--bg0)' }}>
@@ -3281,6 +3290,14 @@ export function PlanScreen() {
           <span>next {daemonHealth?.next_tick_at ? new Date(daemonHealth.next_tick_at).toLocaleTimeString() : 'paused'}</span>
           <span>{inboxProcessedCount} inbox · {queueProcessedCount} queue</span>
           <span>{reviewCount} review · {blockedCount} blocked · {waitingForAutonomyCount} waiting</span>
+          {latestProcessedTitle && (
+            <span
+              title={latestProcessedOutput || undefined}
+              style={{ color: latestProcessedStatus === 'blocked' ? 'var(--red)' : latestProcessedStatus === 'review' ? 'var(--grn)' : 'var(--t1)', maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            >
+              last result: {latestProcessedTitle} · {latestProcessedStatus ?? 'unknown'} · {latestProcessedWaiting ? 'waiting' : `${latestProcessedExecuted} ran`}{latestProcessedOutput ? ` · ${latestProcessedOutput}` : ''}
+            </span>
+          )}
           <span>{daemonMode === 'autonomous' ? 'executes ready steps' : 'queues only'}</span>
           {daemonIssue && <span style={{ color: daemonHealth?.last_error ? 'var(--red)' : 'var(--yel)' }}>{daemonIssue}</span>}
         </div>

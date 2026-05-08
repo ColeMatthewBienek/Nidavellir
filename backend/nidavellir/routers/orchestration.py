@@ -2891,6 +2891,29 @@ def _task_status_after_queue_run(task: dict, result: dict) -> str:
     return "queued_for_execution"
 
 
+def _daemon_processed_task_summary(processed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for item in processed:
+        task = item.get("task") if isinstance(item.get("task"), dict) else {}
+        steps = task.get("steps") if isinstance(task.get("steps"), list) else []
+        latest_output = ""
+        for step in reversed(steps):
+            output = str(step.get("output_summary") or "").strip()
+            if output:
+                latest_output = output[:240]
+                break
+        summaries.append({
+            "task_id": task.get("id"),
+            "title": task.get("title") or "Untitled task",
+            "status": item.get("status") or task.get("status"),
+            "executed": int(item.get("executed") or 0),
+            "waiting_for_autonomy": bool(item.get("waiting_for_autonomy")),
+            "error": item.get("error"),
+            "latest_output": latest_output,
+        })
+    return summaries
+
+
 @router.post("/tasks/run-queued")
 async def run_queued_execution_tasks(body: TaskRunQueuedRequest, request: Request) -> dict:
     store = _store(request)
@@ -3058,6 +3081,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
         "blocked_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "blocked"),
         "waiting_for_autonomy_count": sum(1 for item in queue_result.get("processed", []) if item.get("waiting_for_autonomy")),
         "run_steps": run_steps,
+        "processed_tasks": _daemon_processed_task_summary(queue_result.get("processed", [])),
     }
     state = store.update_daemon_state({
         "status": "active" if state["status"] == "active" else state["status"],

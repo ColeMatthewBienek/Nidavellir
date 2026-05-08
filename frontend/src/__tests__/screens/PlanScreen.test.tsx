@@ -241,6 +241,14 @@ describe('PlanScreen orchestration board', () => {
               review_count: 3,
               blocked_count: 4,
               waiting_for_autonomy_count: 5,
+              processed_tasks: [{
+                task_id: 'task-daemon-materialized',
+                title: 'Run tiny verification',
+                status: 'review',
+                executed: 1,
+                waiting_for_autonomy: false,
+                latest_output: 'tiny-ok',
+              }],
             },
             health: {
               is_active: true,
@@ -903,6 +911,7 @@ describe('PlanScreen orchestration board', () => {
 
     expect(await screen.findByText('1 inbox · 2 queue')).toBeTruthy();
     expect(screen.getByText('3 review · 4 blocked · 5 waiting')).toBeTruthy();
+    expect(screen.getByText('last result: Run tiny verification · review · 1 ran · tiny-ok')).toBeTruthy();
   });
 
   it('archives plans from the visible Plan Inbox', async () => {
