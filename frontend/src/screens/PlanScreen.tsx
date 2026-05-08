@@ -421,6 +421,13 @@ interface PlanRepoTargetPreview {
   detail?: string;
 }
 
+interface PlanRepoSetupResult {
+  plan: PlanInboxDetail;
+  repo_profile: Record<string, unknown>;
+  preview: PlanRepoTargetPreview;
+  operations: Array<Record<string, unknown>>;
+}
+
 function priorityLabel(priority?: number | null) {
   if (priority === null || priority === undefined) return 'No priority';
   if (priority <= 1) return 'P1';
@@ -1000,6 +1007,7 @@ function PlannerDiscussionPanel({
   onSend,
   onViewSpec,
   onInspectRepo,
+  onSetupRepo,
   loading,
 }: {
   item: PlanInboxDetail | null;
@@ -1010,6 +1018,7 @@ function PlannerDiscussionPanel({
   onSend: (content: string) => void;
   onViewSpec: () => void;
   onInspectRepo: () => void;
+  onSetupRepo: () => void;
   loading: boolean;
 }) {
   const [content, setContent] = useState('');
@@ -1018,6 +1027,7 @@ function PlannerDiscussionPanel({
   const discussionMessages = item?.discussion_messages ?? [];
   const repoProfile = item?.repo_profile ?? {};
   const repoProfileOk = Boolean(repoProfile.ok);
+  const showRepoSetup = item?.entry_mode === 'new_project' && Boolean(item.repo_path) && !repoProfileOk;
   const repoProfileError = typeof repoProfile.error === 'string' ? repoProfile.error : null;
   const packageManager = typeof repoProfile.package_manager === 'string' ? repoProfile.package_manager : null;
   const testCommands = Array.isArray(repoProfile.test_commands) ? repoProfile.test_commands.filter((command): command is string => typeof command === 'string') : [];
@@ -1078,6 +1088,23 @@ function PlannerDiscussionPanel({
                 ))}
                 {repoProfileError && <span style={{ color: 'var(--red)', fontSize: 11 }}>{repoProfileError}</span>}
                 <Btn small onClick={onInspectRepo} disabled={loading || !item.repo_path}>Inspect Repo</Btn>
+              </div>
+            )}
+            {showRepoSetup && (
+              <div style={{ border: '1px solid #d2992266', borderRadius: 7, background: '#d2992214', padding: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flex: '0 0 auto' }}>
+                <span style={{ color: 'var(--yel)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' }}>Repo setup needed</span>
+                <span style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 440 }}>
+                  {item.repo_path} · {item.base_branch || 'main'}
+                </span>
+                <Btn small onClick={onSetupRepo} disabled={loading || !item.repo_path}>Set Up Repo</Btn>
+              </div>
+            )}
+            {item.entry_mode === 'new_project' && repoProfileOk && (
+              <div style={{ border: '1px solid #3fb95066', borderRadius: 7, background: '#23863612', padding: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flex: '0 0 auto' }}>
+                <span style={{ color: 'var(--grn)', fontSize: 11, fontWeight: 800, textTransform: 'uppercase' }}>Repo ready</span>
+                <span style={{ color: 'var(--t1)', fontSize: 11 }}>
+                  {currentBranch ?? item.base_branch ?? 'main'} · {testCommands.length} checks
+                </span>
               </div>
             )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1, minHeight: 0, overflow: 'auto', paddingRight: 4 }}>
@@ -1171,6 +1198,7 @@ function PlannerModal({
   onDecompose,
   onBriefTask,
   onInspectRepo,
+  onSetupRepo,
   onClose,
   loading,
 }: {
@@ -1184,6 +1212,7 @@ function PlannerModal({
   onDecompose: () => void;
   onBriefTask: (options: PlanBriefTaskOptions) => void;
   onInspectRepo: () => void;
+  onSetupRepo: () => void;
   onClose: () => void;
   loading: boolean;
 }) {
@@ -1249,6 +1278,7 @@ function PlannerModal({
             onSend={onSend}
             onViewSpec={onViewSpec}
             onInspectRepo={onInspectRepo}
+            onSetupRepo={onSetupRepo}
             loading={loading}
           />
         </div>
@@ -2954,6 +2984,32 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const setupSelectedPlanRepo = () => {
+    if (!selectedPlanInboxItem) return;
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/repo-target/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        createDirectory: true,
+        initializeGit: true,
+        baseBranch: selectedPlanInboxItem.base_branch || 'main',
+        lockedBy: 'plan-screen-repo-setup',
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_repo_setup_${response.status}`);
+        return response.json() as Promise<PlanRepoSetupResult>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+        loadDaemonEvents();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_repo_setup_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const moveTask = (task: OrchestrationTaskSummary, status: string) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}`, {
       method: 'PATCH',
@@ -3580,6 +3636,7 @@ export function PlanScreen() {
             onDecompose={decomposeSelectedPlan}
             onBriefTask={briefSelectedExistingProjectPlan}
             onInspectRepo={inspectSelectedPlanRepo}
+            onSetupRepo={setupSelectedPlanRepo}
             onClose={() => setPlannerModalOpen(false)}
             loading={loading}
           />
