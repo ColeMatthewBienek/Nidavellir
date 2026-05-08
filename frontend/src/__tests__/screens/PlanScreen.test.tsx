@@ -260,6 +260,33 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/daemon/state') && options?.method === 'PATCH') {
+        const body = JSON.parse(String(options.body));
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: body.status ?? 'active',
+            autonomy_mode: body.autonomyMode ?? 'supervised',
+            interval_seconds: body.intervalSeconds ?? 30,
+            last_tick_started_at: '2026-05-03T00:01:00Z',
+            last_tick_finished_at: '2026-05-03T00:01:02Z',
+            last_tick_summary: {
+              inbox_processed_count: 1,
+              queue_processed_count: 2,
+              review_count: 3,
+              blocked_count: 4,
+              waiting_for_autonomy_count: 5,
+            },
+            health: {
+              is_active: true,
+              state: 'idle',
+              next_tick_at: '2026-05-03T00:01:32Z',
+              last_reason: null,
+              last_error: null,
+            },
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/task-inbox') && !options) {
         return Promise.resolve({ ok: true, json: async () => [taskInboxItem, daemonTaskInboxItem] });
       }
@@ -912,6 +939,39 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('1 inbox · 2 queue')).toBeTruthy();
     expect(screen.getByText('3 review · 4 blocked · 5 waiting')).toBeTruthy();
     expect(screen.getByText('last result: Run tiny verification · review · 1 ran · tiny-ok')).toBeTruthy();
+  });
+
+  it('requires confirmation before switching the daemon to autonomous mode', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<PlanScreen />);
+
+    const mode = await screen.findByRole('combobox', { name: 'Daemon mode' });
+    fireEvent.change(mode, { target: { value: 'autonomous' } });
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Switch daemon to autonomous mode?'));
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/daemon/state') && options?.method === 'PATCH'
+      );
+      expect(calls.length).toBe(0);
+    });
+  });
+
+  it('updates daemon mode after autonomous confirmation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PlanScreen />);
+
+    const mode = await screen.findByRole('combobox', { name: 'Daemon mode' });
+    fireEvent.change(mode, { target: { value: 'autonomous' } });
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/daemon/state') && options?.method === 'PATCH'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.autonomyMode).toBe('autonomous');
+    });
   });
 
   it('archives plans from the visible Plan Inbox', async () => {
