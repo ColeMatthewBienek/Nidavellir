@@ -970,6 +970,7 @@ describe('PlanScreen orchestration board', () => {
       );
       expect(calls.length).toBe(1);
       const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.lockedBy).toBe('plan-screen-daemon-controls');
       expect(body.autonomyMode).toBe('autonomous');
     });
   });
