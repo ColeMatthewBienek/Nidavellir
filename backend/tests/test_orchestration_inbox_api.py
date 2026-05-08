@@ -1113,6 +1113,15 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         assert autonomous_tick.status_code == 200
         autonomous_body = autonomous_tick.json()
         assert autonomous_body["state"]["last_tick_summary"]["run_steps"] is True
+        assert autonomous_body["state"]["last_tick_summary"]["processed_tasks"] == [{
+            "task_id": autonomous_body["execution_queue"]["processed"][0]["task"]["id"],
+            "title": "Run tiny verification",
+            "status": "review",
+            "executed": 1,
+            "waiting_for_autonomy": False,
+            "error": None,
+            "latest_output": "tiny-ok",
+        }]
         assert autonomous_body["execution_queue"]["processed"][0]["executed"] == 1
         assert autonomous_body["execution_queue"]["processed"][0]["status"] == "review"
         assert autonomous_body["execution_queue"]["processed"][0]["task"]["steps"][0]["output_summary"] == "tiny-ok"
