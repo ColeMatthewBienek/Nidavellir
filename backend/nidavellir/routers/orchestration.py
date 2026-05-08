@@ -210,6 +210,12 @@ class PlanInboxUpdateRequest(BaseModel):
     finalSpecId: str | None = None
 
 
+class PlanRepoTargetPreviewRequest(BaseModel):
+    repoPath: str = Field(min_length=1)
+    entryMode: str = "new_project"
+    baseBranch: str | None = None
+
+
 class ClaimRequest(BaseModel):
     lockedBy: str = Field(default="daemon", min_length=1)
 
@@ -706,6 +712,84 @@ def _inspect_existing_project_repo(repo_path: str | None, base_branch: str | Non
     profile["languages"] = sorted(set(profile["languages"]))
     profile["test_commands"] = list(dict.fromkeys(profile["test_commands"]))
     return profile
+
+
+def _preview_plan_repo_target(repo_path: str, entry_mode: str, base_branch: str | None = None) -> dict[str, Any]:
+    if entry_mode not in {"new_project", "existing_project"}:
+        raise ValueError("invalid_plan_inbox_entry_mode")
+    raw_path = repo_path.strip()
+    if not raw_path:
+        raise ValueError("repo_path_required")
+
+    target = Path(raw_path).expanduser()
+    resolved = target.resolve(strict=False)
+    parent = resolved.parent
+    response: dict[str, Any] = {
+        "repo_path": str(resolved),
+        "parent_path": str(parent),
+        "entry_mode": entry_mode,
+        "base_branch": base_branch or "main",
+        "exists": resolved.exists(),
+        "is_directory": resolved.is_dir() if resolved.exists() else None,
+        "can_use": False,
+        "can_create": False,
+        "requires_setup": False,
+        "status": "blocked",
+        "reason": "",
+    }
+
+    if entry_mode == "existing_project":
+        if not resolved.exists():
+            response.update(reason="path_missing")
+            return response
+        if not resolved.is_dir():
+            response.update(reason="not_directory")
+            return response
+        try:
+            root = repo_root(resolved)
+        except WorktreeError as err:
+            response.update(reason="existing_project_not_git", detail=str(err))
+            return response
+        response.update(
+            repo_path=str(root),
+            status="ready",
+            reason="existing_project_ready",
+            can_use=True,
+            repo_profile=_inspect_existing_project_repo(str(root), base_branch),
+        )
+        return response
+
+    if not parent.exists():
+        response.update(reason="parent_missing")
+        return response
+    if not parent.is_dir():
+        response.update(reason="parent_not_directory")
+        return response
+    if not resolved.exists():
+        response.update(status="ready", reason="new_project_path_available", can_create=True, requires_setup=True)
+        return response
+    if not resolved.is_dir():
+        response.update(reason="target_not_directory")
+        return response
+    try:
+        root = repo_root(resolved)
+        response.update(
+            repo_path=str(root),
+            status="watch",
+            reason="new_project_git_already_exists",
+            can_use=True,
+            repo_profile=_inspect_existing_project_repo(str(root), base_branch),
+        )
+        return response
+    except WorktreeError:
+        pass
+
+    is_empty = not any(resolved.iterdir())
+    if is_empty:
+        response.update(status="ready", reason="new_project_empty_directory", can_create=True, requires_setup=True)
+        return response
+    response.update(reason="new_project_nonempty_not_git")
+    return response
 
 
 def _markdown_sections(markdown: str) -> dict[str, str]:
@@ -2147,6 +2231,15 @@ def _prepare_orchestration_tool_requests(
 def list_plan_inbox_items(request: Request, status: str | None = None, includeArchived: bool = False) -> list[dict]:
     try:
         return _store(request).list_plan_inbox_items(status=status, include_archived=includeArchived)
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
+@router.post("/plan-inbox/repo-target/preview")
+def preview_plan_repo_target(body: PlanRepoTargetPreviewRequest, request: Request) -> dict:
+    try:
+        return _preview_plan_repo_target(body.repoPath, body.entryMode, body.baseBranch)
     except Exception as err:
         _handle_store_error(err)
         raise

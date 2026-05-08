@@ -226,6 +226,25 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).endsWith('/api/orchestration/plan-inbox') && !options) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/repo-target/preview') && options?.method === 'POST') {
+        const body = JSON.parse(String(options.body));
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: body.entryMode === 'existing_project' ? 'ready' : 'ready',
+            reason: body.entryMode === 'existing_project' ? 'existing_project_ready' : 'new_project_path_available',
+            repo_path: body.repoPath,
+            parent_path: '/picked',
+            entry_mode: body.entryMode,
+            base_branch: body.baseBranch ?? 'main',
+            exists: false,
+            is_directory: null,
+            can_use: body.entryMode === 'existing_project',
+            can_create: body.entryMode !== 'existing_project',
+            requires_setup: body.entryMode !== 'existing_project',
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/daemon/state') && !options) {
         return Promise.resolve({
           ok: true,
@@ -934,6 +953,27 @@ describe('PlanScreen orchestration board', () => {
       expect(body.rawPlan).toBe('Fix flaky auth test');
       expect(body.entryMode).toBe('existing_project');
       expect(body.workLane).toBe('bugfix');
+    });
+  });
+
+  it('previews repo target setup before PM intake starts', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan repo path' }), { target: { value: '/picked/new-project' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check target' }));
+
+    expect(await screen.findByText('READY')).toBeTruthy();
+    expect(screen.getByText(/new project path available/)).toBeTruthy();
+    expect(screen.getByText('/picked/new-project')).toBeTruthy();
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/repo-target/preview') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.repoPath).toBe('/picked/new-project');
+      expect(body.entryMode).toBe('new_project');
+      expect(body.baseBranch).toBe('main');
     });
   });
 

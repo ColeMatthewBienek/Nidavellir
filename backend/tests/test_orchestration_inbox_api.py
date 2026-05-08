@@ -319,6 +319,43 @@ async def test_orchestration_readiness_reports_environment_and_counts(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_plan_repo_target_preview_for_new_and_existing_projects(tmp_path: Path):
+    setup_app(tmp_path)
+    existing_repo = create_git_repo(tmp_path / "existing")
+    new_repo = tmp_path / "new-project"
+    blocked_repo = tmp_path / "blocked"
+    blocked_repo.mkdir()
+    (blocked_repo / "notes.txt").write_text("not a git repo", encoding="utf-8")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        new_preview = await c.post("/api/orchestration/plan-inbox/repo-target/preview", json={
+            "repoPath": str(new_repo),
+            "entryMode": "new_project",
+            "baseBranch": "main",
+        })
+        existing_preview = await c.post("/api/orchestration/plan-inbox/repo-target/preview", json={
+            "repoPath": str(existing_repo),
+            "entryMode": "existing_project",
+            "baseBranch": "main",
+        })
+        blocked_preview = await c.post("/api/orchestration/plan-inbox/repo-target/preview", json={
+            "repoPath": str(blocked_repo),
+            "entryMode": "new_project",
+            "baseBranch": "main",
+        })
+
+    assert new_preview.status_code == 200
+    assert new_preview.json()["reason"] == "new_project_path_available"
+    assert new_preview.json()["can_create"] is True
+    assert existing_preview.status_code == 200
+    assert existing_preview.json()["reason"] == "existing_project_ready"
+    assert existing_preview.json()["can_use"] is True
+    assert blocked_preview.status_code == 200
+    assert blocked_preview.json()["reason"] == "new_project_nonempty_not_git"
+    assert blocked_preview.json()["status"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     agent = PlannerPmFakeAgent()
