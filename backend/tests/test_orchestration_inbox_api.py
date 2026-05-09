@@ -1560,7 +1560,11 @@ async def test_autonomous_pilot_run_drives_spec_to_worker_execution(tmp_path: Pa
         assert [step["type"] for step in final_task["steps"]] == ["agent", "command"]
         assert {step["status"] for step in final_task["steps"]} == {"complete"}
         assert body["evidence"][0]["summary"]["artifact_count"] >= 2
+        assert body["pilot"]["status"] == "succeeded"
+        assert body["artifact"]["type"] == "pilot_run"
+        assert body["artifact"]["metadata"]["plan_inbox_item_id"] == body["plan"]["id"]
         assert body["event"]["type"] == "autonomous_pilot_run_finished"
+        assert body["event"]["payload"]["artifact_id"] == body["artifact"]["id"]
 
 
 @pytest.mark.asyncio
@@ -1646,7 +1650,81 @@ async def test_approved_plan_pilot_run_uses_existing_pm_spec(tmp_path: Path, mon
         assert [step["type"] for step in final_task["steps"]] == ["agent", "command"]
         assert {step["status"] for step in final_task["steps"]} == {"complete"}
         assert body["evidence"][0]["summary"]["artifact_count"] >= 2
+        assert body["pilot"]["status"] == "succeeded"
+        assert body["artifact"]["type"] == "pilot_run"
+        assert body["artifact"]["metadata"]["plan_inbox_item_id"] == plan["id"]
         assert body["event"]["payload"]["plan_inbox_item_id"] == plan["id"]
+        assert body["event"]["payload"]["artifact_id"] == body["artifact"]["id"]
+
+        history = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/pilot-runs")
+        assert history.status_code == 200
+        runs = history.json()
+        assert len(runs) == 1
+        assert runs[0]["status"] == "succeeded"
+        assert runs[0]["artifact"]["id"] == body["artifact"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_approved_plan_pilot_run_records_command_failure(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "approved-plan-pilot-failure")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Run a failing pilot command.",
+            "entryMode": "existing_project",
+            "workLane": "chore",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })).json()
+        for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for failure pilot.",
+            })
+            assert checkpoint.status_code == 200
+        spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+            "content": "\n".join([
+                "# Agentic Forward Spec",
+                "",
+                "## Task Breakdown",
+                "- Run failing verification only",
+                "",
+                "## Acceptance Criteria",
+                "- Failure is recorded.",
+                "",
+                "## Verification Strategy",
+                "- `sh -c 'exit 7'`",
+                "",
+                "## Risks and Dependencies",
+                "- The pilot should stop on command failure.",
+            ]),
+            "status": "ready",
+        })).json()
+
+        result = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pilot-run", json={
+            "runAgent": False,
+            "maxTasks": 1,
+            "maxStepsPerTask": 4,
+            "timeoutSeconds": 90,
+            "lockedBy": "approved-plan-failure-pilot-test",
+        })
+
+        assert result.status_code == 200
+        body = result.json()
+        assert body["spec"]["id"] == spec["id"]
+        assert body["pilot"]["status"] == "failed"
+        assert any(failure["code"] in {"command_failed", "task_blocked"} for failure in body["pilot"]["failures"])
+        assert body["artifact"]["metadata"]["status"] == "failed"
+        assert body["event"]["payload"]["status"] == "failed"
+
+        history = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/pilot-runs")
+        assert history.status_code == 200
+        runs = history.json()
+        assert runs[0]["status"] == "failed"
+        assert runs[0]["failures"]
 
 
 @pytest.mark.asyncio

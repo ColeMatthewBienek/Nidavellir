@@ -3116,12 +3116,46 @@ async def _run_approved_plan_autonomous_pilot(
         for task in processed_tasks
         if task.get("id")
     ]
+    pilot_summary = _summarize_autonomous_pilot_run(
+        tick=tick,
+        evidence=evidence,
+        run_agent=run_agent,
+        max_tasks=max_tasks,
+        max_steps_per_task=max_steps_per_task,
+        timeout_seconds=timeout_seconds,
+        permission_override=permission_override,
+    )
+    artifact = store.create_artifact(
+        type="pilot_run",
+        title=f"Pilot run: {str(plan.get('raw_plan') or 'Approved plan')[:80]}",
+        summary=pilot_summary["summary"],
+        content=json.dumps(pilot_summary, indent=2, sort_keys=True),
+        metadata={
+            "plan_inbox_item_id": plan["id"],
+            "spec_id": spec_id,
+            "decomposition_run_id": decomposed["decomposition_run"]["id"],
+            "task_inbox_item_ids": [item["id"] for item in task_inbox_items],
+            "task_ids": [task["id"] for task in processed_tasks],
+            "status": pilot_summary["status"],
+            "failures": pilot_summary["failures"],
+            "run_agent": run_agent,
+            "max_tasks": max_tasks,
+            "max_steps_per_task": max_steps_per_task,
+            "timeout_seconds": timeout_seconds,
+            "permission_override": permission_override,
+            "source": "autonomous_pilot",
+        },
+    )
     event = store.append_event(type="autonomous_pilot_run_finished", payload={
         "plan_inbox_item_id": plan["id"],
         "spec_id": spec_id,
         "decomposition_run_id": decomposed["decomposition_run"]["id"],
         "task_inbox_item_ids": [item["id"] for item in task_inbox_items],
         "task_ids": [task["id"] for task in processed_tasks],
+        "artifact_id": artifact.get("id"),
+        "pilot": pilot_summary,
+        "status": pilot_summary["status"],
+        "failures": pilot_summary["failures"],
         "run_agent": run_agent,
         "evidence_count": len(evidence),
     })
@@ -3131,7 +3165,87 @@ async def _run_approved_plan_autonomous_pilot(
         "daemon_tick": tick,
         "tasks": processed_tasks,
         "evidence": evidence,
+        "pilot": pilot_summary,
+        "artifact": artifact,
         "event": event,
+    }
+
+
+def _summarize_autonomous_pilot_run(
+    *,
+    tick: dict,
+    evidence: list[dict],
+    run_agent: bool,
+    max_tasks: int,
+    max_steps_per_task: int,
+    timeout_seconds: int,
+    permission_override: str | None,
+) -> dict:
+    processed = [
+        item for item in tick.get("execution_queue", {}).get("processed", [])
+        if isinstance(item, dict)
+    ]
+    failures: list[dict[str, Any]] = []
+    task_summaries: list[dict[str, Any]] = []
+    for item in processed:
+        task = item.get("task") if isinstance(item.get("task"), dict) else {}
+        task_id = task.get("id")
+        status = str(item.get("status") or task.get("status") or "")
+        task_summaries.append({
+            "task_id": task_id,
+            "title": task.get("title") or "Untitled task",
+            "status": status,
+            "executed": int(item.get("executed") or 0),
+            "waiting_for_autonomy": bool(item.get("waiting_for_autonomy")),
+            "error": item.get("error"),
+        })
+        if item.get("waiting_for_autonomy"):
+            failures.append({"code": "waiting_for_autonomy", "task_id": task_id, "message": "Task did not run because the daemon was not autonomous."})
+        if item.get("error"):
+            failures.append({"code": "execution_error", "task_id": task_id, "message": str(item.get("error"))[:500]})
+        if status in {"blocked", "failed", "error", "cancelled"}:
+            failures.append({"code": f"task_{status}", "task_id": task_id, "message": f"Pilot task ended with status {status}."})
+
+    for item in evidence:
+        task_id = item.get("task_id")
+        for step in item.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            step_status = str(step.get("status") or "")
+            step_type = str(step.get("type") or "step")
+            if step_status == "failed":
+                failures.append({
+                    "code": f"{step_type}_failed",
+                    "task_id": task_id,
+                    "step_id": step.get("id"),
+                    "message": str(step.get("output_summary") or f"{step_type} step failed")[:500],
+                })
+            if step_status == "waiting_for_user":
+                failures.append({
+                    "code": "waiting_for_user",
+                    "task_id": task_id,
+                    "step_id": step.get("id"),
+                    "message": str(step.get("output_summary") or "Step is waiting for user approval")[:500],
+                })
+
+    if not processed:
+        failures.append({"code": "no_task_executed", "message": "Pilot did not process any execution-queue task."})
+
+    status = "succeeded" if not failures else "failed"
+    return {
+        "status": status,
+        "summary": f"Pilot {status}: {len(processed)} task(s), {len(evidence)} evidence bundle(s), {len(failures)} failure(s).",
+        "failures": failures,
+        "tasks": task_summaries,
+        "evidence_count": len(evidence),
+        "run_agent": run_agent,
+        "limits": {
+            "max_tasks": max_tasks,
+            "max_steps_per_task": max_steps_per_task,
+            "timeout_seconds": timeout_seconds,
+            "permission_override": permission_override,
+        },
+        "created_at": _utc_now(),
     }
 
 
@@ -3260,6 +3374,36 @@ async def run_plan_inbox_autonomous_pilot(item_id: str, body: PlanInboxPilotRunR
         **result,
         "spec": spec,
     }
+
+
+@router.get("/plan-inbox/{item_id}/pilot-runs")
+def list_plan_inbox_autonomous_pilot_runs(item_id: str, request: Request) -> list[dict]:
+    store = _store(request)
+    if store.get_plan_inbox_item(item_id) is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    records: list[dict[str, Any]] = []
+    for event in store.list_events(limit=500):
+        if event.get("type") != "autonomous_pilot_run_finished":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if payload.get("plan_inbox_item_id") != item_id:
+            continue
+        artifact = store.get_artifact(str(payload.get("artifact_id"))) if payload.get("artifact_id") else None
+        pilot = payload.get("pilot") if isinstance(payload.get("pilot"), dict) else {}
+        records.append({
+            "id": event["id"],
+            "created_at": event["created_at"],
+            "status": payload.get("status") or pilot.get("status") or "unknown",
+            "summary": pilot.get("summary") or "",
+            "failures": payload.get("failures") or pilot.get("failures") or [],
+            "task_ids": payload.get("task_ids") or [],
+            "task_inbox_item_ids": payload.get("task_inbox_item_ids") or [],
+            "spec_id": payload.get("spec_id"),
+            "decomposition_run_id": payload.get("decomposition_run_id"),
+            "artifact": artifact,
+            "event": event,
+        })
+    return records
 
 
 @router.get("/task-inbox")
