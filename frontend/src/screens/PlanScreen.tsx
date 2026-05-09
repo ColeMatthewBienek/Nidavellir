@@ -459,6 +459,14 @@ interface PlanBriefTaskOptions {
   skipAgentStep: boolean;
 }
 
+interface PlanPilotRunOptions {
+  runAgent: boolean;
+  maxTasks: number;
+  maxStepsPerTask: number;
+  timeoutSeconds: number;
+  permissionOverride: string | null;
+}
+
 interface PlanRepoInspectResult {
   plan: PlanInboxDetail;
   repo_profile: Record<string, unknown>;
@@ -1269,7 +1277,7 @@ function PlannerModal({
   onSend: (content: string) => void;
   onViewSpec: () => void;
   onDecompose: () => void;
-  onRunPilot: () => void;
+  onRunPilot: (options: PlanPilotRunOptions) => void;
   onBriefTask: (options: PlanBriefTaskOptions) => void;
   onInspectRepo: () => void;
   onSetupRepo: () => void;
@@ -1279,6 +1287,18 @@ function PlannerModal({
   const canDecompose = planReadyForDecomposition(item);
   const canBriefTask = item?.entry_mode === 'existing_project' && item?.work_lane !== 'project' && Boolean(item?.repo_path);
   const [briefVerificationOnly, setBriefVerificationOnly] = useState(true);
+  const [pilotRunAgent, setPilotRunAgent] = useState(true);
+  const [pilotMaxTasks, setPilotMaxTasks] = useState(1);
+  const [pilotMaxSteps, setPilotMaxSteps] = useState(10);
+  const [pilotTimeout, setPilotTimeout] = useState(120);
+  const [pilotPermissionOverride, setPilotPermissionOverride] = useState('allow_once');
+  const runPilot = () => onRunPilot({
+    runAgent: pilotRunAgent,
+    maxTasks: pilotMaxTasks,
+    maxStepsPerTask: pilotMaxSteps,
+    timeoutSeconds: pilotTimeout,
+    permissionOverride: pilotPermissionOverride || null,
+  });
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="planner-modal-title" style={{
       position: 'fixed',
@@ -1305,10 +1325,56 @@ function PlannerModal({
               >
                 Send to Decomposer
               </Btn>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px', border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg0)' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--t1)', fontSize: 11, whiteSpace: 'nowrap' }}>
+                  <input
+                    type="checkbox"
+                    aria-label="Pilot run worker agent"
+                    checked={pilotRunAgent}
+                    onChange={(event) => setPilotRunAgent(event.target.checked)}
+                    style={{ accentColor: 'var(--blue)' }}
+                  />
+                  Worker
+                </label>
+                <select
+                  aria-label="Pilot max tasks"
+                  value={pilotMaxTasks}
+                  onChange={(event) => setPilotMaxTasks(Number(event.target.value))}
+                  style={{ height: 24, border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 11 }}
+                >
+                  {[1, 2, 3].map((value) => <option key={value} value={value}>{value} task{value === 1 ? '' : 's'}</option>)}
+                </select>
+                <select
+                  aria-label="Pilot max steps"
+                  value={pilotMaxSteps}
+                  onChange={(event) => setPilotMaxSteps(Number(event.target.value))}
+                  style={{ height: 24, border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 11 }}
+                >
+                  {[3, 5, 10, 20].map((value) => <option key={value} value={value}>{value} steps</option>)}
+                </select>
+                <select
+                  aria-label="Pilot permission mode"
+                  value={pilotPermissionOverride}
+                  onChange={(event) => setPilotPermissionOverride(event.target.value)}
+                  style={{ height: 24, border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 11 }}
+                >
+                  <option value="allow_once">Allow once</option>
+                  <option value="">Ask normally</option>
+                </select>
+                <input
+                  aria-label="Pilot timeout seconds"
+                  type="number"
+                  min={1}
+                  max={600}
+                  value={pilotTimeout}
+                  onChange={(event) => setPilotTimeout(Math.max(1, Math.min(600, Number(event.target.value) || 120)))}
+                  style={{ width: 58, height: 24, boxSizing: 'border-box', border: '1px solid var(--bd)', borderRadius: 5, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 11, padding: '0 5px' }}
+                />
+              </div>
               <Btn
                 small
                 disabled={!canDecompose || loading}
-                onClick={onRunPilot}
+                onClick={runPilot}
                 title={canDecompose ? 'Run one bounded autonomous pilot from this approved spec' : 'Requires an approved ready spec and all PM gates'}
               >
                 Run Pilot
@@ -1769,6 +1835,7 @@ function ExecutionEvidencePanel({
 function TaskDetail({
   task,
   evidence,
+  isPilotTask,
   events,
   daemonEvents,
   selectedNodeId,
@@ -1786,6 +1853,10 @@ function TaskDetail({
   onPreflightIntegration,
   onStageIntegration,
   onRemoveWorktree,
+  onArchiveTask,
+  onMarkDone,
+  onQueueAgain,
+  onRemoveTaskWorktrees,
   onAddStep,
   onCompleteStep,
   onRunCommandStep,
@@ -1798,6 +1869,7 @@ function TaskDetail({
 }: {
   task: OrchestrationTaskDetail;
   evidence?: TaskExecutionEvidence | null;
+  isPilotTask?: boolean;
   events: OrchestrationEvent[];
   daemonEvents: OrchestrationEvent[];
   selectedNodeId?: string | null;
@@ -1815,6 +1887,10 @@ function TaskDetail({
   onPreflightIntegration: (worktreeId: string) => void;
   onStageIntegration: (worktreeId: string) => void;
   onRemoveWorktree: (worktreeId: string) => void;
+  onArchiveTask: () => void;
+  onMarkDone: () => void;
+  onQueueAgain: () => void;
+  onRemoveTaskWorktrees: () => void;
   onAddStep: (nodeId: string) => void;
   onCompleteStep: (stepId: string) => void;
   onRunCommandStep: (stepId: string) => void;
@@ -1834,6 +1910,7 @@ function TaskDetail({
   const selectedNodeWorktree = selectedNode ? task.worktrees.find((worktree) => worktree.node_id === selectedNode.id && worktree.kind === 'execution') : null;
   const integrationWorktrees = task.worktrees.filter((worktree) => worktree.kind === 'integration');
   const waitingSteps = task.steps.filter((step) => step.status === 'waiting_for_user');
+  const activeWorktreeCount = task.worktrees.filter((worktree) => worktree.status !== 'removed').length;
   const [edgeFrom, setEdgeFrom] = useState('');
   const [edgeTo, setEdgeTo] = useState('');
 
@@ -1864,6 +1941,25 @@ function TaskDetail({
         <div style={{ color: 'var(--t1)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {task.worktree_path || task.base_repo_path || 'No worktree linked yet'}
         </div>
+        {isPilotTask && (
+          <div style={{ border: '1px solid #1f6feb55', borderRadius: 7, background: '#1f6feb12', padding: 8, display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ color: 'var(--blu)', fontSize: 12, fontWeight: 800 }}>Pilot result</div>
+                <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 3 }}>
+                  {evidence?.summary?.step_count ?? task.steps.length} steps · {evidence?.summary?.artifact_count ?? 0} artifacts · {activeWorktreeCount} worktrees
+                </div>
+              </div>
+              <StatusPill status={task.status} />
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <Btn small onClick={onQueueAgain} title="Move this pilot task back to the normal execution queue">Queue Again</Btn>
+              <Btn small onClick={onMarkDone} title="Mark this pilot task done after review">Mark Done</Btn>
+              <Btn small disabled={activeWorktreeCount === 0} onClick={onRemoveTaskWorktrees} title="Remove tracked worktrees for this pilot task">Remove Worktrees</Btn>
+              <Btn small onClick={onArchiveTask} title="Archive this pilot task from the active board">Archive</Btn>
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -2668,6 +2764,7 @@ export function PlanScreen() {
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
   const [taskEvidence, setTaskEvidence] = useState<TaskExecutionEvidence | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<OrchestrationArtifact | null>(null);
+  const [lastPilotTaskId, setLastPilotTaskId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
   const [daemonEvents, setDaemonEvents] = useState<OrchestrationEvent[]>([]);
@@ -3165,17 +3262,19 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
-  const runSelectedPlanPilot = () => {
+  const runSelectedPlanPilot = (options: PlanPilotRunOptions) => {
     if (!selectedPlanInboxItem) return;
     setLoading(true);
     fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/pilot-run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        maxTasks: 1,
-        runAgent: true,
+        maxTasks: options.maxTasks,
+        runAgent: options.runAgent,
+        maxStepsPerTask: options.maxStepsPerTask,
+        timeoutSeconds: options.timeoutSeconds,
         lockedBy: 'plan-screen-pilot',
-        permissionOverride: 'allow_once',
+        permissionOverride: options.permissionOverride,
       }),
     })
       .then(async (response) => {
@@ -3203,6 +3302,7 @@ export function PlanScreen() {
             worktrees: selected.worktrees ?? [],
             readiness: selected.readiness ?? { runnable: [], blocked: [] },
           });
+          setLastPilotTaskId(selected.id);
           setTaskEvidence(result.evidence[0] ?? null);
           setSelectedNodeId(selected.nodes?.[0]?.id ?? null);
         }
@@ -3310,6 +3410,7 @@ export function PlanScreen() {
           setTaskEvidence(null);
           setSelectedArtifact(null);
           setSelectedNodeId(null);
+          setLastPilotTaskId(null);
           setEvents([]);
         }
       })
@@ -3338,6 +3439,7 @@ export function PlanScreen() {
           setTaskEvidence(null);
           setSelectedArtifact(null);
           setSelectedNodeId(null);
+          setLastPilotTaskId(null);
           setEvents([]);
         }
         loadDaemonEvents();
@@ -3683,6 +3785,28 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_remove_failed'));
   };
 
+  const removeSelectedTaskWorktrees = () => {
+    if (!selectedTask) return;
+    const activeWorktrees = selectedTask.worktrees.filter((worktree) => worktree.status !== 'removed');
+    if (activeWorktrees.length === 0) return;
+    const accepted = window.confirm(`Remove ${activeWorktrees.length} tracked worktree${activeWorktrees.length === 1 ? '' : 's'} for this task?`);
+    if (!accepted) return;
+    setLoading(true);
+    Promise.all(activeWorktrees.map((worktree) => (
+      fetch(`${API}/api/orchestration/worktrees/${worktree.id}`, { method: 'DELETE' })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`orchestration_worktree_remove_${response.status}`);
+          return response.json() as Promise<OrchestrationWorktree>;
+        })
+    )))
+      .then(() => {
+        loadTasks();
+        loadTask(selectedTask.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_worktree_remove_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const runReadySteps = () => {
     if (!selectedTask) return;
     fetch(`${API}/api/orchestration/tasks/${selectedTask.id}/run-ready`, {
@@ -4022,6 +4146,7 @@ export function PlanScreen() {
         <TaskDetail
           task={selectedTask}
           evidence={taskEvidence}
+          isPilotTask={selectedTask.id === lastPilotTaskId}
           events={events}
           daemonEvents={daemonEvents}
           selectedNodeId={selectedNodeId}
@@ -4039,6 +4164,10 @@ export function PlanScreen() {
           onPreflightIntegration={preflightIntegration}
           onStageIntegration={stageIntegration}
           onRemoveWorktree={removeWorktree}
+          onArchiveTask={() => archiveTask(selectedTask)}
+          onMarkDone={() => moveTask(selectedTask, 'done')}
+          onQueueAgain={() => moveTask(selectedTask, 'queued_for_execution')}
+          onRemoveTaskWorktrees={removeSelectedTaskWorktrees}
           onAddStep={(nodeId) => setAddingStepNodeId(nodeId)}
           onCompleteStep={completeStep}
           onRunCommandStep={runCommandStep}

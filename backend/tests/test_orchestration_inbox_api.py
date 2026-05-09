@@ -1629,6 +1629,8 @@ async def test_approved_plan_pilot_run_uses_existing_pm_spec(tmp_path: Path, mon
         result = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pilot-run", json={
             "runAgent": True,
             "maxTasks": 1,
+            "maxStepsPerTask": 4,
+            "timeoutSeconds": 90,
             "lockedBy": "approved-plan-pilot-test",
         })
 

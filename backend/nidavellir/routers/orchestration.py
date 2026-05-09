@@ -345,6 +345,7 @@ class OrchestrationDaemonTickRequest(BaseModel):
     maxInboxItems: int | None = Field(default=None, ge=0, le=25)
     maxQueuedTasks: int | None = Field(default=None, ge=0, le=10)
     maxStepsPerTask: int | None = Field(default=None, ge=1, le=50)
+    timeoutSeconds: int | None = Field(default=None, ge=1, le=600)
     permissionOverride: str | None = None
     ignorePaused: bool = False
 
@@ -365,6 +366,7 @@ class AutonomousPilotRunRequest(BaseModel):
     initializeGit: bool = False
     lockedBy: str = Field(default="autonomous-pilot", min_length=1)
     permissionOverride: str | None = PermissionDecision.ALLOW_ONCE.value
+    maxStepsPerTask: int = Field(default=10, ge=1, le=50)
     timeoutSeconds: int = Field(default=120, ge=1, le=600)
 
 
@@ -373,6 +375,7 @@ class PlanInboxPilotRunRequest(BaseModel):
     runAgent: bool = True
     lockedBy: str = Field(default="plan-autonomous-pilot", min_length=1)
     permissionOverride: str | None = PermissionDecision.ALLOW_ONCE.value
+    maxStepsPerTask: int = Field(default=10, ge=1, le=50)
     timeoutSeconds: int = Field(default=120, ge=1, le=600)
 
 
@@ -3061,6 +3064,8 @@ async def _run_approved_plan_autonomous_pilot(
     run_agent: bool,
     locked_by: str,
     permission_override: str | None,
+    max_steps_per_task: int,
+    timeout_seconds: int,
     request: Request,
 ) -> dict:
     store = _store(request)
@@ -3094,7 +3099,8 @@ async def _run_approved_plan_autonomous_pilot(
             runQueue=True,
             maxInboxItems=max_tasks,
             maxQueuedTasks=max_tasks,
-            maxStepsPerTask=10,
+            maxStepsPerTask=max_steps_per_task,
+            timeoutSeconds=timeout_seconds,
             permissionOverride=permission_override,
             ignorePaused=True,
         ),
@@ -3218,6 +3224,8 @@ async def run_autonomous_pilot(body: AutonomousPilotRunRequest, request: Request
         run_agent=body.runAgent,
         locked_by=body.lockedBy,
         permission_override=body.permissionOverride,
+        max_steps_per_task=body.maxStepsPerTask,
+        timeout_seconds=body.timeoutSeconds,
         request=request,
     )
     return {
@@ -3244,6 +3252,8 @@ async def run_plan_inbox_autonomous_pilot(item_id: str, body: PlanInboxPilotRunR
         run_agent=body.runAgent,
         locked_by=body.lockedBy,
         permission_override=body.permissionOverride,
+        max_steps_per_task=body.maxStepsPerTask,
+        timeout_seconds=body.timeoutSeconds,
         request=request,
     )
     return {
@@ -3908,6 +3918,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
     max_inbox_items = state["max_inbox_items"] if body.maxInboxItems is None else body.maxInboxItems
     max_queued_tasks = state["max_queued_tasks"] if body.maxQueuedTasks is None else body.maxQueuedTasks
     max_steps_per_task = state["max_steps_per_task"] if body.maxStepsPerTask is None else body.maxStepsPerTask
+    timeout_seconds = 120 if body.timeoutSeconds is None else body.timeoutSeconds
     run_steps = autonomy_mode == "autonomous"
     started_at = _utc_now()
     store.update_daemon_state({"status": "running", "last_tick_started_at": started_at})
@@ -3930,6 +3941,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
                 lockedBy=locked_by,
                 maxTasks=max_queued_tasks,
                 maxStepsPerTask=max_steps_per_task,
+                timeoutSeconds=timeout_seconds,
                 permissionOverride=body.permissionOverride,
                 runSteps=run_steps,
             ),
