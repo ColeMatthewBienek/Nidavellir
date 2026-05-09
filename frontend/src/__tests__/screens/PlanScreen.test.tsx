@@ -1495,6 +1495,9 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
 
     expect(await screen.findByText('PM Planning Session')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Pilot max tasks'), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText('Pilot max steps'), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText('Pilot timeout seconds'), { target: { value: '90' } });
     const runPilot = await screen.findByRole('button', { name: 'Run Pilot' });
     expect(runPilot).not.toBeDisabled();
     fireEvent.click(runPilot);
@@ -1505,11 +1508,15 @@ describe('PlanScreen orchestration board', () => {
       );
       expect(calls.length).toBe(1);
       const body = JSON.parse(String(calls[0][1]?.body));
-      expect(body.maxTasks).toBe(1);
+      expect(body.maxTasks).toBe(2);
       expect(body.runAgent).toBe(true);
+      expect(body.maxStepsPerTask).toBe(5);
+      expect(body.timeoutSeconds).toBe(90);
+      expect(body.permissionOverride).toBe('allow_once');
       expect(body.lockedBy).toBe('plan-screen-pilot');
     });
     expect((await screen.findAllByText('Ready pilot plan')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('Pilot result')).toBeTruthy();
     expect(await screen.findByText('marker artifact written')).toBeTruthy();
   });
 
