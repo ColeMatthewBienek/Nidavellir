@@ -171,6 +171,36 @@ interface OrchestrationEvent {
   created_at: string;
 }
 
+interface OrchestrationRunAttempt {
+  id: string;
+  task_id: string;
+  node_id?: string | null;
+  step_id?: string | null;
+  conversation_id?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  worktree_path?: string | null;
+  status: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error?: string | null;
+}
+
+interface TaskExecutionEvidence {
+  task_id: string;
+  task_status: string;
+  generated_at: string;
+  summary: {
+    step_count: number;
+    run_attempt_count: number;
+    event_count: number;
+    latest_status: string;
+  };
+  steps: OrchestrationStep[];
+  run_attempts: OrchestrationRunAttempt[];
+  events: OrchestrationEvent[];
+}
+
 interface OrchestrationDaemonState {
   id: string;
   status: string;
@@ -1574,16 +1604,24 @@ function DagView({
   );
 }
 
-function ExecutionEvidencePanel({ steps, nodes }: { steps: OrchestrationStep[]; nodes: OrchestrationNode[] }) {
+function ExecutionEvidencePanel({ steps, nodes, evidence }: { steps: OrchestrationStep[]; nodes: OrchestrationNode[]; evidence?: TaskExecutionEvidence | null }) {
   const nodeTitles = new Map(nodes.map((node) => [node.id, node.title]));
-  const evidenceSteps = steps
+  const sourceSteps = evidence?.steps?.length ? evidence.steps : steps;
+  const evidenceSteps = sourceSteps
     .filter((step) => step.output_summary.trim() || ['complete', 'failed', 'waiting_for_user'].includes(step.status))
     .slice(-5)
     .reverse();
 
   return (
     <section>
-      <SectionTitle>Execution Evidence</SectionTitle>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <SectionTitle>Execution Evidence</SectionTitle>
+        {evidence?.summary && (
+          <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>
+            {evidence.summary.run_attempt_count} runs · {evidence.summary.event_count} events
+          </div>
+        )}
+      </div>
       <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 8, marginTop: 9 }}>
         {evidenceSteps.length === 0 ? (
           <div style={{ color: 'var(--t1)', fontSize: 12 }}>No execution evidence yet.</div>
@@ -1625,6 +1663,7 @@ function ExecutionEvidencePanel({ steps, nodes }: { steps: OrchestrationStep[]; 
 
 function TaskDetail({
   task,
+  evidence,
   events,
   daemonEvents,
   selectedNodeId,
@@ -1652,6 +1691,7 @@ function TaskDetail({
   stagedIntegrations,
 }: {
   task: OrchestrationTaskDetail;
+  evidence?: TaskExecutionEvidence | null;
   events: OrchestrationEvent[];
   daemonEvents: OrchestrationEvent[];
   selectedNodeId?: string | null;
@@ -1750,7 +1790,7 @@ function TaskDetail({
           </section>
         )}
 
-        <ExecutionEvidencePanel steps={task.steps} nodes={task.nodes} />
+        <ExecutionEvidencePanel steps={task.steps} nodes={task.nodes} evidence={evidence} />
 
         <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
@@ -2519,6 +2559,7 @@ export function PlanScreen() {
   const [plannerModalOpen, setPlannerModalOpen] = useState(false);
   const [specViewerOpen, setSpecViewerOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
+  const [taskEvidence, setTaskEvidence] = useState<TaskExecutionEvidence | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
   const [daemonEvents, setDaemonEvents] = useState<OrchestrationEvent[]>([]);
@@ -2678,11 +2719,16 @@ export function PlanScreen() {
         if (!response.ok) return [];
         return response.json() as Promise<OrchestrationEvent[]>;
       }),
+      fetch(`${API}/api/orchestration/tasks/${taskId}/evidence`).then(async (response) => {
+        if (!response.ok) return null;
+        return response.json() as Promise<TaskExecutionEvidence>;
+      }),
     ])
-      .then(([task, nextEvents]) => {
+      .then(([task, nextEvents, nextEvidence]) => {
         setSelectedTask(task);
         setSelectedNodeId((current) => current && task.nodes.some((node) => node.id === current) ? current : task.nodes[0]?.id ?? null);
         setEvents(nextEvents);
+        setTaskEvidence(nextEvidence);
         loadDaemonEvents();
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_task_failed'));
@@ -2898,6 +2944,7 @@ export function PlanScreen() {
         setCreating(false);
         setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
         setSelectedTask(task);
+        setTaskEvidence(null);
         setSelectedNodeId(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_create_failed'));
@@ -2926,6 +2973,7 @@ export function PlanScreen() {
           worktrees: result.task.worktrees ?? [],
           readiness: result.task.readiness ?? { runnable: [], blocked: [] },
         });
+        setTaskEvidence(null);
         setSelectedNodeId(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'task_inbox_materialize_failed'));
@@ -2963,6 +3011,7 @@ export function PlanScreen() {
             worktrees: selected.worktrees ?? [],
             readiness: selected.readiness ?? { runnable: [], blocked: [] },
           });
+          setTaskEvidence(null);
           setSelectedNodeId(null);
         }
       })
@@ -3090,6 +3139,7 @@ export function PlanScreen() {
         setTasks((current) => current.filter((item) => item.id !== archived.id));
         if (selectedTask?.id === archived.id) {
           setSelectedTask(null);
+          setTaskEvidence(null);
           setSelectedNodeId(null);
           setEvents([]);
         }
@@ -3116,6 +3166,7 @@ export function PlanScreen() {
         setTasks((current) => current.filter((task) => !archivedIds.has(task.id)));
         if (selectedTask && archivedIds.has(selectedTask.id)) {
           setSelectedTask(null);
+          setTaskEvidence(null);
           setSelectedNodeId(null);
           setEvents([]);
         }
@@ -3511,7 +3562,10 @@ export function PlanScreen() {
             ...current.filter((task) => !updatedTasks.some((updated) => updated.id === task.id)),
           ]);
           const selectedUpdate = updatedTasks.find((task) => task.id === selectedTask?.id);
-          if (selectedUpdate) setSelectedTask(selectedUpdate);
+          if (selectedUpdate) {
+            setSelectedTask(selectedUpdate);
+            loadTask(selectedUpdate.id);
+          }
         }
         loadTasks();
       })
@@ -3789,6 +3843,7 @@ export function PlanScreen() {
       {selectedTask && (
         <TaskDetail
           task={selectedTask}
+          evidence={taskEvidence}
           events={events}
           daemonEvents={daemonEvents}
           selectedNodeId={selectedNodeId}
