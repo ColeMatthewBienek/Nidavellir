@@ -311,10 +311,123 @@ async def main() -> None:
                 evidence,
             )
 
+            pilot_plan_response = await client.post("/api/orchestration/plan-inbox", json={
+                "rawPlan": "Run the approved pilot endpoint against the tiny smoke project.",
+                "entryMode": "existing_project",
+                "workLane": "chore",
+                "repoPath": str(target_repo),
+                "baseBranch": "main",
+                "provider": "codex",
+                "model": "gpt-5.5",
+            })
+            require(
+                pilot_plan_response.status_code == 200,
+                "approved pilot plan create failed",
+                pilot_plan_response.json(),
+            )
+            pilot_plan = pilot_plan_response.json()
+            for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+                checkpoint_response = await client.patch(
+                    f"/api/orchestration/plan-inbox/{pilot_plan['id']}/checkpoints/{gate}",
+                    json={
+                        "status": "agreed",
+                        "summary": f"{gate} satisfied by approved pilot smoke fixture.",
+                    },
+                )
+                require(
+                    checkpoint_response.status_code == 200,
+                    f"pilot checkpoint {gate} failed",
+                    checkpoint_response.json(),
+                )
+            pilot_spec_response = await client.post(f"/api/orchestration/plan-inbox/{pilot_plan['id']}/specs", json={
+                "status": "ready",
+                "content": "\n".join([
+                    "# Agentic Forward Spec",
+                    "",
+                    "## Task Breakdown",
+                    "- Run approved pilot verification",
+                    "",
+                    "## Acceptance Criteria",
+                    "- The approved-plan pilot endpoint executes the verification command.",
+                    "- The pilot history captures a durable success record.",
+                    "",
+                    "## Verification Strategy",
+                    "- `npm run test`",
+                    "",
+                    "## Risks and Dependencies",
+                    "- The target repo must have a base commit.",
+                ]),
+            })
+            require(
+                pilot_spec_response.status_code == 200,
+                "approved pilot spec creation failed",
+                pilot_spec_response.json(),
+            )
+
+            pilot_response = await client.post(f"/api/orchestration/plan-inbox/{pilot_plan['id']}/pilot-run", json={
+                "runAgent": False,
+                "maxTasks": 1,
+                "maxStepsPerTask": 3,
+                "timeoutSeconds": 90,
+                "lockedBy": "orchestration-smoke-pilot",
+                "permissionOverride": "allow_once",
+            })
+            require(
+                pilot_response.status_code == 200,
+                "approved plan pilot run failed",
+                pilot_response.json(),
+            )
+            pilot = pilot_response.json()
+            require(
+                pilot["pilot"]["status"] == "succeeded",
+                "approved plan pilot did not succeed",
+                pilot["pilot"],
+            )
+            require(
+                pilot["artifact"]["type"] == "pilot_run",
+                "approved plan pilot artifact missing",
+                pilot.get("artifact"),
+            )
+            require(
+                pilot["artifact"]["metadata"]["plan_inbox_item_id"] == pilot_plan["id"],
+                "approved plan pilot artifact not linked to plan",
+                pilot["artifact"],
+            )
+            require(
+                pilot["tasks"][0]["status"] == "review",
+                "approved plan pilot task did not move to review",
+                pilot["tasks"][0],
+            )
+            require(
+                "orchestration-smoke-ok" in pilot["evidence"][0]["steps"][0]["output_summary"],
+                "approved plan pilot evidence missing verification marker",
+                pilot["evidence"][0],
+            )
+
+            pilot_history_response = await client.get(f"/api/orchestration/plan-inbox/{pilot_plan['id']}/pilot-runs")
+            require(
+                pilot_history_response.status_code == 200,
+                "approved plan pilot history fetch failed",
+                pilot_history_response.json(),
+            )
+            pilot_history = pilot_history_response.json()
+            require(
+                pilot_history and pilot_history[0]["status"] == "succeeded",
+                "approved plan pilot history missing success record",
+                pilot_history,
+            )
+            require(
+                pilot_history[0]["artifact"]["id"] == pilot["artifact"]["id"],
+                "approved plan pilot history not linked to artifact",
+                pilot_history[0],
+            )
+
             print("orchestration smoke passed")
             print(f"repo: {target_repo}")
             print(f"plan: {plan['id']}")
+            print(f"pilot_plan: {pilot_plan['id']}")
             print(f"task: {final_task['id']}")
+            print(f"pilot: {pilot['event']['id']}")
             print(f"output: {final_task['steps'][0]['output_summary']}")
             print(f"evidence: {evidence['summary']['step_count']} steps, {evidence['summary'].get('artifact_count', 0)} artifacts, {evidence['summary']['event_count']} events")
 
