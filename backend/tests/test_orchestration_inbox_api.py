@@ -1564,6 +1564,90 @@ async def test_autonomous_pilot_run_drives_spec_to_worker_execution(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_approved_plan_pilot_run_uses_existing_pm_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "approved-plan-pilot")
+    (target_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node -e \"console.log('approved-plan-pilot-ok')\""}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json"], cwd=target_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Add approved plan pilot script"], cwd=target_repo, check=True, capture_output=True, text=True)
+
+    from nidavellir.agents import registry as agent_registry
+
+    monkeypatch.setitem(
+        agent_registry.PROVIDER_REGISTRY,
+        "fake-approved-plan-worker",
+        agent_registry.ProviderManifest(
+            id="fake-approved-plan-worker",
+            display_name="Fake Approved Plan Worker",
+            binary="fake-approved-plan-worker",
+            description="test fake",
+            agent_class=PilotWorkerFakeAgent,
+            supports_worktree_isolation=True,
+        ),
+    )
+    monkeypatch.setattr(orchestration_router._agent_registry, "PROVIDER_REGISTRY", agent_registry.PROVIDER_REGISTRY)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Touch a file through the approved PM plan.",
+            "entryMode": "existing_project",
+            "workLane": "chore",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "provider": "fake-approved-plan-worker",
+            "model": "fake-model",
+        })).json()
+        for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for approved-plan pilot.",
+            })
+            assert checkpoint.status_code == 200
+        spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+            "content": "\n".join([
+                "# Agentic Forward Spec",
+                "",
+                "## Task Breakdown",
+                "- Touch a file through the approved PM plan",
+                "",
+                "## Acceptance Criteria",
+                "- Worker edits are isolated in the execution worktree.",
+                "- Execution evidence includes worker and verification artifacts.",
+                "",
+                "## Verification Strategy",
+                "- `npm run test`",
+                "",
+                "## Risks and Dependencies",
+                "- The target repo must have a base commit.",
+            ]),
+            "status": "ready",
+        })).json()
+
+        result = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pilot-run", json={
+            "runAgent": True,
+            "maxTasks": 1,
+            "lockedBy": "approved-plan-pilot-test",
+        })
+
+        assert result.status_code == 200
+        body = result.json()
+        assert body["plan"]["id"] == plan["id"]
+        assert body["spec"]["id"] == spec["id"]
+        assert body["decomposition"]["decomposition_run"]["spec_id"] == spec["id"]
+        assert body["decomposition"]["task_inbox_items"][0]["payload"]["pilot_source_plan_id"] == plan["id"]
+        assert body["daemon_tick"]["execution_queue"]["processed"][0]["status"] == "review"
+        final_task = body["tasks"][0]
+        assert final_task["base_repo_path"] == str(target_repo)
+        assert [step["type"] for step in final_task["steps"]] == ["agent", "command"]
+        assert {step["status"] for step in final_task["steps"]} == {"complete"}
+        assert body["evidence"][0]["summary"]["artifact_count"] >= 2
+        assert body["event"]["payload"]["plan_inbox_item_id"] == plan["id"]
+
+
+@pytest.mark.asyncio
 async def test_autonomous_pilot_run_requires_usable_base_ref(tmp_path: Path):
     setup_app(tmp_path)
     target_repo = tmp_path / "empty-new-project"
