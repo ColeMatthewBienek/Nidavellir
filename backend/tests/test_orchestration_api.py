@@ -380,7 +380,7 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
             (self.workdir / "agent.txt").write_text("agent touched\n", encoding="utf-8")
 
         async def stream(self):
-            yield "Changed agent.txt\n"
+            yield "Files changed: agent.txt\nTests run: fake test passed\nChanged agent.txt\n"
 
         async def kill(self):
             return None
@@ -423,7 +423,7 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
         step = (await c.post(f"/api/orchestration/nodes/{node['id']}/steps", json={
             "title": "Ask fake agent",
             "type": "agent",
-            "config": {"prompt": "Touch agent.txt"},
+            "config": {"prompt": "Touch agent.txt", "completion_contract": "worker"},
         })).json()
 
         result = await c.post(f"/api/orchestration/steps/{step['id']}/run-agent", json={
@@ -460,6 +460,83 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
         assert {"agent_step_started", "agent_step_finished", "run_attempt_created", "run_attempt_updated"} <= {
             event["type"] for event in evidence_body["events"]
         }
+
+
+@pytest.mark.asyncio
+async def test_orchestration_worker_agent_requires_completion_contract(tmp_path: Path, monkeypatch):
+    setup_app(tmp_path)
+    repo = create_git_repo(tmp_path / "repo")
+    worktree_path = tmp_path / "worktrees" / "agent-contract-node"
+
+    class FakeAgent:
+        def __init__(self, slot_id, workdir, model_id=None, dangerousness="restricted"):
+            self.workdir = Path(workdir)
+
+        async def start(self):
+            return None
+
+        async def send(self, text: str):
+            (self.workdir / "agent.txt").write_text("agent touched\n", encoding="utf-8")
+
+        async def stream(self):
+            yield "Done.\n"
+
+        async def kill(self):
+            return None
+
+    from nidavellir.agents import registry as agent_registry
+    from nidavellir.routers import orchestration as orchestration_router
+
+    monkeypatch.setitem(
+        agent_registry.PROVIDER_REGISTRY,
+        "fake-contract-agent",
+        agent_registry.ProviderManifest(
+            id="fake-contract-agent",
+            display_name="Fake Contract Agent",
+            binary="fake-contract-agent",
+            description="test fake",
+            agent_class=FakeAgent,
+            supports_worktree_isolation=True,
+        ),
+    )
+    monkeypatch.setattr(orchestration_router._agent_registry, "PROVIDER_REGISTRY", agent_registry.PROVIDER_REGISTRY)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Agent contract test",
+            "baseRepoPath": str(repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={
+            "title": "Agent Node",
+            "provider": "fake-contract-agent",
+            "model": "fake-model",
+        })).json()
+        worktree = (await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "repoPath": str(repo),
+            "baseBranch": "main",
+            "branchName": "orchestration/agent-contract-test/agent-node",
+            "worktreePath": str(worktree_path),
+        })).json()
+        step = (await c.post(f"/api/orchestration/nodes/{node['id']}/steps", json={
+            "title": "Ask fake contract agent",
+            "type": "agent",
+            "config": {"prompt": "Touch agent.txt", "completion_contract": "worker"},
+        })).json()
+
+        result = await c.post(f"/api/orchestration/steps/{step['id']}/run-agent", json={
+            "conversationId": "conv-agent-contract",
+        })
+
+        assert result.status_code == 200
+        body = result.json()
+        assert body["step"]["status"] == "failed"
+        assert body["run_attempt"]["status"] == "failed"
+        assert "Worker completion contract missing" in body["step"]["output_summary"]
+        assert body["worktree"]["id"] == worktree["id"]
+        assert body["artifact"]["metadata"]["completion_contract"] == "worker"
+        assert body["artifact"]["metadata"]["missing"] == ["verification evidence", "file-change report"]
 
 
 @pytest.mark.asyncio

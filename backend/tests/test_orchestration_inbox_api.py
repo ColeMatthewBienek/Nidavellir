@@ -1080,6 +1080,11 @@ async def test_decompose_approved_plan_creates_task_inbox_candidates(tmp_path: P
             ]),
             "status": "ready",
         })).json()
+        assert spec["artifact_id"]
+        spec_artifact = await c.get(f"/api/orchestration/artifacts/{spec['artifact_id']}")
+        assert spec_artifact.status_code == 200
+        assert spec_artifact.json()["type"] == "pm_spec"
+        assert spec_artifact.json()["metadata"]["spec_id"] == spec["id"]
 
         decomposed = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/decompose", json={
             "specId": spec["id"],
@@ -1091,7 +1096,12 @@ async def test_decompose_approved_plan_creates_task_inbox_candidates(tmp_path: P
         body = decomposed.json()
         assert body["plan"]["status"] == "decomposed"
         assert body["decomposition_run"]["spec_id"] == spec["id"]
+        assert body["decomposition_run"]["artifact_id"]
         assert body["decomposition_run"]["decomposer_output"]["source"] == "deterministic_markdown_decomposer"
+        decomp_artifact = await c.get(f"/api/orchestration/artifacts/{body['decomposition_run']['artifact_id']}")
+        assert decomp_artifact.status_code == 200
+        assert decomp_artifact.json()["type"] == "decomposition_run"
+        assert decomp_artifact.json()["metadata"]["decomposition_run_id"] == body["decomposition_run"]["id"]
         assert [item["title"] for item in body["task_inbox_items"]] == [
             "Add durable Plan Inbox persistence",
             "Add Task Inbox EM processing endpoint",
