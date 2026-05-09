@@ -353,6 +353,11 @@ async def test_orchestration_runs_command_steps_inside_node_worktree(tmp_path: P
             event["type"] for event in evidence_body["events"]
         }
 
+        artifact = await c.get(f"/api/orchestration/artifacts/{body['artifact']['id']}")
+        assert artifact.status_code == 200
+        assert artifact.json()["id"] == body["artifact"]["id"]
+        assert artifact.json()["metadata"]["command_run_id"] == body["run"]["id"]
+
 
 @pytest.mark.asyncio
 async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Path, monkeypatch):

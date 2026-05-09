@@ -1378,6 +1378,47 @@ ${pending.length ? pending.map((title) => `- ${title}`).join('\n') : '- None'}
   );
 }
 
+function ArtifactViewerModal({
+  artifact,
+  onClose,
+}: {
+  artifact: OrchestrationArtifact;
+  onClose: () => void;
+}) {
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="artifact-viewer-title" style={{ position: 'fixed', inset: 0, zIndex: 70, background: '#000000aa', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18, boxSizing: 'border-box' }}>
+      <div style={{ width: 'min(820px, 100%)', maxHeight: 'calc(100vh - 36px)', border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateRows: 'auto auto minmax(0, 1fr)' }}>
+        <div style={{ height: 44, borderBottom: '1px solid var(--bd)', padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div id="artifact-viewer-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{artifact.title}</div>
+          <Btn small onClick={onClose}>Close</Btn>
+        </div>
+        <div style={{ borderBottom: '1px solid var(--bd)', padding: 12, display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'center' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {artifact.type} · {artifact.created_at}
+            </div>
+            <div style={{ color: 'var(--t0)', fontSize: 12, marginTop: 5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {artifact.summary || 'No summary'}
+            </div>
+          </div>
+          <StatusPill status={String(artifact.metadata?.status ?? artifact.type)} />
+        </div>
+        <div style={{ overflow: 'auto', padding: 14, display: 'grid', gridTemplateRows: 'minmax(120px, 1fr) auto', gap: 12 }}>
+          <pre style={{ margin: 0, minHeight: 180, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: 'var(--t0)', fontSize: 12, lineHeight: 1.5, fontFamily: 'var(--mono)' }}>
+{artifact.content || artifact.summary || 'No artifact content captured.'}
+          </pre>
+          <details>
+            <summary style={{ color: 'var(--t1)', fontSize: 12, cursor: 'pointer' }}>Metadata</summary>
+            <pre style={{ margin: '8px 0 0', maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: 'var(--t1)', fontSize: 11, lineHeight: 1.45, fontFamily: 'var(--mono)' }}>
+{JSON.stringify(artifact.metadata ?? {}, null, 2)}
+            </pre>
+          </details>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TaskInboxPanel({
   items,
   onMaterialize,
@@ -1620,7 +1661,17 @@ function DagView({
   );
 }
 
-function ExecutionEvidencePanel({ steps, nodes, evidence }: { steps: OrchestrationStep[]; nodes: OrchestrationNode[]; evidence?: TaskExecutionEvidence | null }) {
+function ExecutionEvidencePanel({
+  steps,
+  nodes,
+  evidence,
+  onOpenArtifact,
+}: {
+  steps: OrchestrationStep[];
+  nodes: OrchestrationNode[];
+  evidence?: TaskExecutionEvidence | null;
+  onOpenArtifact: (artifact: OrchestrationArtifact) => void;
+}) {
   const nodeTitles = new Map(nodes.map((node) => [node.id, node.title]));
   const sourceSteps = evidence?.steps?.length ? evidence.steps : steps;
   const latestArtifact = evidence?.artifacts?.[0];
@@ -1641,7 +1692,11 @@ function ExecutionEvidencePanel({ steps, nodes, evidence }: { steps: Orchestrati
       </div>
       <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 8, marginTop: 9 }}>
         {latestArtifact && (
-          <div style={{ border: '1px solid #1f6feb55', borderRadius: 6, padding: 8, background: '#1f6feb14', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+          <button
+            type="button"
+            onClick={() => onOpenArtifact(latestArtifact)}
+            style={{ border: '1px solid #1f6feb55', borderRadius: 6, padding: 8, background: '#1f6feb14', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center', cursor: 'pointer', textAlign: 'left' }}
+          >
             <div style={{ minWidth: 0 }}>
               <div style={{ color: 'var(--blu)', fontSize: 12, fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {latestArtifact.title}
@@ -1651,7 +1706,7 @@ function ExecutionEvidencePanel({ steps, nodes, evidence }: { steps: Orchestrati
               </div>
             </div>
             <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{latestArtifact.type}</div>
-          </div>
+          </button>
         )}
         {evidenceSteps.length === 0 ? (
           <div style={{ color: 'var(--t1)', fontSize: 12 }}>No execution evidence yet.</div>
@@ -1715,6 +1770,7 @@ function TaskDetail({
   onCompleteStep,
   onRunCommandStep,
   onRunAgentStep,
+  onOpenArtifact,
   worktreeReviews,
   worktreeProposals,
   worktreePreflights,
@@ -1743,6 +1799,7 @@ function TaskDetail({
   onCompleteStep: (stepId: string) => void;
   onRunCommandStep: (stepId: string) => void;
   onRunAgentStep: (stepId: string) => void;
+  onOpenArtifact: (artifact: OrchestrationArtifact) => void;
   worktreeReviews: Record<string, WorktreeReview>;
   worktreeProposals: Record<string, WorktreeIntegrationProposal>;
   worktreePreflights: Record<string, WorktreeIntegrationPreflight>;
@@ -1820,7 +1877,7 @@ function TaskDetail({
           </section>
         )}
 
-        <ExecutionEvidencePanel steps={task.steps} nodes={task.nodes} evidence={evidence} />
+        <ExecutionEvidencePanel steps={task.steps} nodes={task.nodes} evidence={evidence} onOpenArtifact={onOpenArtifact} />
 
         <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
@@ -2590,6 +2647,7 @@ export function PlanScreen() {
   const [specViewerOpen, setSpecViewerOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
   const [taskEvidence, setTaskEvidence] = useState<TaskExecutionEvidence | null>(null);
+  const [selectedArtifact, setSelectedArtifact] = useState<OrchestrationArtifact | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
   const [daemonEvents, setDaemonEvents] = useState<OrchestrationEvent[]>([]);
@@ -2762,6 +2820,17 @@ export function PlanScreen() {
         loadDaemonEvents();
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_task_failed'));
+  };
+
+  const openArtifact = (artifact: OrchestrationArtifact) => {
+    setSelectedArtifact(artifact);
+    fetch(`${API}/api/orchestration/artifacts/${artifact.id}`)
+      .then(async (response) => {
+        if (!response.ok) return artifact;
+        return response.json() as Promise<OrchestrationArtifact>;
+      })
+      .then(setSelectedArtifact)
+      .catch(() => undefined);
   };
 
   useEffect(() => {
@@ -3170,6 +3239,7 @@ export function PlanScreen() {
         if (selectedTask?.id === archived.id) {
           setSelectedTask(null);
           setTaskEvidence(null);
+          setSelectedArtifact(null);
           setSelectedNodeId(null);
           setEvents([]);
         }
@@ -3197,6 +3267,7 @@ export function PlanScreen() {
         if (selectedTask && archivedIds.has(selectedTask.id)) {
           setSelectedTask(null);
           setTaskEvidence(null);
+          setSelectedArtifact(null);
           setSelectedNodeId(null);
           setEvents([]);
         }
@@ -3820,6 +3891,13 @@ export function PlanScreen() {
           />
         )}
 
+        {selectedArtifact && (
+          <ArtifactViewerModal
+            artifact={selectedArtifact}
+            onClose={() => setSelectedArtifact(null)}
+          />
+        )}
+
         <div style={{
           flex: 1,
           overflow: 'auto',
@@ -3895,6 +3973,7 @@ export function PlanScreen() {
           onCompleteStep={completeStep}
           onRunCommandStep={runCommandStep}
           onRunAgentStep={runAgentStep}
+          onOpenArtifact={openArtifact}
           worktreeReviews={worktreeReviews}
           worktreeProposals={worktreeProposals}
           worktreePreflights={worktreePreflights}
