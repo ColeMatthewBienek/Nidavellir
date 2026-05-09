@@ -140,6 +140,37 @@ const detailWithEvidence = {
   }],
 };
 
+const taskEvidence = {
+  task_id: 'task-1',
+  task_status: 'review',
+  generated_at: '2026-05-03T00:00:00Z',
+  summary: {
+    step_count: 1,
+    run_attempt_count: 1,
+    event_count: 2,
+    latest_status: 'complete',
+  },
+  steps: detailWithEvidence.steps,
+  run_attempts: [{
+    id: 'attempt-1',
+    task_id: 'task-1',
+    node_id: 'node-1',
+    step_id: 'step-1',
+    conversation_id: 'conv-1',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    worktree_path: '/repo-worktrees/node-1',
+    status: 'completed',
+    started_at: '2026-05-03T00:00:00Z',
+    completed_at: '2026-05-03T00:01:00Z',
+    error: null,
+  }],
+  events: [
+    { id: 'event-run-1', type: 'agent_step_started', payload: { status: 'running' }, created_at: '2026-05-03T00:00:00Z' },
+    { id: 'event-run-2', type: 'agent_step_finished', payload: { status: 'complete' }, created_at: '2026-05-03T00:01:00Z' },
+  ],
+};
+
 const detailWithDirtyWorktree = {
   ...detailWithWorktree,
   worktrees: [{
@@ -827,6 +858,20 @@ describe('PlanScreen orchestration board', () => {
         return Promise.resolve({
           ok: true,
           json: async () => [{ id: 'event-1', type: 'task_created', payload: {}, created_at: '2026-05-02T00:00:00Z' }],
+        });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/evidence')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task_id: 'task-1',
+            task_status: 'backlog',
+            generated_at: '2026-05-03T00:00:00Z',
+            summary: { step_count: 0, run_attempt_count: 0, event_count: 0, latest_status: 'backlog' },
+            steps: [],
+            run_attempts: [],
+            events: [],
+          }),
         });
       }
       if (String(url).includes('/api/orchestration/events')) {
@@ -1710,6 +1755,9 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).includes('/api/orchestration/tasks/task-1/events')) {
         return Promise.resolve({ ok: true, json: async () => [] });
       }
+      if (String(url).includes('/api/orchestration/tasks/task-1/evidence')) {
+        return Promise.resolve({ ok: true, json: async () => taskEvidence });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detailWithEvidence });
       }
@@ -1718,6 +1766,7 @@ describe('PlanScreen orchestration board', () => {
     render(<PlanScreen />);
 
     expect(await screen.findByText('Execution Evidence')).toBeTruthy();
+    expect(await screen.findByText('1 runs · 2 events')).toBeTruthy();
     expect(await screen.findByText('Data Model · command')).toBeTruthy();
     expect((await screen.findAllByText(/marker artifact written/)).length).toBeGreaterThanOrEqual(1);
   });
