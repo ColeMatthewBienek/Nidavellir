@@ -1535,6 +1535,66 @@ class OrchestrationStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def create_artifact(
+        self,
+        *,
+        task_id: str,
+        type: str,
+        title: str,
+        summary: str = "",
+        content: str = "",
+        metadata: dict | None = None,
+        node_id: str | None = None,
+        step_id: str | None = None,
+        run_attempt_id: str | None = None,
+    ) -> dict:
+        artifact_id = str(uuid.uuid4())
+        created_at = _now()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO orchestration_artifacts
+                   (id, task_id, node_id, step_id, run_attempt_id, type, title, summary, content, metadata_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    artifact_id,
+                    task_id,
+                    node_id,
+                    step_id,
+                    run_attempt_id,
+                    type,
+                    title.strip(),
+                    summary,
+                    content,
+                    _json_dumps(metadata or {}),
+                    created_at,
+                ),
+            )
+        self.append_event(
+            task_id=task_id,
+            node_id=node_id,
+            step_id=step_id,
+            run_attempt_id=run_attempt_id,
+            type="artifact_created",
+            payload={"artifact_id": artifact_id, "artifact_type": type, "title": title.strip()},
+        )
+        return self.get_artifact(artifact_id) or {}
+
+    def get_artifact(self, artifact_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM orchestration_artifacts WHERE id = ?", (artifact_id,)).fetchone()
+        return self._artifact_row(row) if row else None
+
+    def list_artifacts(self, *, task_id: str, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM orchestration_artifacts
+                   WHERE task_id = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (task_id, limit),
+            ).fetchall()
+        return [self._artifact_row(row) for row in rows]
+
     def create_worktree(
         self,
         *,
@@ -1916,6 +1976,11 @@ class OrchestrationStore:
     def _worktree_row(self, row: sqlite3.Row) -> dict:
         item = dict(row)
         item["dirty_summary"] = _json_loads(item.pop("dirty_summary_json"), [])
+        return item
+
+    def _artifact_row(self, row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["metadata"] = _json_loads(item.pop("metadata_json"), {})
         return item
 
     def _plan_inbox_row(self, row: sqlite3.Row) -> dict:
