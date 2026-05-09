@@ -440,6 +440,16 @@ interface PlanDecomposeResult {
   task_inbox_items: TaskInboxItem[];
 }
 
+interface PlanPilotRunResult {
+  plan: PlanInboxDetail;
+  spec: AgenticSpec;
+  decomposition: PlanDecomposeResult;
+  daemon_tick: Record<string, unknown>;
+  tasks: OrchestrationTaskDetail[];
+  evidence: TaskExecutionEvidence[];
+  event: OrchestrationEvent;
+}
+
 interface PlanBriefTaskResult {
   plan: PlanInboxDetail;
   task_inbox_item: TaskInboxItem;
@@ -1244,6 +1254,7 @@ function PlannerModal({
   onSend,
   onViewSpec,
   onDecompose,
+  onRunPilot,
   onBriefTask,
   onInspectRepo,
   onSetupRepo,
@@ -1258,6 +1269,7 @@ function PlannerModal({
   onSend: (content: string) => void;
   onViewSpec: () => void;
   onDecompose: () => void;
+  onRunPilot: () => void;
   onBriefTask: (options: PlanBriefTaskOptions) => void;
   onInspectRepo: () => void;
   onSetupRepo: () => void;
@@ -1292,6 +1304,14 @@ function PlannerModal({
                 title={canDecompose ? 'Create decomposer run and Task Inbox candidates' : 'Requires an approved ready spec and all PM gates'}
               >
                 Send to Decomposer
+              </Btn>
+              <Btn
+                small
+                disabled={!canDecompose || loading}
+                onClick={onRunPilot}
+                title={canDecompose ? 'Run one bounded autonomous pilot from this approved spec' : 'Requires an approved ready spec and all PM gates'}
+              >
+                Run Pilot
               </Btn>
               {item?.entry_mode === 'existing_project' && (
                 <>
@@ -3145,6 +3165,55 @@ export function PlanScreen() {
       .finally(() => setLoading(false));
   };
 
+  const runSelectedPlanPilot = () => {
+    if (!selectedPlanInboxItem) return;
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/pilot-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        maxTasks: 1,
+        runAgent: true,
+        lockedBy: 'plan-screen-pilot',
+        permissionOverride: 'allow_once',
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_pilot_run_${response.status}`);
+        return response.json() as Promise<PlanPilotRunResult>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+        setTaskInboxItems((current) => [
+          ...result.decomposition.task_inbox_items,
+          ...current.filter((item) => !result.decomposition.task_inbox_items.some((created) => created.id === item.id)),
+        ]);
+        if (result.tasks.length > 0) {
+          const selected = result.tasks[0];
+          setTasks((current) => [
+            ...result.tasks,
+            ...current.filter((item) => !result.tasks.some((task) => task.id === item.id)),
+          ]);
+          setSelectedTask({
+            ...selected,
+            nodes: selected.nodes ?? [],
+            edges: selected.edges ?? [],
+            steps: selected.steps ?? [],
+            worktrees: selected.worktrees ?? [],
+            readiness: selected.readiness ?? { runnable: [], blocked: [] },
+          });
+          setTaskEvidence(result.evidence[0] ?? null);
+          setSelectedNodeId(selected.nodes?.[0]?.id ?? null);
+        }
+        loadDaemonEvents();
+        loadDaemonState();
+        loadReadinessReport();
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_pilot_run_failed'))
+      .finally(() => setLoading(false));
+  };
+
   const briefSelectedExistingProjectPlan = (options: PlanBriefTaskOptions = { skipAgentStep: true }) => {
     if (!selectedPlanInboxItem) return;
     setLoading(true);
@@ -3876,6 +3945,7 @@ export function PlanScreen() {
             onSend={createPlannerDiscussionMessage}
             onViewSpec={() => setSpecViewerOpen(true)}
             onDecompose={decomposeSelectedPlan}
+            onRunPilot={runSelectedPlanPilot}
             onBriefTask={briefSelectedExistingProjectPlan}
             onInspectRepo={inspectSelectedPlanRepo}
             onSetupRepo={setupSelectedPlanRepo}
