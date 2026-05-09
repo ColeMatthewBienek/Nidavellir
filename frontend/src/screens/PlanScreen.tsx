@@ -471,6 +471,17 @@ interface PlanPilotRunRecord {
   event: OrchestrationEvent;
 }
 
+function pilotFailureRecovery(failure: Record<string, unknown> | undefined): string {
+  const code = String(failure?.code ?? '');
+  if (code === 'waiting_for_user') return 'Approve or reject the pending tool request, then queue the task again.';
+  if (code === 'waiting_for_autonomy') return 'Run with Worker enabled or switch the daemon to autonomous execution.';
+  if (code === 'no_task_executed') return 'Check decomposition output and queue state, then rerun the pilot.';
+  if (code === 'execution_error') return 'Open the task evidence, fix the runner error, then queue the task again.';
+  if (code.endsWith('_failed')) return 'Open the task evidence, fix the failing step, then queue the task again.';
+  if (code.startsWith('task_')) return 'Review the task, adjust scope or verification, then queue it again.';
+  return 'Open the pilot artifact or task evidence for the next safe action.';
+}
+
 interface PlanBriefTaskResult {
   plan: PlanInboxDetail;
   task_inbox_item: TaskInboxItem;
@@ -1087,8 +1098,20 @@ function CheckpointRail({
 
 function PilotRunHistory({
   runs,
+  onOpenTask,
+  onQueueTask,
+  onMarkTaskDone,
+  onArchiveTask,
+  onOpenArtifact,
+  onRetryPilot,
 }: {
   runs: PlanPilotRunRecord[];
+  onOpenTask: (taskId: string) => void;
+  onQueueTask: (taskId: string) => void;
+  onMarkTaskDone: (taskId: string) => void;
+  onArchiveTask: (taskId: string) => void;
+  onOpenArtifact: (artifact: OrchestrationArtifact) => void;
+  onRetryPilot: () => void;
 }) {
   return (
     <section style={{ borderTop: '1px solid var(--bd)', display: 'flex', flexDirection: 'column', minHeight: 0, flex: '0 0 210px' }}>
@@ -1102,17 +1125,33 @@ function PilotRunHistory({
             No pilot runs yet.
           </div>
         ) : runs.map((run) => (
-          <div key={run.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div key={run.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 7 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
               <StatusPill status={run.status} />
               <span style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>{new Date(run.created_at).toLocaleTimeString()}</span>
             </div>
             <div style={{ color: 'var(--t0)', fontSize: 12, lineHeight: 1.4, overflowWrap: 'anywhere' }}>{run.summary || `${run.task_ids.length} task(s)`}</div>
             {run.failures.length > 0 && (
-              <div style={{ color: 'var(--red)', fontSize: 11, lineHeight: 1.35 }}>
-                {String(run.failures[0]?.code ?? 'failure')} · {String(run.failures[0]?.message ?? 'Review pilot artifact')}
+              <div style={{ border: '1px solid #f8514955', borderRadius: 6, background: '#f8514912', padding: 7, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ color: 'var(--red)', fontSize: 11, lineHeight: 1.35, fontWeight: 800 }}>
+                  {String(run.failures[0]?.code ?? 'failure')}
+                </div>
+                <div style={{ color: 'var(--t0)', fontSize: 11, lineHeight: 1.35, overflowWrap: 'anywhere' }}>
+                  {String(run.failures[0]?.message ?? 'Review pilot artifact')}
+                </div>
+                <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.35 }}>
+                  {pilotFailureRecovery(run.failures[0])}
+                </div>
               </div>
             )}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {run.task_ids[0] && <Btn small onClick={() => onOpenTask(run.task_ids[0])}>Open Task</Btn>}
+              {run.task_ids[0] && <Btn small onClick={() => onQueueTask(run.task_ids[0])}>Queue Task</Btn>}
+              {run.task_ids[0] && <Btn small onClick={() => onMarkTaskDone(run.task_ids[0])}>Mark Done</Btn>}
+              {run.task_ids[0] && <Btn small onClick={() => onArchiveTask(run.task_ids[0])}>Archive Task</Btn>}
+              {run.artifact && <Btn small onClick={() => onOpenArtifact(run.artifact as OrchestrationArtifact)}>Artifact</Btn>}
+              <Btn small onClick={onRetryPilot}>Retry Pilot</Btn>
+            </div>
           </div>
         ))}
       </div>
@@ -1320,6 +1359,11 @@ function PlannerModal({
   onViewSpec,
   onDecompose,
   onRunPilot,
+  onOpenPilotTask,
+  onQueuePilotTask,
+  onMarkPilotTaskDone,
+  onArchivePilotTask,
+  onOpenArtifact,
   onBriefTask,
   onInspectRepo,
   onSetupRepo,
@@ -1336,6 +1380,11 @@ function PlannerModal({
   onViewSpec: () => void;
   onDecompose: () => void;
   onRunPilot: (options: PlanPilotRunOptions) => void;
+  onOpenPilotTask: (taskId: string) => void;
+  onQueuePilotTask: (taskId: string) => void;
+  onMarkPilotTaskDone: (taskId: string) => void;
+  onArchivePilotTask: (taskId: string) => void;
+  onOpenArtifact: (artifact: OrchestrationArtifact) => void;
   onBriefTask: (options: PlanBriefTaskOptions) => void;
   onInspectRepo: () => void;
   onSetupRepo: () => void;
@@ -1476,7 +1525,15 @@ function PlannerModal({
         </div>
         <aside style={{ borderLeft: '1px solid var(--bd)', background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 300, minHeight: 0 }}>
           <CheckpointRail checkpoints={item?.planning_checkpoints ?? []} />
-          <PilotRunHistory runs={pilotRuns} />
+          <PilotRunHistory
+            runs={pilotRuns}
+            onOpenTask={onOpenPilotTask}
+            onQueueTask={onQueuePilotTask}
+            onMarkTaskDone={onMarkPilotTaskDone}
+            onArchiveTask={onArchivePilotTask}
+            onOpenArtifact={onOpenArtifact}
+            onRetryPilot={runPilot}
+          />
         </aside>
       </div>
     </div>
@@ -3488,8 +3545,50 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_move_failed'));
   };
 
+  const moveTaskById = (taskId: string, status: string) => {
+    fetch(`${API}/api/orchestration/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_move_${response.status}`);
+        return response.json() as Promise<OrchestrationTaskDetail>;
+      })
+      .then((updated) => {
+        setTasks((current) => [
+          updated,
+          ...current.filter((item) => item.id !== updated.id),
+        ]);
+        setSelectedTask(updated);
+        setLastPilotTaskId(updated.id);
+        loadTask(updated.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_move_failed'));
+  };
+
   const archiveTask = (task: OrchestrationTaskSummary) => {
     fetch(`${API}/api/orchestration/tasks/${task.id}/archive`, { method: 'POST' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`orchestration_archive_${response.status}`);
+        return response.json() as Promise<OrchestrationTaskDetail>;
+      })
+      .then((archived) => {
+        setTasks((current) => current.filter((item) => item.id !== archived.id));
+        if (selectedTask?.id === archived.id) {
+          setSelectedTask(null);
+          setTaskEvidence(null);
+          setSelectedArtifact(null);
+          setSelectedNodeId(null);
+          setLastPilotTaskId(null);
+          setEvents([]);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_archive_failed'));
+  };
+
+  const archiveTaskById = (taskId: string) => {
+    fetch(`${API}/api/orchestration/tasks/${taskId}/archive`, { method: 'POST' })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_archive_${response.status}`);
         return response.json() as Promise<OrchestrationTaskDetail>;
@@ -4162,6 +4261,14 @@ export function PlanScreen() {
             onViewSpec={() => setSpecViewerOpen(true)}
             onDecompose={decomposeSelectedPlan}
             onRunPilot={runSelectedPlanPilot}
+            onOpenPilotTask={(taskId) => {
+              setLastPilotTaskId(taskId);
+              loadTask(taskId);
+            }}
+            onQueuePilotTask={(taskId) => moveTaskById(taskId, 'queued_for_execution')}
+            onMarkPilotTaskDone={(taskId) => moveTaskById(taskId, 'done')}
+            onArchivePilotTask={archiveTaskById}
+            onOpenArtifact={openArtifact}
             onBriefTask={briefSelectedExistingProjectPlan}
             onInspectRepo={inspectSelectedPlanRepo}
             onSetupRepo={setupSelectedPlanRepo}
