@@ -349,6 +349,25 @@ class OrchestrationDaemonTickRequest(BaseModel):
     ignorePaused: bool = False
 
 
+class AutonomousPilotRunRequest(BaseModel):
+    rawPlan: str = Field(min_length=1)
+    repoPath: str = Field(min_length=1)
+    entryMode: str = "existing_project"
+    workLane: str = "feature"
+    baseBranch: str = "main"
+    provider: str | None = None
+    model: str | None = None
+    specContent: str | None = None
+    acceptanceCriteria: list[str] = Field(default_factory=list)
+    maxTasks: int = Field(default=1, ge=1, le=3)
+    runAgent: bool = True
+    createDirectory: bool = False
+    initializeGit: bool = False
+    lockedBy: str = Field(default="autonomous-pilot", min_length=1)
+    permissionOverride: str | None = PermissionDecision.ALLOW_ONCE.value
+    timeoutSeconds: int = Field(default=120, ge=1, le=600)
+
+
 class OrchestrationDaemonStateUpdateRequest(BaseModel):
     lockedBy: str | None = Field(default=None, min_length=1)
     status: str | None = None
@@ -1007,6 +1026,54 @@ def _decompose_spec_to_candidates(plan: dict, spec: dict, max_tasks: int) -> dic
         "candidate_count": len(candidates),
         "candidate_tasks": candidates,
     }
+
+
+def _default_autonomous_pilot_spec(body: AutonomousPilotRunRequest) -> str:
+    criteria = body.acceptanceCriteria or [
+        "The autonomous queue can materialize and execute the requested task.",
+        "The evidence bundle captures execution steps, events, and artifacts.",
+    ]
+    verification = "`npm run test`"
+    if body.entryMode == "existing_project":
+        profile = _inspect_existing_project_repo(body.repoPath, body.baseBranch)
+        commands = profile.get("test_commands") if isinstance(profile, dict) else []
+        if commands:
+            verification = f"`{commands[0]}`"
+    return "\n".join([
+        "# Agentic Forward Spec",
+        "",
+        "## Scope",
+        f"- {body.rawPlan.strip()}",
+        "",
+        "## Task Breakdown",
+        f"- {body.rawPlan.strip()}",
+        "",
+        "## Acceptance Criteria",
+        *[f"- {criterion}" for criterion in criteria],
+        "",
+        "## Verification Strategy",
+        f"- {verification}",
+        "",
+        "## Risks and Dependencies",
+        "- The target repository must be initialized and available before worktree provisioning.",
+        "- The worker must report file-change evidence and verification evidence.",
+    ])
+
+
+def _repo_has_base_ref(repo_path: str, base_branch: str) -> bool:
+    try:
+        root = repo_root(Path(repo_path).expanduser().resolve())
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", base_branch],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def _existing_project_brief_title(plan: dict, override: str | None = None) -> str:
@@ -2976,6 +3043,147 @@ def decompose_approved_plan(item_id: str, body: PlanInboxDecomposeRequest, reque
     except Exception as err:
         _handle_store_error(err)
         raise
+
+
+@router.post("/pilot-runs")
+async def run_autonomous_pilot(body: AutonomousPilotRunRequest, request: Request) -> dict:
+    store = _store(request)
+    if body.entryMode not in {"new_project", "existing_project"}:
+        raise HTTPException(status_code=400, detail="invalid_pilot_entry_mode")
+    if body.workLane == "project" and body.entryMode == "existing_project":
+        raise HTTPException(status_code=400, detail="existing_project_pilot_requires_bounded_lane")
+
+    preview = _preview_plan_repo_target(body.repoPath, body.entryMode, body.baseBranch)
+    if preview.get("status") == "blocked":
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_target_blocked", "preview": preview})
+    if body.entryMode == "existing_project" and not preview.get("can_use"):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_target_not_usable", "preview": preview})
+    if body.entryMode == "new_project" and preview.get("requires_setup") and not (body.createDirectory or body.initializeGit):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_setup_required", "preview": preview})
+
+    repo_profile = _inspect_existing_project_repo(preview.get("repo_path") or body.repoPath, body.baseBranch) if body.entryMode == "existing_project" else {}
+    plan = store.create_plan_inbox_item(
+        raw_plan=body.rawPlan,
+        repo_path=preview.get("repo_path") or body.repoPath,
+        base_branch=body.baseBranch,
+        provider=body.provider,
+        model=body.model,
+        entry_mode=body.entryMode,
+        work_lane=body.workLane,
+        automation_mode="autonomous",
+        max_concurrency=1,
+        source="autonomous_pilot",
+        constraints=["Autonomous pilot run must preserve worktree isolation and evidence artifacts."],
+        acceptance_criteria=body.acceptanceCriteria,
+        repo_profile=repo_profile,
+    )
+
+    setup_result = None
+    if body.entryMode == "new_project" and (body.createDirectory or body.initializeGit):
+        setup_result = _setup_plan_repo_target(
+            store,
+            plan,
+            PlanRepoSetupRequest(
+                createDirectory=body.createDirectory,
+                initializeGit=body.initializeGit,
+                baseBranch=body.baseBranch,
+                lockedBy=body.lockedBy,
+            ),
+        )
+        plan = setup_result["plan"]
+
+    repo_path = str(plan.get("repo_path") or "").strip()
+    if not _planner_repo_target_ready_path(repo_path):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_target_not_ready", "repo_path": repo_path})
+    if not _repo_has_base_ref(repo_path, body.baseBranch):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_base_ref_required", "repo_path": repo_path, "base_branch": body.baseBranch})
+
+    checkpoint_summaries = {
+        "repo_target": f"Pilot target locked at {repo_path} on {body.baseBranch}.",
+        "scope": "Pilot scope is one bounded autonomous execution slice.",
+        "acceptance": "Pilot acceptance criteria are captured in the ready spec.",
+        "verification": "Pilot verification is captured as deterministic command steps.",
+        "risks": "Pilot risks are limited to repo readiness, worktree isolation, and worker completion evidence.",
+        "spec_draft": "Pilot generated an agentic-forward Markdown spec.",
+        "spec_approved": "Pilot spec is explicitly approved by the harness request.",
+    }
+    for key, summary in checkpoint_summaries.items():
+        store.update_planning_checkpoint(
+            plan_inbox_item_id=plan["id"],
+            key=key,
+            status="agreed",
+            summary=summary,
+        )
+
+    spec_content = (body.specContent or "").strip() or _default_autonomous_pilot_spec(body)
+    spec = create_agentic_spec(
+        plan["id"],
+        AgenticSpecCreateRequest(
+            content=spec_content,
+            status="ready",
+            metadata={"source": "autonomous_pilot", "run_agent": body.runAgent},
+        ),
+        request,
+    )
+    plan = store.get_plan_inbox_item(plan["id"]) or plan
+    decomposed = decompose_approved_plan(
+        plan["id"],
+        PlanInboxDecomposeRequest(specId=spec["id"], maxTasks=body.maxTasks, createTaskInboxItems=True),
+        request,
+    )
+
+    task_inbox_items = []
+    for item in decomposed["task_inbox_items"]:
+        payload = dict(item.get("payload") or {})
+        payload["skip_agent_step"] = not body.runAgent
+        payload.setdefault("pilot_run", True)
+        updated = store.update_task_inbox_item(item["id"], {"payload": payload}) or item
+        task_inbox_items.append(updated)
+    decomposed["task_inbox_items"] = task_inbox_items
+
+    tick = await run_orchestration_daemon_tick(
+        OrchestrationDaemonTickRequest(
+            lockedBy=body.lockedBy,
+            autonomyMode="autonomous",
+            processInbox=True,
+            runQueue=True,
+            maxInboxItems=body.maxTasks,
+            maxQueuedTasks=body.maxTasks,
+            maxStepsPerTask=10,
+            permissionOverride=body.permissionOverride,
+            ignorePaused=True,
+        ),
+        request,
+    )
+    processed_tasks = [
+        item.get("task")
+        for item in tick.get("execution_queue", {}).get("processed", [])
+        if isinstance(item.get("task"), dict)
+    ]
+    evidence = [
+        get_task_execution_evidence(task["id"], request)
+        for task in processed_tasks
+        if task.get("id")
+    ]
+    event = store.append_event(type="autonomous_pilot_run_finished", payload={
+        "plan_inbox_item_id": plan["id"],
+        "spec_id": spec["id"],
+        "decomposition_run_id": decomposed["decomposition_run"]["id"],
+        "task_inbox_item_ids": [item["id"] for item in task_inbox_items],
+        "task_ids": [task["id"] for task in processed_tasks],
+        "run_agent": body.runAgent,
+        "evidence_count": len(evidence),
+    })
+    return {
+        "plan": store.get_plan_inbox_item(plan["id"]) or plan,
+        "setup": setup_result,
+        "spec": spec,
+        "decomposition": decomposed,
+        "daemon_tick": tick,
+        "tasks": processed_tasks,
+        "evidence": evidence,
+        "event": event,
+    }
 
 
 @router.get("/task-inbox")
