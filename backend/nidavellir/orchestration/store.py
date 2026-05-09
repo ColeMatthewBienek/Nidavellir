@@ -1524,6 +1524,17 @@ class OrchestrationStore:
             row = conn.execute("SELECT * FROM orchestration_run_attempts WHERE id = ?", (attempt_id,)).fetchone()
         return dict(row) if row else None
 
+    def list_run_attempts(self, *, task_id: str, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM orchestration_run_attempts
+                   WHERE task_id = ?
+                   ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+                   LIMIT ?""",
+                (task_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_worktree(
         self,
         *,

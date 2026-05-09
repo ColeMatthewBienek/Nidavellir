@@ -334,6 +334,17 @@ async def test_orchestration_runs_command_steps_inside_node_worktree(tmp_path: P
         event_types = {event["type"] for event in events.json()}
         assert {"command_step_started", "command_step_finished"} <= event_types
 
+        evidence = await c.get(f"/api/orchestration/tasks/{task['id']}/evidence")
+        assert evidence.status_code == 200
+        evidence_body = evidence.json()
+        assert evidence_body["summary"]["step_count"] == 1
+        assert evidence_body["summary"]["event_count"] >= 2
+        assert evidence_body["steps"][0]["id"] == step["id"]
+        assert evidence_body["steps"][0]["output_summary"]
+        assert {"command_step_started", "command_step_finished"} <= {
+            event["type"] for event in evidence_body["events"]
+        }
+
 
 @pytest.mark.asyncio
 async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Path, monkeypatch):
@@ -419,6 +430,16 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
         events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
         event_types = {event["type"] for event in events.json()}
         assert {"agent_step_started", "agent_step_finished", "run_attempt_created", "run_attempt_updated"} <= event_types
+
+        evidence = await c.get(f"/api/orchestration/tasks/{task['id']}/evidence")
+        assert evidence.status_code == 200
+        evidence_body = evidence.json()
+        assert evidence_body["summary"]["run_attempt_count"] == 1
+        assert evidence_body["run_attempts"][0]["id"] == body["run_attempt"]["id"]
+        assert evidence_body["run_attempts"][0]["status"] == "completed"
+        assert {"agent_step_started", "agent_step_finished", "run_attempt_created", "run_attempt_updated"} <= {
+            event["type"] for event in evidence_body["events"]
+        }
 
 
 @pytest.mark.asyncio
