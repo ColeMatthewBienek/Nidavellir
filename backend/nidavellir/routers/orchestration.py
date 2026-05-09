@@ -3096,6 +3096,58 @@ def get_task(task_id: str, request: Request) -> dict:
     return task
 
 
+@router.get("/tasks/{task_id}/evidence")
+def get_task_execution_evidence(task_id: str, request: Request) -> dict:
+    store = _store(request)
+    task = store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+
+    evidence_statuses = {"running", "complete", "failed", "waiting_for_user"}
+    evidence_steps = [
+        step for step in task.get("steps", [])
+        if str(step.get("output_summary") or "").strip() or step.get("status") in evidence_statuses
+    ]
+    execution_event_types = {
+        "command_step_started",
+        "command_step_finished",
+        "agent_step_started",
+        "agent_step_finished",
+        "agent_step_waiting_for_tool",
+        "agent_step_tool_request_rejected",
+        "run_attempt_created",
+        "run_attempt_updated",
+        "step_status_changed",
+    }
+    events = [
+        event for event in store.list_events(task_id=task_id, limit=100)
+        if event.get("type") in execution_event_types
+    ][:50]
+    run_attempts = store.list_run_attempts(task_id=task_id, limit=50)
+    latest_status = next(
+        (
+            event.get("payload", {}).get("status")
+            for event in events
+            if isinstance(event.get("payload"), dict) and event.get("payload", {}).get("status")
+        ),
+        None,
+    )
+    return {
+        "task_id": task_id,
+        "task_status": task.get("status"),
+        "generated_at": _utc_now(),
+        "summary": {
+            "step_count": len(evidence_steps),
+            "run_attempt_count": len(run_attempts),
+            "event_count": len(events),
+            "latest_status": latest_status or (evidence_steps[-1]["status"] if evidence_steps else task.get("status")),
+        },
+        "steps": evidence_steps,
+        "run_attempts": run_attempts,
+        "events": events,
+    }
+
+
 @router.patch("/tasks/{task_id}")
 def update_task(task_id: str, body: TaskUpdateRequest, request: Request) -> dict:
     updates = {
