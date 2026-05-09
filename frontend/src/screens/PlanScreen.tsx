@@ -1574,6 +1574,55 @@ function DagView({
   );
 }
 
+function ExecutionEvidencePanel({ steps, nodes }: { steps: OrchestrationStep[]; nodes: OrchestrationNode[] }) {
+  const nodeTitles = new Map(nodes.map((node) => [node.id, node.title]));
+  const evidenceSteps = steps
+    .filter((step) => step.output_summary.trim() || ['complete', 'failed', 'waiting_for_user'].includes(step.status))
+    .slice(-5)
+    .reverse();
+
+  return (
+    <section>
+      <SectionTitle>Execution Evidence</SectionTitle>
+      <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 8, marginTop: 9 }}>
+        {evidenceSteps.length === 0 ? (
+          <div style={{ color: 'var(--t1)', fontSize: 12 }}>No execution evidence yet.</div>
+        ) : evidenceSteps.map((step) => {
+          const output = step.output_summary.trim() || 'Step completed without an output summary.';
+          return (
+            <div key={step.id} style={{ border: '1px solid var(--bd)', borderRadius: 6, padding: 8, background: 'var(--bg1)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {step.title}
+                  </div>
+                  <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {nodeTitles.get(step.node_id) ?? 'Unknown node'} · {step.type}
+                  </div>
+                </div>
+                <StatusPill status={step.status} />
+              </div>
+              <pre style={{
+                margin: 0,
+                maxHeight: 96,
+                overflow: 'auto',
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'anywhere',
+                color: 'var(--t0)',
+                fontSize: 12,
+                lineHeight: 1.45,
+                fontFamily: 'var(--mono)',
+              }}>
+                {output}
+              </pre>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function TaskDetail({
   task,
   events,
@@ -1700,6 +1749,8 @@ function TaskDetail({
             </button>
           </section>
         )}
+
+        <ExecutionEvidencePanel steps={task.steps} nodes={task.nodes} />
 
         <section>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>

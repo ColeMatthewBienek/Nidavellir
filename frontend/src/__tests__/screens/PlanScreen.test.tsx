@@ -131,6 +131,15 @@ const detailWithWorktree = {
   }],
 };
 
+const detailWithEvidence = {
+  ...detailWithWorktree,
+  steps: [{
+    ...detailWithWorktree.steps[0],
+    status: 'complete',
+    output_summary: 'marker artifact written\n73 tests passed',
+  }],
+};
+
 const detailWithDirtyWorktree = {
   ...detailWithWorktree,
   worktrees: [{
@@ -1691,6 +1700,26 @@ describe('PlanScreen orchestration board', () => {
       );
       expect(runCalls.length).toBe(1);
     });
+  });
+
+  it('shows execution evidence from completed step output', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, options?: RequestInit) => {
+      if (String(url).endsWith('/api/orchestration/tasks') && !options) {
+        return Promise.resolve({ ok: true, json: async () => [task] });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1/events')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-1')) {
+        return Promise.resolve({ ok: true, json: async () => detailWithEvidence });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    }));
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Execution Evidence')).toBeTruthy();
+    expect(await screen.findByText('Data Model · command')).toBeTruthy();
+    expect((await screen.findAllByText(/marker artifact written/)).length).toBeGreaterThanOrEqual(1);
   });
 
   it('runs agent steps from the node worktree', async () => {
