@@ -186,6 +186,20 @@ interface OrchestrationRunAttempt {
   error?: string | null;
 }
 
+interface OrchestrationArtifact {
+  id: string;
+  task_id: string;
+  node_id?: string | null;
+  step_id?: string | null;
+  run_attempt_id?: string | null;
+  type: string;
+  title: string;
+  summary: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
 interface TaskExecutionEvidence {
   task_id: string;
   task_status: string;
@@ -193,11 +207,13 @@ interface TaskExecutionEvidence {
   summary: {
     step_count: number;
     run_attempt_count: number;
+    artifact_count: number;
     event_count: number;
     latest_status: string;
   };
   steps: OrchestrationStep[];
   run_attempts: OrchestrationRunAttempt[];
+  artifacts: OrchestrationArtifact[];
   events: OrchestrationEvent[];
 }
 
@@ -1607,6 +1623,7 @@ function DagView({
 function ExecutionEvidencePanel({ steps, nodes, evidence }: { steps: OrchestrationStep[]; nodes: OrchestrationNode[]; evidence?: TaskExecutionEvidence | null }) {
   const nodeTitles = new Map(nodes.map((node) => [node.id, node.title]));
   const sourceSteps = evidence?.steps?.length ? evidence.steps : steps;
+  const latestArtifact = evidence?.artifacts?.[0];
   const evidenceSteps = sourceSteps
     .filter((step) => step.output_summary.trim() || ['complete', 'failed', 'waiting_for_user'].includes(step.status))
     .slice(-5)
@@ -1618,11 +1635,24 @@ function ExecutionEvidencePanel({ steps, nodes, evidence }: { steps: Orchestrati
         <SectionTitle>Execution Evidence</SectionTitle>
         {evidence?.summary && (
           <div style={{ color: 'var(--t1)', fontSize: 11, fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>
-            {evidence.summary.run_attempt_count} runs · {evidence.summary.event_count} events
+            {evidence.summary.run_attempt_count} runs · {evidence.summary.artifact_count ?? 0} artifacts · {evidence.summary.event_count} events
           </div>
         )}
       </div>
       <div style={{ border: '1px solid var(--bd)', borderRadius: 7, padding: 10, background: 'var(--bg0)', display: 'flex', flexDirection: 'column', gap: 8, marginTop: 9 }}>
+        {latestArtifact && (
+          <div style={{ border: '1px solid #1f6feb55', borderRadius: 6, padding: 8, background: '#1f6feb14', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, alignItems: 'center' }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: 'var(--blu)', fontSize: 12, fontWeight: 750, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {latestArtifact.title}
+              </div>
+              <div style={{ color: 'var(--t1)', fontSize: 11, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {latestArtifact.summary || latestArtifact.type}
+              </div>
+            </div>
+            <div style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{latestArtifact.type}</div>
+          </div>
+        )}
         {evidenceSteps.length === 0 ? (
           <div style={{ color: 'var(--t1)', fontSize: 12 }}>No execution evidence yet.</div>
         ) : evidenceSteps.map((step) => {
