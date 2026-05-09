@@ -1197,6 +1197,17 @@ async def test_run_queued_execution_tasks_runs_ready_command_steps(tmp_path: Pat
         assert result["results"][0]["step_type"] == "command"
         assert result["results"][0]["status"] == "complete"
         assert result["task"]["steps"][0]["output_summary"] == "queue-ok"
+        assert result["task"]["steps"][0]["status"] == "complete"
+        assert result["task"]["nodes"][0]["status"] == "complete"
+        assert result["task"]["readiness"] == {"runnable": [], "blocked": []}
+
+        refreshed = await c.get(f"/api/orchestration/tasks/{task['id']}")
+        assert refreshed.status_code == 200
+        refreshed_task = refreshed.json()
+        assert refreshed_task["status"] == "review"
+        assert refreshed_task["nodes"][0]["status"] == "complete"
+        assert refreshed_task["steps"][0]["status"] == "complete"
+        assert refreshed_task["readiness"] == {"runnable": [], "blocked": []}
 
 
 @pytest.mark.asyncio

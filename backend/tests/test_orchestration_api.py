@@ -591,7 +591,18 @@ async def test_orchestration_run_ready_walks_runnable_command_steps(tmp_path: Pa
         statuses = {step["id"]: step["status"] for step in body["task"]["steps"]}
         assert statuses[first_step["id"]] == "complete"
         assert statuses[second_step["id"]] == "complete"
+        node_statuses = {node["id"]: node["status"] for node in body["task"]["nodes"]}
+        assert node_statuses[first["id"]] == "complete"
+        assert node_statuses[second["id"]] == "complete"
+        assert body["task"]["readiness"] == {"runnable": [], "blocked": []}
         assert body["pending_manual"] == []
+
+        refreshed = await c.get(f"/api/orchestration/tasks/{task['id']}")
+        refreshed_body = refreshed.json()
+        refreshed_node_statuses = {node["id"]: node["status"] for node in refreshed_body["nodes"]}
+        assert refreshed_node_statuses[first["id"]] == "complete"
+        assert refreshed_node_statuses[second["id"]] == "complete"
+        assert refreshed_body["readiness"] == {"runnable": [], "blocked": []}
 
         events = await c.get(f"/api/orchestration/tasks/{task['id']}/events")
         event_types = {event["type"] for event in events.json()}
