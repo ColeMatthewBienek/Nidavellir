@@ -423,6 +423,42 @@ async def test_task_cleanup_archives_terminal_tasks(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_task_cleanup_can_remove_terminal_task_worktrees(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "cleanup-repo")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        task = (await c.post("/api/orchestration/tasks", json={
+            "title": "Finished worktree task",
+            "status": "done",
+            "baseRepoPath": str(target_repo),
+            "baseBranch": "main",
+        })).json()
+        node = (await c.post(f"/api/orchestration/tasks/{task['id']}/nodes", json={"title": "Work"})).json()
+        worktree = (await c.post(f"/api/orchestration/tasks/{task['id']}/worktrees", json={
+            "nodeId": node["id"],
+            "branchName": "orchestration/cleanup/work",
+        })).json()
+        worktree_path = Path(worktree["worktree_path"])
+        assert worktree_path.exists()
+
+        cleanup = await c.post("/api/orchestration/tasks/cleanup", json={
+            "statuses": ["done"],
+            "removeWorktrees": True,
+        })
+        remaining = await c.get("/api/orchestration/tasks")
+
+    assert cleanup.status_code == 200
+    body = cleanup.json()
+    assert [task["id"] for task in body["archived"]] == [task["id"]]
+    assert [item["id"] for item in body["removed_worktrees"]] == [worktree["id"]]
+    assert body["removed_worktrees"][0]["status"] == "removed"
+    assert body["errors"] == []
+    assert not worktree_path.exists()
+    assert remaining.json() == []
+
+
+@pytest.mark.asyncio
 async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     agent = PlannerPmFakeAgent()

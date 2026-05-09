@@ -3046,12 +3046,15 @@ export function PlanScreen() {
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_archive_failed'));
   };
 
-  const cleanupTerminalTasks = () => {
-    if (typeof window !== 'undefined' && !window.confirm('Archive all done and cancelled tasks?')) return;
+  const cleanupTerminalTasks = (removeWorktrees: boolean) => {
+    const message = removeWorktrees
+      ? 'Archive all done and cancelled tasks and remove their tracked worktrees?'
+      : 'Archive all done and cancelled tasks?';
+    if (typeof window !== 'undefined' && !window.confirm(message)) return;
     fetch(`${API}/api/orchestration/tasks/cleanup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ statuses: ['done', 'cancelled'], removeWorktrees: false }),
+      body: JSON.stringify({ statuses: ['done', 'cancelled'], removeWorktrees }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`orchestration_cleanup_${response.status}`);
@@ -3586,8 +3589,11 @@ export function PlanScreen() {
           </Btn>
           <Btn small onClick={runDaemonTick} disabled={loading || daemonPaused || (queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
           <Btn small onClick={runExecutionQueue} disabled={loading || queuedCount === 0}>Run Queue</Btn>
-          <Btn small onClick={cleanupTerminalTasks} disabled={loading || cleanupCount === 0} title="Archive done and cancelled tasks">
+          <Btn small onClick={() => cleanupTerminalTasks(false)} disabled={loading || cleanupCount === 0} title="Archive done and cancelled tasks">
             Clean Done
+          </Btn>
+          <Btn small onClick={() => cleanupTerminalTasks(true)} disabled={loading || cleanupCount === 0} title="Archive done and cancelled tasks, then remove tracked worktrees">
+            Clean + Worktrees
           </Btn>
           {selectedTask && <Btn small onClick={runReadySteps}>Run Ready</Btn>}
           <Btn small primary onClick={() => setCreating(true)}>+ New Task</Btn>
