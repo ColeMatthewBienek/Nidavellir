@@ -147,6 +147,7 @@ const taskEvidence = {
   summary: {
     step_count: 1,
     run_attempt_count: 1,
+    artifact_count: 1,
     event_count: 2,
     latest_status: 'complete',
   },
@@ -164,6 +165,19 @@ const taskEvidence = {
     started_at: '2026-05-03T00:00:00Z',
     completed_at: '2026-05-03T00:01:00Z',
     error: null,
+  }],
+  artifacts: [{
+    id: 'artifact-1',
+    task_id: 'task-1',
+    node_id: 'node-1',
+    step_id: 'step-1',
+    run_attempt_id: 'attempt-1',
+    type: 'command_run',
+    title: 'Command run: Write marker',
+    summary: 'marker artifact written',
+    content: 'marker artifact written\n73 tests passed',
+    metadata: { command: 'printf marker > marker.txt' },
+    created_at: '2026-05-03T00:01:00Z',
   }],
   events: [
     { id: 'event-run-1', type: 'agent_step_started', payload: { status: 'running' }, created_at: '2026-05-03T00:00:00Z' },
@@ -867,9 +881,10 @@ describe('PlanScreen orchestration board', () => {
             task_id: 'task-1',
             task_status: 'backlog',
             generated_at: '2026-05-03T00:00:00Z',
-            summary: { step_count: 0, run_attempt_count: 0, event_count: 0, latest_status: 'backlog' },
+            summary: { step_count: 0, run_attempt_count: 0, artifact_count: 0, event_count: 0, latest_status: 'backlog' },
             steps: [],
             run_attempts: [],
+            artifacts: [],
             events: [],
           }),
         });
@@ -1766,7 +1781,8 @@ describe('PlanScreen orchestration board', () => {
     render(<PlanScreen />);
 
     expect(await screen.findByText('Execution Evidence')).toBeTruthy();
-    expect(await screen.findByText('1 runs · 2 events')).toBeTruthy();
+    expect(await screen.findByText('1 runs · 1 artifacts · 2 events')).toBeTruthy();
+    expect(await screen.findByText('Command run: Write marker')).toBeTruthy();
     expect(await screen.findByText('Data Model · command')).toBeTruthy();
     expect((await screen.findAllByText(/marker artifact written/)).length).toBeGreaterThanOrEqual(1);
   });
