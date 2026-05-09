@@ -119,6 +119,23 @@ class PlannerPmImplementationReportAgent(PlannerPmFakeAgent):
         )
 
 
+class PilotWorkerFakeAgent:
+    def __init__(self, slot_id, workdir, model_id=None, dangerousness="restricted"):
+        self.workdir = Path(workdir)
+
+    async def start(self):
+        return None
+
+    async def send(self, text: str):
+        (self.workdir / "pilot-worker.txt").write_text("worker touched\n", encoding="utf-8")
+
+    async def stream(self):
+        yield "Files changed: pilot-worker.txt\nTests run: npm run test passed\n"
+
+    async def kill(self):
+        return None
+
+
 def test_planner_pm_relative_repo_name_stays_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     default_repo = tmp_path / "nidavellir"
     default_repo.mkdir()
@@ -1361,7 +1378,7 @@ async def test_daemon_tick_processes_inbox_and_runs_small_project(tmp_path: Path
         assert autonomous_body["execution_queue"]["processed"][0]["status"] == "review"
         assert autonomous_body["execution_queue"]["processed"][0]["task"]["steps"][0]["output_summary"] == "tiny-ok"
 
-        events = await c.get("/api/orchestration/events", params={"limit": 20})
+        events = await c.get("/api/orchestration/events", params={"limit": 50})
         assert events.status_code == 200
         event_types = [event["type"] for event in events.json()]
         assert "orchestration_daemon_state_updated" in event_types
@@ -1486,3 +1503,82 @@ async def test_existing_project_full_pipeline_supervised_then_autonomous(tmp_pat
         assert "existing_project_brief_sent_to_task_inbox" in event_types
         assert "task_inbox_process_finished" in event_types
         assert "execution_queue_task_waiting_for_autonomy" in event_types
+
+
+@pytest.mark.asyncio
+async def test_autonomous_pilot_run_drives_spec_to_worker_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "pilot-project")
+    (target_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node -e \"console.log('pilot-ok')\""}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json"], cwd=target_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Add pilot test script"], cwd=target_repo, check=True, capture_output=True, text=True)
+
+    from nidavellir.agents import registry as agent_registry
+
+    monkeypatch.setitem(
+        agent_registry.PROVIDER_REGISTRY,
+        "fake-pilot-worker",
+        agent_registry.ProviderManifest(
+            id="fake-pilot-worker",
+            display_name="Fake Pilot Worker",
+            binary="fake-pilot-worker",
+            description="test fake",
+            agent_class=PilotWorkerFakeAgent,
+            supports_worktree_isolation=True,
+        ),
+    )
+    monkeypatch.setattr(orchestration_router._agent_registry, "PROVIDER_REGISTRY", agent_registry.PROVIDER_REGISTRY)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        result = await c.post("/api/orchestration/pilot-runs", json={
+            "rawPlan": "Touch a pilot worker file and verify the project test script.",
+            "entryMode": "existing_project",
+            "workLane": "chore",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "provider": "fake-pilot-worker",
+            "model": "fake-model",
+            "runAgent": True,
+            "maxTasks": 1,
+        })
+
+        assert result.status_code == 200
+        body = result.json()
+        assert body["plan"]["source"] == "autonomous_pilot"
+        assert body["spec"]["status"] == "ready"
+        assert body["spec"]["artifact_id"]
+        assert body["decomposition"]["decomposition_run"]["artifact_id"]
+        assert len(body["decomposition"]["task_inbox_items"]) == 1
+        assert body["decomposition"]["task_inbox_items"][0]["payload"]["skip_agent_step"] is False
+        assert body["daemon_tick"]["execution_queue"]["processed"][0]["status"] == "review"
+        assert len(body["tasks"]) == 1
+        final_task = body["tasks"][0]
+        assert final_task["status"] == "review"
+        assert [step["type"] for step in final_task["steps"]] == ["agent", "command"]
+        assert {step["status"] for step in final_task["steps"]} == {"complete"}
+        assert body["evidence"][0]["summary"]["artifact_count"] >= 2
+        assert body["event"]["type"] == "autonomous_pilot_run_finished"
+
+
+@pytest.mark.asyncio
+async def test_autonomous_pilot_run_requires_usable_base_ref(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = tmp_path / "empty-new-project"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        result = await c.post("/api/orchestration/pilot-runs", json={
+            "rawPlan": "Run an autonomous pilot in a new repo.",
+            "entryMode": "new_project",
+            "workLane": "project",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "createDirectory": True,
+            "initializeGit": True,
+            "runAgent": False,
+        })
+
+        assert result.status_code == 400
+        assert result.json()["detail"]["code"] == "pilot_repo_base_ref_required"
