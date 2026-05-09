@@ -229,12 +229,35 @@ async def main() -> None:
                 "verification command output missing expected marker",
                 final_task["steps"][0],
             )
+            evidence_response = await client.get(f"/api/orchestration/tasks/{final_task['id']}/evidence")
+            require(
+                evidence_response.status_code == 200,
+                "task execution evidence fetch failed",
+                evidence_response.json(),
+            )
+            evidence = evidence_response.json()
+            require(
+                evidence["summary"]["step_count"] >= 1,
+                "execution evidence did not include completed step output",
+                evidence,
+            )
+            require(
+                evidence["summary"]["event_count"] >= 2,
+                "execution evidence did not include command execution events",
+                evidence,
+            )
+            require(
+                "orchestration-smoke-ok" in evidence["steps"][0]["output_summary"],
+                "execution evidence missing verification marker",
+                evidence,
+            )
 
             print("orchestration smoke passed")
             print(f"repo: {target_repo}")
             print(f"plan: {plan['id']}")
             print(f"task: {final_task['id']}")
             print(f"output: {final_task['steps'][0]['output_summary']}")
+            print(f"evidence: {evidence['summary']['step_count']} steps, {evidence['summary']['event_count']} events")
 
 
 if __name__ == "__main__":
