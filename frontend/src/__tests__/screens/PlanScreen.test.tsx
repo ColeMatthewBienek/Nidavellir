@@ -1773,6 +1773,9 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).includes('/api/orchestration/tasks/task-1/evidence')) {
         return Promise.resolve({ ok: true, json: async () => taskEvidence });
       }
+      if (String(url).includes('/api/orchestration/artifacts/artifact-1')) {
+        return Promise.resolve({ ok: true, json: async () => taskEvidence.artifacts[0] });
+      }
       if (String(url).includes('/api/orchestration/tasks/task-1')) {
         return Promise.resolve({ ok: true, json: async () => detailWithEvidence });
       }
@@ -1785,6 +1788,17 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('Command run: Write marker')).toBeTruthy();
     expect(await screen.findByText('Data Model · command')).toBeTruthy();
     expect((await screen.findAllByText(/marker artifact written/)).length).toBeGreaterThanOrEqual(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /Command run: Write marker/ }));
+
+    expect(await screen.findByRole('dialog', { name: 'Command run: Write marker' })).toBeTruthy();
+    expect((await screen.findAllByText(/73 tests passed/)).length).toBeGreaterThanOrEqual(1);
+    await waitFor(() => {
+      const artifactCalls = vi.mocked(fetch).mock.calls.filter(([url]) =>
+        String(url).includes('/api/orchestration/artifacts/artifact-1')
+      );
+      expect(artifactCalls.length).toBe(1);
+    });
   });
 
   it('runs agent steps from the node worktree', async () => {

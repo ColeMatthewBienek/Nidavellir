@@ -3213,6 +3213,14 @@ def get_task_execution_evidence(task_id: str, request: Request) -> dict:
     }
 
 
+@router.get("/artifacts/{artifact_id}")
+def get_orchestration_artifact(artifact_id: str, request: Request) -> dict:
+    artifact = _store(request).get_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="artifact_not_found")
+    return artifact
+
+
 @router.patch("/tasks/{task_id}")
 def update_task(task_id: str, body: TaskUpdateRequest, request: Request) -> dict:
     updates = {
