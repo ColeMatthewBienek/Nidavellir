@@ -368,6 +368,14 @@ class AutonomousPilotRunRequest(BaseModel):
     timeoutSeconds: int = Field(default=120, ge=1, le=600)
 
 
+class PlanInboxPilotRunRequest(BaseModel):
+    maxTasks: int = Field(default=1, ge=1, le=3)
+    runAgent: bool = True
+    lockedBy: str = Field(default="plan-autonomous-pilot", min_length=1)
+    permissionOverride: str | None = PermissionDecision.ALLOW_ONCE.value
+    timeoutSeconds: int = Field(default=120, ge=1, le=600)
+
+
 class OrchestrationDaemonStateUpdateRequest(BaseModel):
     lockedBy: str | None = Field(default=None, min_length=1)
     status: str | None = None
@@ -3045,6 +3053,82 @@ def decompose_approved_plan(item_id: str, body: PlanInboxDecomposeRequest, reque
         raise
 
 
+async def _run_approved_plan_autonomous_pilot(
+    *,
+    plan: dict,
+    spec_id: str,
+    max_tasks: int,
+    run_agent: bool,
+    locked_by: str,
+    permission_override: str | None,
+    request: Request,
+) -> dict:
+    store = _store(request)
+    repo_path = str(plan.get("repo_path") or "").strip()
+    base_branch = str(plan.get("base_branch") or "main").strip() or "main"
+    if not _planner_repo_target_ready_path(repo_path):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_target_not_ready", "repo_path": repo_path})
+    if not _repo_has_base_ref(repo_path, base_branch):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_base_ref_required", "repo_path": repo_path, "base_branch": base_branch})
+
+    decomposed = decompose_approved_plan(
+        plan["id"],
+        PlanInboxDecomposeRequest(specId=spec_id, maxTasks=max_tasks, createTaskInboxItems=True),
+        request,
+    )
+    task_inbox_items = []
+    for item in decomposed["task_inbox_items"]:
+        payload = dict(item.get("payload") or {})
+        payload["skip_agent_step"] = not run_agent
+        payload.setdefault("pilot_run", True)
+        payload.setdefault("pilot_source_plan_id", plan["id"])
+        updated = store.update_task_inbox_item(item["id"], {"payload": payload}) or item
+        task_inbox_items.append(updated)
+    decomposed["task_inbox_items"] = task_inbox_items
+
+    tick = await run_orchestration_daemon_tick(
+        OrchestrationDaemonTickRequest(
+            lockedBy=locked_by,
+            autonomyMode="autonomous",
+            processInbox=True,
+            runQueue=True,
+            maxInboxItems=max_tasks,
+            maxQueuedTasks=max_tasks,
+            maxStepsPerTask=10,
+            permissionOverride=permission_override,
+            ignorePaused=True,
+        ),
+        request,
+    )
+    processed_tasks = [
+        item.get("task")
+        for item in tick.get("execution_queue", {}).get("processed", [])
+        if isinstance(item.get("task"), dict)
+    ]
+    evidence = [
+        get_task_execution_evidence(task["id"], request)
+        for task in processed_tasks
+        if task.get("id")
+    ]
+    event = store.append_event(type="autonomous_pilot_run_finished", payload={
+        "plan_inbox_item_id": plan["id"],
+        "spec_id": spec_id,
+        "decomposition_run_id": decomposed["decomposition_run"]["id"],
+        "task_inbox_item_ids": [item["id"] for item in task_inbox_items],
+        "task_ids": [task["id"] for task in processed_tasks],
+        "run_agent": run_agent,
+        "evidence_count": len(evidence),
+    })
+    return {
+        "plan": store.get_plan_inbox_item(plan["id"]) or plan,
+        "decomposition": decomposed,
+        "daemon_tick": tick,
+        "tasks": processed_tasks,
+        "evidence": evidence,
+        "event": event,
+    }
+
+
 @router.post("/pilot-runs")
 async def run_autonomous_pilot(body: AutonomousPilotRunRequest, request: Request) -> dict:
     store = _store(request)
@@ -3093,10 +3177,11 @@ async def run_autonomous_pilot(body: AutonomousPilotRunRequest, request: Request
         plan = setup_result["plan"]
 
     repo_path = str(plan.get("repo_path") or "").strip()
+    base_branch = str(plan.get("base_branch") or body.baseBranch or "main").strip() or "main"
     if not _planner_repo_target_ready_path(repo_path):
         raise HTTPException(status_code=400, detail={"code": "pilot_repo_target_not_ready", "repo_path": repo_path})
-    if not _repo_has_base_ref(repo_path, body.baseBranch):
-        raise HTTPException(status_code=400, detail={"code": "pilot_repo_base_ref_required", "repo_path": repo_path, "base_branch": body.baseBranch})
+    if not _repo_has_base_ref(repo_path, base_branch):
+        raise HTTPException(status_code=400, detail={"code": "pilot_repo_base_ref_required", "repo_path": repo_path, "base_branch": base_branch})
 
     checkpoint_summaries = {
         "repo_target": f"Pilot target locked at {repo_path} on {body.baseBranch}.",
@@ -3126,63 +3211,44 @@ async def run_autonomous_pilot(body: AutonomousPilotRunRequest, request: Request
         request,
     )
     plan = store.get_plan_inbox_item(plan["id"]) or plan
-    decomposed = decompose_approved_plan(
-        plan["id"],
-        PlanInboxDecomposeRequest(specId=spec["id"], maxTasks=body.maxTasks, createTaskInboxItems=True),
-        request,
+    result = await _run_approved_plan_autonomous_pilot(
+        plan=plan,
+        spec_id=spec["id"],
+        max_tasks=body.maxTasks,
+        run_agent=body.runAgent,
+        locked_by=body.lockedBy,
+        permission_override=body.permissionOverride,
+        request=request,
     )
-
-    task_inbox_items = []
-    for item in decomposed["task_inbox_items"]:
-        payload = dict(item.get("payload") or {})
-        payload["skip_agent_step"] = not body.runAgent
-        payload.setdefault("pilot_run", True)
-        updated = store.update_task_inbox_item(item["id"], {"payload": payload}) or item
-        task_inbox_items.append(updated)
-    decomposed["task_inbox_items"] = task_inbox_items
-
-    tick = await run_orchestration_daemon_tick(
-        OrchestrationDaemonTickRequest(
-            lockedBy=body.lockedBy,
-            autonomyMode="autonomous",
-            processInbox=True,
-            runQueue=True,
-            maxInboxItems=body.maxTasks,
-            maxQueuedTasks=body.maxTasks,
-            maxStepsPerTask=10,
-            permissionOverride=body.permissionOverride,
-            ignorePaused=True,
-        ),
-        request,
-    )
-    processed_tasks = [
-        item.get("task")
-        for item in tick.get("execution_queue", {}).get("processed", [])
-        if isinstance(item.get("task"), dict)
-    ]
-    evidence = [
-        get_task_execution_evidence(task["id"], request)
-        for task in processed_tasks
-        if task.get("id")
-    ]
-    event = store.append_event(type="autonomous_pilot_run_finished", payload={
-        "plan_inbox_item_id": plan["id"],
-        "spec_id": spec["id"],
-        "decomposition_run_id": decomposed["decomposition_run"]["id"],
-        "task_inbox_item_ids": [item["id"] for item in task_inbox_items],
-        "task_ids": [task["id"] for task in processed_tasks],
-        "run_agent": body.runAgent,
-        "evidence_count": len(evidence),
-    })
     return {
-        "plan": store.get_plan_inbox_item(plan["id"]) or plan,
+        **result,
         "setup": setup_result,
         "spec": spec,
-        "decomposition": decomposed,
-        "daemon_tick": tick,
-        "tasks": processed_tasks,
-        "evidence": evidence,
-        "event": event,
+    }
+
+
+@router.post("/plan-inbox/{item_id}/pilot-run")
+async def run_plan_inbox_autonomous_pilot(item_id: str, body: PlanInboxPilotRunRequest, request: Request) -> dict:
+    store = _store(request)
+    plan = store.get_plan_inbox_item(item_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    spec = store.get_agentic_spec(plan.get("final_spec_id")) if plan.get("final_spec_id") else _latest_spec(plan)
+    ready, missing = _spec_ready_for_decomposition(plan, spec)
+    if not ready or spec is None:
+        raise HTTPException(status_code=400, detail={"code": "plan_not_ready_for_pilot_run", "missing": missing})
+    result = await _run_approved_plan_autonomous_pilot(
+        plan=plan,
+        spec_id=spec["id"],
+        max_tasks=body.maxTasks,
+        run_agent=body.runAgent,
+        locked_by=body.lockedBy,
+        permission_override=body.permissionOverride,
+        request=request,
+    )
+    return {
+        **result,
+        "spec": spec,
     }
 
 
