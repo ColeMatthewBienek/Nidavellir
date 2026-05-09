@@ -1538,7 +1538,7 @@ class OrchestrationStore:
     def create_artifact(
         self,
         *,
-        task_id: str,
+        task_id: str | None = None,
         type: str,
         title: str,
         summary: str = "",

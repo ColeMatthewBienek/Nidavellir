@@ -1550,6 +1550,7 @@ def _seed_materialized_task_execution(store: Any, task: dict, item: dict) -> dic
                 "prompt": "\n".join(part for part in prompt_parts if part is not None).strip(),
                 "task_inbox_item_id": item["id"],
                 "requires_worktree": True,
+                "completion_contract": "worker",
             },
         ))
     for index, verification in enumerate(verification_steps, start=1):
@@ -1851,6 +1852,19 @@ def _planner_pm_boundary_guard_message(plan: dict) -> str:
         "I will keep this in PM mode and move only through evidence-backed planning gates. "
         f"Next focused question: what evidence should we use to lock the {gate_label} gate?"
     )
+
+
+def _worker_completion_contract(transcript: str, worktree: dict) -> tuple[bool, list[str]]:
+    text = transcript.lower()
+    missing: list[str] = []
+    changed_files = int(worktree.get("dirty_count") or 0) > 0 or bool(worktree.get("dirty_summary") or [])
+    if not changed_files:
+        missing.append("changed files")
+    if not re.search(r"\b(?:tests?|checks?|verification|validated|smoke)\s+(?:run|ran|passed|completed|performed|not run|n/a)", text):
+        missing.append("verification evidence")
+    if not re.search(r"\b(?:files? changed|changed files?|modified|created|updated|touched|dirty summary)\b", text):
+        missing.append("file-change report")
+    return not missing, missing
 
 
 def _planner_sidecar_plan_updates(sidecar: dict | None) -> dict[str, str]:
@@ -2682,6 +2696,19 @@ async def _execute_planner_pm_turn(
                 },
                 status="draft",
             )
+            store.create_artifact(
+                type="pm_spec",
+                title=f"PM spec draft v{draft_spec['version']}",
+                summary=f"Draft spec generated for plan {item_id}.",
+                content=draft_spec["content"],
+                metadata={
+                    "plan_inbox_item_id": item_id,
+                    "spec_id": draft_spec["id"],
+                    "spec_status": draft_spec["status"],
+                    "version": draft_spec["version"],
+                    "source": "planner-pm",
+                },
+            )
             checkpoint = store.update_planning_checkpoint(
                 plan_inbox_item_id=item_id,
                 key="spec_draft",
@@ -2818,12 +2845,28 @@ def update_planning_checkpoint(item_id: str, checkpoint_key: str, body: Planning
 @router.post("/plan-inbox/{item_id}/specs")
 def create_agentic_spec(item_id: str, body: AgenticSpecCreateRequest, request: Request) -> dict:
     try:
-        return _store(request).create_agentic_spec(
+        store = _store(request)
+        spec = store.create_agentic_spec(
             plan_inbox_item_id=item_id,
             content=body.content,
             metadata=body.metadata,
             status=body.status,
         )
+        artifact = store.create_artifact(
+            type="pm_spec",
+            title=f"PM spec v{spec['version']}",
+            summary=f"Agentic-forward spec is {spec['status']}.",
+            content=spec["content"],
+            metadata={
+                "plan_inbox_item_id": item_id,
+                "spec_id": spec["id"],
+                "spec_status": spec["status"],
+                "version": spec["version"],
+                "source": "plan_inbox_spec",
+            },
+        )
+        spec["artifact_id"] = artifact["id"]
+        return spec
     except Exception as err:
         _handle_store_error(err)
         raise
@@ -2846,12 +2889,28 @@ def create_spec_readiness_report(item_id: str, body: SpecReadinessReportCreateRe
 @router.post("/plan-inbox/{item_id}/decomposition-runs")
 def create_decomposition_run(item_id: str, body: DecompositionRunCreateRequest, request: Request) -> dict:
     try:
-        return _store(request).create_decomposition_run(
+        store = _store(request)
+        run = store.create_decomposition_run(
             plan_inbox_item_id=item_id,
             spec_id=body.specId,
             decomposer_output=body.decomposerOutput,
             status=body.status,
         )
+        artifact = store.create_artifact(
+            type="decomposition_run",
+            title=f"Decomposition pass {run['pass_index']}",
+            summary=f"Decomposition run {run['status']} with {len((run.get('decomposer_output') or {}).get('candidate_tasks') or [])} candidate tasks.",
+            content=json.dumps(run.get("decomposer_output") or {}, indent=2, sort_keys=True),
+            metadata={
+                "plan_inbox_item_id": item_id,
+                "spec_id": body.specId,
+                "decomposition_run_id": run["id"],
+                "status": run["status"],
+                "source": "decomposer",
+            },
+        )
+        run["artifact_id"] = artifact["id"]
+        return run
     except Exception as err:
         _handle_store_error(err)
         raise
@@ -2877,6 +2936,20 @@ def decompose_approved_plan(item_id: str, body: PlanInboxDecomposeRequest, reque
             decomposer_output=output,
             status="created",
         )
+        artifact = store.create_artifact(
+            type="decomposition_run",
+            title=f"Decomposition pass {run['pass_index']}",
+            summary=f"Deterministic decomposer produced {output.get('candidate_count', 0)} candidate tasks.",
+            content=json.dumps(output, indent=2, sort_keys=True),
+            metadata={
+                "plan_inbox_item_id": item_id,
+                "spec_id": spec["id"] if spec else None,
+                "decomposition_run_id": run["id"],
+                "candidate_count": output.get("candidate_count", 0),
+                "source": output.get("source"),
+            },
+        )
+        run["artifact_id"] = artifact["id"]
         task_items: list[dict] = []
         if body.createTaskInboxItems:
             for index, candidate in enumerate(output["candidate_tasks"], start=1):
@@ -3975,7 +4048,8 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
         "Rules:\n"
         "- Work only inside the provided worktree.\n"
         "- Do not switch branches or create/delete worktrees.\n"
-        "- Report the files changed and tests run.\n\n"
+        "- Report the files changed and tests/checks run.\n"
+        "- Worker completion must include file-change evidence and verification evidence.\n\n"
         f"{TOOL_PROTOCOL_INSTRUCTIONS}\n\n"
         f"Step instructions:\n{prompt}"
     )
@@ -4122,9 +4196,6 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
                 "tool_requests": created_requests,
             }
 
-        summary = transcript.splitlines()[-1][:240] if transcript else "Agent step completed."
-        updated_step = store.update_step_status(step_id, "complete", output_summary=summary)
-        attempt = store.update_run_attempt(attempt["id"], status="completed") or attempt
         try:
             info = git_status(cwd)
             worktree = store.update_worktree(worktree["id"], {
@@ -4135,6 +4206,49 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
             }) or worktree
         except Exception:
             worktree = store.update_worktree(worktree["id"], {"status": "error"}) or worktree
+        if step.get("config", {}).get("completion_contract") == "worker":
+            contract_ok, missing_contract = _worker_completion_contract(transcript, worktree)
+            if not contract_ok:
+                error = "Worker completion contract missing: " + ", ".join(missing_contract)
+                updated_step = store.update_step_status(step_id, "failed", output_summary=error[:240])
+                attempt = store.update_run_attempt(attempt["id"], status="failed", error=error) or attempt
+                store.append_event(
+                    task_id=task["id"],
+                    node_id=node["id"],
+                    step_id=step_id,
+                    run_attempt_id=attempt["id"],
+                    type="agent_step_completion_contract_failed",
+                    payload={"missing": missing_contract, "worktree_id": worktree["id"]},
+                )
+                artifact = store.create_artifact(
+                    task_id=task["id"],
+                    node_id=node["id"],
+                    step_id=step_id,
+                    run_attempt_id=attempt["id"],
+                    type="agent_run",
+                    title=f"Agent run contract failed: {step['title']}",
+                    summary=error[:240],
+                    content=transcript,
+                    metadata={
+                        "provider": provider,
+                        "model": model,
+                        "worktree_id": worktree["id"],
+                        "worktree_path": str(cwd),
+                        "status": "failed",
+                        "completion_contract": "worker",
+                        "missing": missing_contract,
+                    },
+                )
+                return {
+                    "step": updated_step,
+                    "run_attempt": attempt,
+                    "worktree": worktree,
+                    "transcript": transcript,
+                    "artifact": artifact,
+                }
+        summary = transcript.splitlines()[-1][:240] if transcript else "Agent step completed."
+        updated_step = store.update_step_status(step_id, "complete", output_summary=summary)
+        attempt = store.update_run_attempt(attempt["id"], status="completed") or attempt
         store.append_event(
             task_id=task["id"],
             node_id=node["id"],

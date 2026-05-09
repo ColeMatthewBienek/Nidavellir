@@ -146,26 +146,80 @@ async def main() -> None:
                 readiness_after,
             )
 
-            task_inbox_response = await client.post("/api/orchestration/task-inbox", json={
-                "planInboxItemId": plan["id"],
-                "title": "Run tiny verification",
-                "objective": "Execute one deterministic verification command in the new project worktree.",
-                "payload": {
-                    "single_objective": "Run tiny verification",
-                    "base_repo_path": str(target_repo),
-                    "base_branch": "main",
-                    "implementation_cwd": str(target_repo),
-                    "affected_areas": ["README.md"],
-                    "verification_steps": [{"type": "command", "command": "npm run test"}],
-                    "skip_agent_step": True,
-                },
+            for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+                checkpoint_response = await client.patch(
+                    f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}",
+                    json={
+                        "status": "agreed",
+                        "summary": f"{gate} satisfied by orchestration smoke fixture.",
+                    },
+                )
+                require(
+                    checkpoint_response.status_code == 200,
+                    f"checkpoint {gate} failed",
+                    checkpoint_response.json(),
+                )
+
+            spec_response = await client.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+                "status": "ready",
+                "content": "\n".join([
+                    "# Agentic Forward Spec",
+                    "",
+                    "## Task Breakdown",
+                    "- Run tiny verification",
+                    "",
+                    "## Acceptance Criteria",
+                    "- The autonomous queue executes the verification command.",
+                    "- The evidence bundle captures command output and artifacts.",
+                    "",
+                    "## Verification Strategy",
+                    "- `npm run test`",
+                    "",
+                    "## Risks and Dependencies",
+                    "- The target repo must be initialized before worktree provisioning.",
+                ]),
             })
             require(
-                task_inbox_response.status_code == 200,
-                "task inbox create failed",
-                task_inbox_response.json(),
+                spec_response.status_code == 200,
+                "ready spec creation failed",
+                spec_response.json(),
             )
-            task_inbox_item = task_inbox_response.json()
+            spec = spec_response.json()
+            require(spec.get("artifact_id"), "spec artifact missing", spec)
+
+            decompose_response = await client.post(f"/api/orchestration/plan-inbox/{plan['id']}/decompose", json={
+                "specId": spec["id"],
+                "maxTasks": 2,
+                "createTaskInboxItems": True,
+            })
+            require(
+                decompose_response.status_code == 200,
+                "spec decomposition failed",
+                decompose_response.json(),
+            )
+            decomposed = decompose_response.json()
+            require(
+                decomposed["decomposition_run"].get("artifact_id"),
+                "decomposition artifact missing",
+                decomposed["decomposition_run"],
+            )
+            require(
+                len(decomposed["task_inbox_items"]) == 1,
+                "decomposition should create one task inbox item",
+                decomposed,
+            )
+            task_inbox_item = decomposed["task_inbox_items"][0]
+            task_payload = dict(task_inbox_item["payload"])
+            task_payload["skip_agent_step"] = True
+            task_update_response = await client.patch(f"/api/orchestration/task-inbox/{task_inbox_item['id']}", json={
+                "payload": task_payload,
+            })
+            require(
+                task_update_response.status_code == 200,
+                "task inbox payload update failed",
+                task_update_response.json(),
+            )
+            task_inbox_item = task_update_response.json()
 
             state_response = await client.patch("/api/orchestration/daemon/state", json={
                 "status": "active",
@@ -247,6 +301,11 @@ async def main() -> None:
                 evidence,
             )
             require(
+                evidence["summary"].get("artifact_count", 0) >= 1,
+                "execution evidence did not include run artifact",
+                evidence,
+            )
+            require(
                 "orchestration-smoke-ok" in evidence["steps"][0]["output_summary"],
                 "execution evidence missing verification marker",
                 evidence,
@@ -257,7 +316,7 @@ async def main() -> None:
             print(f"plan: {plan['id']}")
             print(f"task: {final_task['id']}")
             print(f"output: {final_task['steps'][0]['output_summary']}")
-            print(f"evidence: {evidence['summary']['step_count']} steps, {evidence['summary']['event_count']} events")
+            print(f"evidence: {evidence['summary']['step_count']} steps, {evidence['summary'].get('artifact_count', 0)} artifacts, {evidence['summary']['event_count']} events")
 
 
 if __name__ == "__main__":
