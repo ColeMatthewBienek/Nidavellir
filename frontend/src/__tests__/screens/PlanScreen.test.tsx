@@ -652,13 +652,66 @@ describe('PlanScreen orchestration board', () => {
               task_id: 'task-pilot',
               task_status: 'review',
             }],
+            pilot: {
+              status: 'succeeded',
+              summary: 'Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+              failures: [],
+            },
+            artifact: {
+              id: 'artifact-pilot',
+              task_id: null,
+              node_id: null,
+              step_id: null,
+              run_attempt_id: null,
+              type: 'pilot_run',
+              title: 'Pilot run: Ready pilot plan',
+              summary: 'Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+              content: '{}',
+              metadata: { plan_inbox_item_id: 'plan-1', status: 'succeeded' },
+              created_at: '2026-05-03T00:03:00Z',
+            },
             event: {
               id: 'event-pilot',
               type: 'autonomous_pilot_run_finished',
-              payload: { plan_inbox_item_id: 'plan-1' },
+              payload: { plan_inbox_item_id: 'plan-1', status: 'succeeded', artifact_id: 'artifact-pilot' },
               created_at: '2026-05-03T00:03:00Z',
             },
           }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pilot-runs') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{
+            id: 'event-pilot',
+            created_at: '2026-05-03T00:03:00Z',
+            status: 'succeeded',
+            summary: 'Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+            failures: [],
+            task_ids: ['task-pilot'],
+            task_inbox_item_ids: ['task-inbox-pilot'],
+            spec_id: 'spec-ready-1',
+            decomposition_run_id: 'decomp-pilot',
+            artifact: {
+              id: 'artifact-pilot',
+              task_id: null,
+              node_id: null,
+              step_id: null,
+              run_attempt_id: null,
+              type: 'pilot_run',
+              title: 'Pilot run: Ready pilot plan',
+              summary: 'Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+              content: '{}',
+              metadata: { plan_inbox_item_id: 'plan-1', status: 'succeeded' },
+              created_at: '2026-05-03T00:03:00Z',
+            },
+            event: {
+              id: 'event-pilot',
+              type: 'autonomous_pilot_run_finished',
+              payload: { plan_inbox_item_id: 'plan-1', status: 'succeeded', artifact_id: 'artifact-pilot' },
+              created_at: '2026-05-03T00:03:00Z',
+            },
+          }],
         });
       }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/inspect-repo') && options?.method === 'POST') {
@@ -1517,6 +1570,8 @@ describe('PlanScreen orchestration board', () => {
     });
     expect((await screen.findAllByText('Ready pilot plan')).length).toBeGreaterThan(0);
     expect(await screen.findByText('Pilot result')).toBeTruthy();
+    expect(await screen.findByText('Pilot Runs')).toBeTruthy();
+    expect(await screen.findByText('Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).')).toBeTruthy();
     expect(await screen.findByText('marker artifact written')).toBeTruthy();
   });
 

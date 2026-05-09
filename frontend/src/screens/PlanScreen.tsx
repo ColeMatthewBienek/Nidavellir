@@ -45,6 +45,7 @@ const STATUS_COLORS: Record<string, string> = {
   missing: 'var(--red)',
   removed: 'var(--t1)',
   error: 'var(--red)',
+  succeeded: 'var(--grn)',
 };
 
 interface OrchestrationTaskSummary {
@@ -188,7 +189,7 @@ interface OrchestrationRunAttempt {
 
 interface OrchestrationArtifact {
   id: string;
-  task_id: string;
+  task_id?: string | null;
   node_id?: string | null;
   step_id?: string | null;
   run_attempt_id?: string | null;
@@ -447,6 +448,26 @@ interface PlanPilotRunResult {
   daemon_tick: Record<string, unknown>;
   tasks: OrchestrationTaskDetail[];
   evidence: TaskExecutionEvidence[];
+  pilot: {
+    status: string;
+    summary: string;
+    failures: Array<Record<string, unknown>>;
+  };
+  artifact: OrchestrationArtifact;
+  event: OrchestrationEvent;
+}
+
+interface PlanPilotRunRecord {
+  id: string;
+  created_at: string;
+  status: string;
+  summary: string;
+  failures: Array<Record<string, unknown>>;
+  task_ids: string[];
+  task_inbox_item_ids: string[];
+  spec_id?: string | null;
+  decomposition_run_id?: string | null;
+  artifact?: OrchestrationArtifact | null;
   event: OrchestrationEvent;
 }
 
@@ -1020,7 +1041,7 @@ function CheckpointRail({
   checkpoints: PlanningCheckpoint[];
 }) {
   return (
-    <aside style={{ borderLeft: '1px solid var(--bd)', background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 300, minHeight: 0 }}>
+    <section style={{ background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flex: '1 1 auto' }}>
       <div style={{ borderBottom: '1px solid var(--bd)', padding: 12 }}>
         <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 800 }}>Checkpoints</div>
         <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.4, marginTop: 3 }}>Autosaved requirements for spec generation.</div>
@@ -1060,7 +1081,42 @@ function CheckpointRail({
         );
         })}
       </div>
-    </aside>
+    </section>
+  );
+}
+
+function PilotRunHistory({
+  runs,
+}: {
+  runs: PlanPilotRunRecord[];
+}) {
+  return (
+    <section style={{ borderTop: '1px solid var(--bd)', display: 'flex', flexDirection: 'column', minHeight: 0, flex: '0 0 210px' }}>
+      <div style={{ padding: '10px 12px 8px' }}>
+        <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 800 }}>Pilot Runs</div>
+        <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.4, marginTop: 3 }}>Durable execution history for this plan.</div>
+      </div>
+      <div style={{ padding: '0 10px 10px', display: 'flex', flexDirection: 'column', gap: 7, minHeight: 0, overflow: 'auto' }}>
+        {runs.length === 0 ? (
+          <div style={{ color: 'var(--t1)', fontSize: 12, border: '1px dashed var(--bd)', borderRadius: 7, padding: 10 }}>
+            No pilot runs yet.
+          </div>
+        ) : runs.map((run) => (
+          <div key={run.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <StatusPill status={run.status} />
+              <span style={{ color: 'var(--t1)', fontSize: 10, fontFamily: 'var(--mono)' }}>{new Date(run.created_at).toLocaleTimeString()}</span>
+            </div>
+            <div style={{ color: 'var(--t0)', fontSize: 12, lineHeight: 1.4, overflowWrap: 'anywhere' }}>{run.summary || `${run.task_ids.length} task(s)`}</div>
+            {run.failures.length > 0 && (
+              <div style={{ color: 'var(--red)', fontSize: 11, lineHeight: 1.35 }}>
+                {String(run.failures[0]?.code ?? 'failure')} · {String(run.failures[0]?.message ?? 'Review pilot artifact')}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1255,6 +1311,7 @@ function PlannerDiscussionPanel({
 
 function PlannerModal({
   item,
+  pilotRuns,
   models,
   plannerProvider,
   plannerModel,
@@ -1270,6 +1327,7 @@ function PlannerModal({
   loading,
 }: {
   item: PlanInboxDetail | null;
+  pilotRuns: PlanPilotRunRecord[];
   models: AgentModelDef[];
   plannerProvider: string;
   plannerModel: string;
@@ -1416,7 +1474,10 @@ function PlannerModal({
             loading={loading}
           />
         </div>
-        <CheckpointRail checkpoints={item?.planning_checkpoints ?? []} />
+        <aside style={{ borderLeft: '1px solid var(--bd)', background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 300, minHeight: 0 }}>
+          <CheckpointRail checkpoints={item?.planning_checkpoints ?? []} />
+          <PilotRunHistory runs={pilotRuns} />
+        </aside>
       </div>
     </div>
   );
@@ -2759,6 +2820,7 @@ export function PlanScreen() {
   const [taskInboxItems, setTaskInboxItems] = useState<TaskInboxItem[]>([]);
   const [selectedPlanInboxId, setSelectedPlanInboxId] = useState<string | null>(null);
   const [selectedPlanInboxItem, setSelectedPlanInboxItem] = useState<PlanInboxDetail | null>(null);
+  const [pilotRuns, setPilotRuns] = useState<PlanPilotRunRecord[]>([]);
   const [plannerModalOpen, setPlannerModalOpen] = useState(false);
   const [specViewerOpen, setSpecViewerOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
@@ -2827,7 +2889,10 @@ export function PlanScreen() {
           : plans[0]?.id ?? null;
         setSelectedPlanInboxId(nextSelectedId);
         if (nextSelectedId) loadPlanInboxDetail(nextSelectedId);
-        else setSelectedPlanInboxItem(null);
+        else {
+          setSelectedPlanInboxItem(null);
+          setPilotRuns([]);
+        }
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'orchestration_inbox_failed'));
   };
@@ -2906,6 +2971,18 @@ export function PlanScreen() {
         setPlanInboxItems((current) => [item, ...current.filter((existing) => existing.id !== item.id)]);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_detail_failed'));
+    loadPilotRuns(itemId);
+  };
+
+  const loadPilotRuns = (itemId: string) => {
+    if (typeof fetch !== 'function') return;
+    fetch(`${API}/api/orchestration/plan-inbox/${itemId}/pilot-runs`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_pilot_runs_${response.status}`);
+        return response.json() as Promise<PlanPilotRunRecord[]>;
+      })
+      .then(setPilotRuns)
+      .catch(() => setPilotRuns([]));
   };
 
   const openPlannerModal = (itemId: string) => {
@@ -3284,6 +3361,19 @@ export function PlanScreen() {
       .then((result) => {
         setSelectedPlanInboxItem(result.plan);
         setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+        setPilotRuns((current) => [{
+          id: result.event.id,
+          created_at: result.event.created_at,
+          status: result.pilot.status,
+          summary: result.pilot.summary,
+          failures: result.pilot.failures,
+          task_ids: result.tasks.map((task) => task.id),
+          task_inbox_item_ids: result.decomposition.task_inbox_items.map((item) => item.id),
+          spec_id: result.spec.id,
+          decomposition_run_id: result.decomposition.decomposition_run.id,
+          artifact: result.artifact,
+          event: result.event,
+        }, ...current.filter((item) => item.id !== result.event.id)]);
         setTaskInboxItems((current) => [
           ...result.decomposition.task_inbox_items,
           ...current.filter((item) => !result.decomposition.task_inbox_items.some((created) => created.id === item.id)),
@@ -3309,6 +3399,7 @@ export function PlanScreen() {
         loadDaemonEvents();
         loadDaemonState();
         loadReadinessReport();
+        loadPilotRuns(result.plan.id);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'plan_pilot_run_failed'))
       .finally(() => setLoading(false));
@@ -4062,6 +4153,7 @@ export function PlanScreen() {
         {plannerModalOpen && (
           <PlannerModal
             item={selectedPlanInboxItem}
+            pilotRuns={pilotRuns}
             models={agentModels}
             plannerProvider={plannerProvider}
             plannerModel={plannerModel}
