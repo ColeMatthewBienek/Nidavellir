@@ -3179,12 +3179,14 @@ def get_task_execution_evidence(task_id: str, request: Request) -> dict:
         "run_attempt_created",
         "run_attempt_updated",
         "step_status_changed",
+        "artifact_created",
     }
     events = [
         event for event in store.list_events(task_id=task_id, limit=100)
         if event.get("type") in execution_event_types
     ][:50]
     run_attempts = store.list_run_attempts(task_id=task_id, limit=50)
+    artifacts = store.list_artifacts(task_id=task_id, limit=50)
     latest_status = next(
         (
             event.get("payload", {}).get("status")
@@ -3200,11 +3202,13 @@ def get_task_execution_evidence(task_id: str, request: Request) -> dict:
         "summary": {
             "step_count": len(evidence_steps),
             "run_attempt_count": len(run_attempts),
+            "artifact_count": len(artifacts),
             "event_count": len(events),
             "latest_status": latest_status or (evidence_steps[-1]["status"] if evidence_steps else task.get("status")),
         },
         "steps": evidence_steps,
         "run_attempts": run_attempts,
+        "artifacts": artifacts,
         "events": events,
     }
 
@@ -3895,6 +3899,25 @@ async def run_command_step(step_id: str, body: StepRunCommandRequest, request: R
         type="command_step_finished",
         payload={"run_id": run_id, "exit_code": result["exit_code"], "status": status, "worktree_id": worktree["id"]},
     )
+    artifact = store.create_artifact(
+        task_id=task["id"],
+        node_id=node["id"],
+        step_id=step_id,
+        type="command_run",
+        title=f"Command run: {step['title']}",
+        summary=summary,
+        content=output.strip(),
+        metadata={
+            "command_run_id": run_id,
+            "command": command,
+            "exit_code": result["exit_code"],
+            "timed_out": result["timed_out"],
+            "duration_ms": result["duration_ms"],
+            "worktree_id": worktree["id"],
+            "worktree_path": str(cwd),
+            "status": status,
+        },
+    )
     await broadcast_resource_event(request.app, {
         "kind": "orchestration",
         "action": "command_step_finished",
@@ -3902,7 +3925,7 @@ async def run_command_step(step_id: str, body: StepRunCommandRequest, request: R
         "run_id": run_id,
         "message": "Orchestration command step captured",
     })
-    return {"step": updated_step, "run": run, "worktree": worktree}
+    return {"step": updated_step, "run": run, "worktree": worktree, "artifact": artifact}
 
 
 @router.post("/steps/{step_id}/run-agent")
@@ -4112,6 +4135,23 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
             type="agent_step_finished",
             payload={"provider": provider, "model": model, "status": "complete", "worktree_id": worktree["id"]},
         )
+        artifact = store.create_artifact(
+            task_id=task["id"],
+            node_id=node["id"],
+            step_id=step_id,
+            run_attempt_id=attempt["id"],
+            type="agent_run",
+            title=f"Agent run: {step['title']}",
+            summary=summary,
+            content=transcript,
+            metadata={
+                "provider": provider,
+                "model": model,
+                "worktree_id": worktree["id"],
+                "worktree_path": str(cwd),
+                "status": "complete",
+            },
+        )
         await broadcast_resource_event(request.app, {
             "kind": "orchestration",
             "action": "agent_step_finished",
@@ -4123,6 +4163,7 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
             "run_attempt": attempt,
             "worktree": worktree,
             "transcript": transcript,
+            "artifact": artifact,
         }
     except Exception as exc:
         error = str(exc)
@@ -4136,11 +4177,30 @@ async def run_agent_step(step_id: str, body: StepRunAgentRequest, request: Reque
             type="agent_step_failed",
             payload={"provider": provider, "model": model, "error": error},
         )
+        artifact = store.create_artifact(
+            task_id=task["id"],
+            node_id=node["id"],
+            step_id=step_id,
+            run_attempt_id=attempt["id"],
+            type="agent_run",
+            title=f"Agent run failed: {step['title']}",
+            summary=error[:240],
+            content="".join(transcript_parts).strip(),
+            metadata={
+                "provider": provider,
+                "model": model,
+                "worktree_id": worktree["id"],
+                "worktree_path": str(cwd),
+                "status": "failed",
+                "error": error,
+            },
+        )
         return {
             "step": updated_step,
             "run_attempt": attempt,
             "worktree": worktree,
             "transcript": "".join(transcript_parts).strip(),
+            "artifact": artifact,
         }
     finally:
         if agent is not None:

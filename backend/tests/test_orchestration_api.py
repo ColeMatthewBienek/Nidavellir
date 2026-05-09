@@ -320,6 +320,11 @@ async def test_orchestration_runs_command_steps_inside_node_worktree(tmp_path: P
         body = result.json()
         assert body["step"]["status"] == "complete"
         assert body["run"]["cwd"] == str(worktree_path)
+        assert body["artifact"]["type"] == "command_run"
+        assert body["artifact"]["metadata"]["command_run_id"] == body["run"]["id"]
+        assert body["artifact"]["metadata"]["exit_code"] == 0
+        assert body["artifact"]["metadata"]["command"] == "printf marker > marker.txt && pwd"
+        assert str(worktree_path) in body["artifact"]["content"]
         assert str(worktree_path) in body["run"]["stdout"]
         assert body["worktree"]["id"] == worktree["id"]
         assert body["worktree"]["status"] == "dirty"
@@ -338,9 +343,12 @@ async def test_orchestration_runs_command_steps_inside_node_worktree(tmp_path: P
         assert evidence.status_code == 200
         evidence_body = evidence.json()
         assert evidence_body["summary"]["step_count"] == 1
+        assert evidence_body["summary"]["artifact_count"] == 1
         assert evidence_body["summary"]["event_count"] >= 2
         assert evidence_body["steps"][0]["id"] == step["id"]
         assert evidence_body["steps"][0]["output_summary"]
+        assert evidence_body["artifacts"][0]["id"] == body["artifact"]["id"]
+        assert evidence_body["artifacts"][0]["type"] == "command_run"
         assert {"command_step_started", "command_step_finished"} <= {
             event["type"] for event in evidence_body["events"]
         }
@@ -420,6 +428,10 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
         body = result.json()
         assert body["step"]["status"] == "complete"
         assert body["run_attempt"]["provider"] == "fake-agent"
+        assert body["artifact"]["type"] == "agent_run"
+        assert body["artifact"]["run_attempt_id"] == body["run_attempt"]["id"]
+        assert body["artifact"]["metadata"]["provider"] == "fake-agent"
+        assert "Changed agent.txt" in body["artifact"]["content"]
         assert body["run_attempt"]["model"] == "fake-model"
         assert body["run_attempt"]["worktree_path"] == str(worktree_path)
         assert body["worktree"]["id"] == worktree["id"]
@@ -435,8 +447,11 @@ async def test_orchestration_runs_agent_steps_inside_node_worktree(tmp_path: Pat
         assert evidence.status_code == 200
         evidence_body = evidence.json()
         assert evidence_body["summary"]["run_attempt_count"] == 1
+        assert evidence_body["summary"]["artifact_count"] == 1
         assert evidence_body["run_attempts"][0]["id"] == body["run_attempt"]["id"]
         assert evidence_body["run_attempts"][0]["status"] == "completed"
+        assert evidence_body["artifacts"][0]["id"] == body["artifact"]["id"]
+        assert evidence_body["artifacts"][0]["type"] == "agent_run"
         assert {"agent_step_started", "agent_step_finished", "run_attempt_created", "run_attempt_updated"} <= {
             event["type"] for event in evidence_body["events"]
         }
