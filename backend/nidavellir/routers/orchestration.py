@@ -1805,6 +1805,54 @@ def _collapse_repeated_planner_response(content: str) -> str:
     return text
 
 
+def _planner_pm_boundary_violation(content: str) -> str | None:
+    text = content.lower()
+    forbidden_markers = [
+        "step 4 — write tests",
+        "step 4 - write tests",
+        "proceeding to step 4",
+        "proceeding to step 5",
+        "step 5 — implement",
+        "step 5 - implement",
+        "writing the complete test suite",
+        "now run the tests",
+        "red confirmed",
+        "files created:",
+        "files modified:",
+        "schema changes:",
+        "dependencies added:",
+        "done report:",
+        "feature:",
+    ]
+    for marker in forbidden_markers:
+        if marker in text:
+            return marker
+    completion_claims = [
+        r"\bbuilt:\s",
+        r"\bimplemented\b",
+        r"\bcreated\s+.+\.(?:ts|tsx|py|sh|md|json)\b",
+        r"\bmodified\s+.+\.(?:ts|tsx|py|sh|md|json)\b",
+        r"\btests?\s+pass(?:ed|ing)?\b",
+        r"\b\d+\s*/\s*\d+\s+green\b",
+    ]
+    for pattern in completion_claims:
+        if re.search(pattern, text, flags=re.DOTALL):
+            return pattern
+    return None
+
+
+def _planner_pm_boundary_guard_message(plan: dict) -> str:
+    active_gate = _next_open_planner_gate(plan)
+    gate_label = active_gate.replace("_", " ")
+    return (
+        "Planner PM boundary guard engaged. I will not run implementation, write tests, create files, "
+        "or report build completion from the planning chat.\n\n"
+        f"Active gate: `{active_gate}`.\n\n"
+        "I will keep this in PM mode and move only through evidence-backed planning gates. "
+        f"Next focused question: what evidence should we use to lock the {gate_label} gate?"
+    )
+
+
 def _planner_sidecar_plan_updates(sidecar: dict | None) -> dict[str, str]:
     updates: dict[str, str] = {}
     actions = sidecar.get("actions") if isinstance(sidecar, dict) else None
@@ -2571,6 +2619,18 @@ async def _execute_planner_pm_turn(
             )
         agent_content = str(agent_result.get("content") or "")
         sidecar = agent_result.get("sidecar") if isinstance(agent_result.get("sidecar"), dict) else None
+        boundary_violation = _planner_pm_boundary_violation(agent_content)
+        if boundary_violation:
+            agent_result = {
+                **agent_result,
+                "status": "blocked_by_boundary_guard",
+                "content": _planner_pm_boundary_guard_message(plan),
+                "raw_blocked_content": agent_result.get("raw_content") or agent_content,
+                "boundary_violation": boundary_violation,
+                "sidecar": None,
+            }
+            agent_content = str(agent_result["content"])
+            sidecar = None
         sidecar_plan_updates = _planner_sidecar_plan_updates(sidecar)
         if sidecar_plan_updates:
             plan = store.update_plan_inbox_item(
@@ -2650,6 +2710,7 @@ async def _execute_planner_pm_turn(
                 "agent_mode": body.agentMode,
                 "agent_status": agent_result["status"],
                 "agent_error": agent_result["error"],
+                "boundary_violation": agent_result.get("boundary_violation"),
                 "harness": harness_metadata["harness"],
                 "harness_conversation_id": harness_metadata["conversation_id"],
                 "prompt_section_names": harness_metadata["prompt_section_names"],

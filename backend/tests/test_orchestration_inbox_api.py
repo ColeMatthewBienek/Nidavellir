@@ -104,6 +104,21 @@ class PlannerPmDuplicateResponseAgent(PlannerPmFakeAgent):
         yield f"{response}\n{response}"
 
 
+class PlannerPmImplementationReportAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Step 4 — Write Tests First (RED).\n\n"
+            "Writing the complete test suite before any implementation.\n\n"
+            "Step 5 — Implement (GREEN).\n\n"
+            "FEATURE: Security Workstation\n\n"
+            "BUILT:\n"
+            "- sec CLI dispatcher\n\n"
+            "FILES CREATED:\n"
+            "  scripts/sec\n\n"
+            "TESTS: 73 tests across 5 suites."
+        )
+
+
 def test_planner_pm_relative_repo_name_stays_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     default_repo = tmp_path / "nidavellir"
     default_repo.mkdir()
@@ -862,6 +877,38 @@ async def test_pm_turn_collapses_duplicate_provider_response(tmp_path: Path, mon
         content = turn.json()["messages"][1]["content"]
         assert content.count("Step 1 — Stack Detection") == 1
         assert content.count("Step 2 — Requirements Clarification") == 1
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_blocks_implementation_completion_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr(
+        "nidavellir.routers.orchestration._agent_registry.make_agent",
+        lambda *args, **kwargs: PlannerPmImplementationReportAgent(),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a shell workstation.",
+            "repoPath": str(tmp_path / "security-workstation"),
+            "baseBranch": "main",
+        })).json()
+
+        turn = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Continue, approved.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })
+
+        assert turn.status_code == 200
+        body = turn.json()
+        planner_message = body["messages"][1]
+        assert planner_message["metadata"]["agent_status"] == "blocked_by_boundary_guard"
+        assert planner_message["metadata"]["boundary_violation"]
+        assert planner_message["content"].startswith("Planner PM boundary guard engaged.")
+        assert "FILES CREATED" not in planner_message["content"]
+        assert "TESTS: 73 tests" not in planner_message["content"]
+        assert body["structured"]["agent"]["raw_blocked_content"].startswith("Step 4")
 
 
 @pytest.mark.asyncio
