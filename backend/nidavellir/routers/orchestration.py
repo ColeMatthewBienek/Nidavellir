@@ -3091,13 +3091,24 @@ async def _run_approved_plan_autonomous_pilot(
         task_inbox_items.append(updated)
     decomposed["task_inbox_items"] = task_inbox_items
 
+    task_inbox_result = _process_specific_task_inbox_items(
+        store,
+        task_inbox_items,
+        TaskInboxProcessRequest(
+            lockedBy=locked_by,
+            maxItems=max_tasks,
+            materialize=True,
+            provisionWorktrees=True,
+            queueExecution=True,
+        ),
+    )
     tick = await run_orchestration_daemon_tick(
         OrchestrationDaemonTickRequest(
             lockedBy=locked_by,
             autonomyMode="autonomous",
-            processInbox=True,
+            processInbox=False,
             runQueue=True,
-            maxInboxItems=max_tasks,
+            maxInboxItems=0,
             maxQueuedTasks=max_tasks,
             maxStepsPerTask=max_steps_per_task,
             timeoutSeconds=timeout_seconds,
@@ -3106,6 +3117,7 @@ async def _run_approved_plan_autonomous_pilot(
         ),
         request,
     )
+    tick["task_inbox"] = task_inbox_result
     processed_tasks = [
         item.get("task")
         for item in tick.get("execution_queue", {}).get("processed", [])
@@ -3247,6 +3259,84 @@ def _summarize_autonomous_pilot_run(
         },
         "created_at": _utc_now(),
     }
+
+
+def _process_specific_task_inbox_items(store: Any, candidates: list[dict], body: TaskInboxProcessRequest) -> dict:
+    processed: list[dict[str, Any]] = []
+    for candidate in candidates[:body.maxItems]:
+        current = store.get_task_inbox_item(candidate["id"]) or candidate
+        if current.get("status") == "new":
+            item = store.claim_task_inbox_item(current["id"], locked_by=body.lockedBy)
+            if item is None:
+                continue
+        else:
+            item = current
+        if item.get("status") not in {"claimed_by_em", "accepted_atomic"}:
+            processed.append({"task_inbox_item": item, "action": "skipped", "reason": "not_claimable"})
+            continue
+
+        shape_report = None
+        if item.get("status") == "accepted_atomic":
+            shape_verdict = "valid"
+        else:
+            shape_verdict, shape_payload = _task_inbox_shape_decision(item)
+            shape_report = store.create_task_shape_report(
+                task_inbox_item_id=item["id"],
+                verdict=shape_verdict,
+                report=shape_payload,
+            )
+            item = store.get_task_inbox_item(item["id"]) or item
+        if shape_verdict != "valid":
+            processed.append({
+                "task_inbox_item": item,
+                "shape_report": shape_report,
+                "action": "needs_more_decomposition",
+            })
+            continue
+
+        em_review = None
+        if item.get("status") != "accepted_atomic":
+            em_verdict, em_payload = _task_inbox_em_decision(store, item, shape_report or {})
+            em_review = store.create_em_review(
+                task_inbox_item_id=item["id"],
+                verdict=em_verdict,
+                report=em_payload,
+            )
+            item = store.get_task_inbox_item(item["id"]) or item
+        else:
+            em_verdict = "atomic"
+        result: dict[str, Any] = {
+            "task_inbox_item": item,
+            "shape_report": shape_report,
+            "em_review": em_review,
+            "action": item.get("status"),
+        }
+        if em_verdict == "atomic" and body.materialize:
+            materialized = _materialize_task_inbox_item(store, item, TaskInboxMaterializeRequest())
+            result["materialization"] = materialized
+            result["task_inbox_item"] = materialized["task_inbox_item"]
+            result["action"] = "materialized"
+            if body.provisionWorktrees:
+                result["worktree_provisioning"] = _provision_task_execution_worktrees(store, materialized["task"])
+                result["materialization"]["task"] = store.get_task(materialized["task"]["id"]) or materialized["task"]
+            if body.queueExecution:
+                queued = _queue_task_for_execution(store, materialized["task"]["id"])
+                result["execution_queue"] = queued
+                result["materialization"]["task"] = queued["task"]
+                if queued["queued"]:
+                    result["action"] = "queued_for_execution"
+        processed.append(result)
+
+    store.append_event(type="task_inbox_process_finished", payload={
+        "locked_by": body.lockedBy,
+        "max_items": body.maxItems,
+        "processed_count": len(processed),
+        "materialized_count": sum(1 for item in processed if item.get("action") == "materialized"),
+        "queued_for_execution_count": sum(1 for item in processed if item.get("action") == "queued_for_execution"),
+        "source": "autonomous_pilot",
+        "task_inbox_item_ids": [item.get("id") for item in candidates],
+    })
+    return {"processed": processed}
 
 
 @router.post("/pilot-runs")

@@ -519,7 +519,7 @@ class OrchestrationStore:
                 (item_id,),
             ).fetchall()
             discussion_messages = conn.execute(
-                "SELECT * FROM orchestration_planner_discussion_messages WHERE plan_inbox_item_id = ? ORDER BY created_at ASC",
+                "SELECT * FROM orchestration_planner_discussion_messages WHERE plan_inbox_item_id = ? ORDER BY created_at ASC, rowid ASC",
                 (item_id,),
             ).fetchall()
             checkpoints = conn.execute(
@@ -626,7 +626,7 @@ class OrchestrationStore:
             rows = conn.execute(
                 """SELECT * FROM orchestration_planner_discussion_messages
                    WHERE plan_inbox_item_id = ?
-                   ORDER BY created_at ASC""",
+                   ORDER BY created_at ASC, rowid ASC""",
                 (plan_inbox_item_id,),
             ).fetchall()
         return [self._planner_discussion_message_row(row) for row in rows]
