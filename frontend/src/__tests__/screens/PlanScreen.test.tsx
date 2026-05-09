@@ -803,11 +803,12 @@ describe('PlanScreen orchestration board', () => {
         });
       }
       if (String(url).endsWith('/api/orchestration/tasks/cleanup') && options?.method === 'POST') {
+        const body = JSON.parse(String(options.body));
         return Promise.resolve({
           ok: true,
           json: async () => ({
             archived: [{ ...cancelledTask, archived: 1, deleted_at: '2026-05-03T00:00:00Z' }],
-            removed_worktrees: [],
+            removed_worktrees: body.removeWorktrees ? [{ id: 'worktree-1', status: 'removed' }] : [],
             errors: [],
             event: { id: 'cleanup-event', type: 'orchestration_tasks_cleanup_finished', payload: {}, created_at: '2026-05-03T00:00:00Z' },
           }),
@@ -1347,6 +1348,25 @@ describe('PlanScreen orchestration board', () => {
       const body = JSON.parse(String(calls[0][1]?.body));
       expect(body.statuses).toEqual(['done', 'cancelled']);
       expect(body.removeWorktrees).toBe(false);
+      expect(screen.queryByText('Cancelled clutter')).toBeNull();
+    });
+  });
+
+  it('bulk cleans terminal tasks and requests worktree removal', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PlanScreen />);
+
+    expect(await screen.findByText('Cancelled clutter')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Clean + Worktrees' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/tasks/cleanup') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.statuses).toEqual(['done', 'cancelled']);
+      expect(body.removeWorktrees).toBe(true);
       expect(screen.queryByText('Cancelled clutter')).toBeNull();
     });
   });
