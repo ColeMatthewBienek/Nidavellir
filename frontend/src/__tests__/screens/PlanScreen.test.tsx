@@ -244,6 +244,33 @@ const planningCheckpoints = [
   },
 ];
 
+const readyPlanningCheckpoints = [
+  {
+    id: 'checkpoint-ready-intake',
+    plan_inbox_item_id: 'plan-1',
+    key: 'intake',
+    title: 'Intake captured',
+    status: 'agreed',
+    summary: 'Ready pilot plan',
+    source_message_ids: [],
+    blocking_question: null,
+    created_at: '2026-05-03T00:00:00Z',
+    updated_at: '2026-05-03T00:00:00Z',
+  },
+  ...['repo_target', 'scope', 'acceptance', 'verification', 'risks', 'spec_draft', 'spec_approved'].map((key, index) => ({
+    id: `checkpoint-ready-${key}`,
+    plan_inbox_item_id: 'plan-1',
+    key,
+    title: key.replace(/_/g, ' '),
+    status: 'agreed',
+    summary: `${key} locked`,
+    source_message_ids: [],
+    blocking_question: null,
+    created_at: `2026-05-03T00:00:0${index + 1}Z`,
+    updated_at: `2026-05-03T00:00:0${index + 1}Z`,
+  })),
+];
+
 describe('PlanScreen orchestration board', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -445,6 +472,7 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).endsWith('/api/orchestration/plan-inbox') && options?.method === 'POST') {
         const body = JSON.parse(String(options.body));
         planInboxCreateBody = body;
+        const readyPilot = body.rawPlan === 'Ready pilot plan';
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -468,13 +496,13 @@ describe('PlanScreen orchestration board', () => {
             source: 'plan_tab',
             constraints: [],
             acceptance_criteria: ['Vague specs are blocked'],
-            status: 'new',
+            status: readyPilot ? 'spec_ready' : 'new',
             locked_by: null,
             locked_at: null,
-            final_spec_id: null,
+            final_spec_id: readyPilot ? 'spec-ready-1' : null,
             created_at: '2026-05-03T00:00:00Z',
             updated_at: '2026-05-03T00:00:00Z',
-            planning_checkpoints: planningCheckpoints,
+            planning_checkpoints: readyPilot ? readyPlanningCheckpoints : planningCheckpoints,
           }),
         });
       }
@@ -512,6 +540,123 @@ describe('PlanScreen orchestration board', () => {
               title: 'Fix flaky auth test',
               objective: 'Verify the existing project brief.',
               status: 'new',
+            },
+          }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pilot-run') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            plan: {
+              id: 'plan-1',
+              raw_plan: 'Ready pilot plan',
+              repo_path: '/repo',
+              base_branch: 'main',
+              provider: 'codex',
+              model: 'gpt-5.5',
+              entry_mode: 'existing_project',
+              work_lane: 'chore',
+              repo_profile: {},
+              automation_mode: 'autonomous',
+              max_concurrency: 1,
+              priority: null,
+              source: 'plan_tab',
+              constraints: [],
+              acceptance_criteria: ['Vague specs are blocked'],
+              status: 'decomposed',
+              locked_by: null,
+              locked_at: null,
+              final_spec_id: 'spec-ready-1',
+              created_at: '2026-05-03T00:00:00Z',
+              updated_at: '2026-05-03T00:03:00Z',
+              discussion_messages: [],
+              planning_checkpoints: readyPlanningCheckpoints,
+              specs: [{
+                id: 'spec-ready-1',
+                plan_inbox_item_id: 'plan-1',
+                version: 1,
+                content: '# Agentic Forward Spec',
+                metadata: {},
+                status: 'ready',
+                created_at: '2026-05-03T00:00:00Z',
+                updated_at: '2026-05-03T00:00:00Z',
+              }],
+              decomposition_runs: [],
+            },
+            spec: {
+              id: 'spec-ready-1',
+              plan_inbox_item_id: 'plan-1',
+              version: 1,
+              content: '# Agentic Forward Spec',
+              metadata: {},
+              status: 'ready',
+              created_at: '2026-05-03T00:00:00Z',
+              updated_at: '2026-05-03T00:00:00Z',
+            },
+            decomposition: {
+              plan: {
+                id: 'plan-1',
+                raw_plan: 'Ready pilot plan',
+                repo_path: '/repo',
+                base_branch: 'main',
+                provider: 'codex',
+                model: 'gpt-5.5',
+                entry_mode: 'existing_project',
+                work_lane: 'chore',
+                repo_profile: {},
+                automation_mode: 'autonomous',
+                max_concurrency: 1,
+                priority: null,
+                source: 'plan_tab',
+                constraints: [],
+                acceptance_criteria: ['Vague specs are blocked'],
+                status: 'decomposed',
+                locked_by: null,
+                locked_at: null,
+                final_spec_id: 'spec-ready-1',
+                created_at: '2026-05-03T00:00:00Z',
+                updated_at: '2026-05-03T00:03:00Z',
+                discussion_messages: [],
+                planning_checkpoints: readyPlanningCheckpoints,
+              },
+              decomposition_run: {
+                id: 'decomp-pilot',
+                plan_inbox_item_id: 'plan-1',
+                spec_id: 'spec-ready-1',
+                pass_index: 1,
+                decomposer_output: {},
+                status: 'created',
+                created_at: '2026-05-03T00:03:00Z',
+                updated_at: '2026-05-03T00:03:00Z',
+              },
+              task_inbox_items: [{
+                ...taskInboxItem,
+                id: 'task-inbox-pilot',
+                title: 'Ready pilot plan',
+                status: 'materialized',
+                materialized_task_id: 'task-pilot',
+              }],
+            },
+            daemon_tick: { mode: 'autonomous' },
+            tasks: [{
+              ...detailWithEvidence,
+              id: 'task-pilot',
+              title: 'Ready pilot plan',
+              status: 'review',
+              base_repo_path: '/repo',
+              base_branch: 'main',
+            }],
+            evidence: [{
+              ...taskEvidence,
+              task_id: 'task-pilot',
+              task_status: 'review',
+            }],
+            event: {
+              id: 'event-pilot',
+              type: 'autonomous_pilot_run_finished',
+              payload: { plan_inbox_item_id: 'plan-1' },
+              created_at: '2026-05-03T00:03:00Z',
             },
           }),
         });
@@ -610,6 +755,7 @@ describe('PlanScreen orchestration board', () => {
       }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1') && !options) {
         const created = planInboxCreateBody ?? {};
+        const readyPilot = created.rawPlan === 'Ready pilot plan';
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -633,10 +779,10 @@ describe('PlanScreen orchestration board', () => {
             source: 'plan_tab',
             constraints: [],
             acceptance_criteria: ['Vague specs are blocked'],
-            status: 'new',
+            status: readyPilot ? 'spec_ready' : 'new',
             locked_by: null,
             locked_at: null,
-            final_spec_id: null,
+            final_spec_id: readyPilot ? 'spec-ready-1' : null,
             created_at: '2026-05-03T00:00:00Z',
             updated_at: '2026-05-03T00:00:00Z',
             discussion_messages: [{
@@ -649,7 +795,18 @@ describe('PlanScreen orchestration board', () => {
               metadata: { source: 'raw_plan' },
               created_at: '2026-05-03T00:00:00Z',
             }],
-            planning_checkpoints: planningCheckpoints,
+            planning_checkpoints: readyPilot ? readyPlanningCheckpoints : planningCheckpoints,
+            specs: readyPilot ? [{
+              id: 'spec-ready-1',
+              plan_inbox_item_id: 'plan-1',
+              version: 1,
+              content: '# Agentic Forward Spec',
+              metadata: {},
+              status: 'ready',
+              created_at: '2026-05-03T00:00:00Z',
+              updated_at: '2026-05-03T00:00:00Z',
+            }] : [],
+            decomposition_runs: [],
           }),
         });
       }
@@ -1328,6 +1485,32 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View Spec' }));
     expect(await screen.findByText('Spec Snapshot')).toBeTruthy();
     expect(screen.getByText(/# Working Spec Snapshot/)).toBeTruthy();
+  });
+
+  it('runs an autonomous pilot from an approved PM plan', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Ready pilot plan' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Plan repo path' }), { target: { value: '/repo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('PM Planning Session')).toBeTruthy();
+    const runPilot = await screen.findByRole('button', { name: 'Run Pilot' });
+    expect(runPilot).not.toBeDisabled();
+    fireEvent.click(runPilot);
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pilot-run') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.maxTasks).toBe(1);
+      expect(body.runAgent).toBe(true);
+      expect(body.lockedBy).toBe('plan-screen-pilot');
+    });
+    expect((await screen.findAllByText('Ready pilot plan')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('marker artifact written')).toBeTruthy();
   });
 
   it('materializes accepted atomic task inbox items into executable tasks', async () => {
