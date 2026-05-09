@@ -714,6 +714,36 @@ describe('PlanScreen orchestration board', () => {
           }],
         });
       }
+      if (String(url).includes('/api/orchestration/tasks/task-pilot/events')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-pilot') && options?.method === 'PATCH') {
+        const body = JSON.parse(String(options.body));
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ...detailWithEvidence,
+            id: 'task-pilot',
+            title: 'Ready pilot plan',
+            status: body.status ?? 'queued_for_execution',
+            base_repo_path: '/repo',
+            base_branch: 'main',
+          }),
+        });
+      }
+      if (String(url).includes('/api/orchestration/tasks/task-pilot') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ...detailWithEvidence,
+            id: 'task-pilot',
+            title: 'Ready pilot plan',
+            status: 'review',
+            base_repo_path: '/repo',
+            base_branch: 'main',
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/inspect-repo') && options?.method === 'POST') {
         const inspectedPlan = {
           id: 'plan-1',
@@ -1573,6 +1603,15 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('Pilot Runs')).toBeTruthy();
     expect(await screen.findByText('Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).')).toBeTruthy();
     expect(await screen.findByText('marker artifact written')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Queue Task' }));
+    await waitFor(() => {
+      const queueCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).includes('/api/orchestration/tasks/task-pilot') && options?.method === 'PATCH'
+      );
+      expect(queueCalls.length).toBe(1);
+      expect(JSON.parse(String(queueCalls[0][1]?.body)).status).toBe('queued_for_execution');
+    });
   });
 
   it('materializes accepted atomic task inbox items into executable tasks', async () => {
