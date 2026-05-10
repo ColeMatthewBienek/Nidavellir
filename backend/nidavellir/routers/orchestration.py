@@ -23,6 +23,7 @@ from nidavellir.agents.events import frontend_event
 from nidavellir.commands import CommandRunner, CommandRunStore
 from nidavellir.commands.events import broadcast_command_event
 from nidavellir.orchestration import OrchestrationStore
+from nidavellir.orchestration.planner_pm import run_planner_pm_turn as run_deterministic_planner_pm_turn
 from nidavellir.orchestration.worktrees import (
     WorktreeError,
     checkpoint_worktree,
@@ -244,7 +245,8 @@ class PlannerPmTurnRequest(BaseModel):
     content: str = Field(min_length=1)
     provider: str | None = None
     model: str | None = None
-    agentMode: str = "provider"
+    agentMode: str = "deterministic"
+    timeoutSeconds: int = Field(default=120, ge=1, le=300)
 
 
 class PlanningCheckpointUpdateRequest(BaseModel):
@@ -340,14 +342,18 @@ class TaskInboxProcessRequest(BaseModel):
 class OrchestrationDaemonTickRequest(BaseModel):
     lockedBy: str | None = Field(default=None, min_length=1)
     autonomyMode: str | None = None
+    processPlans: bool | None = None
     processInbox: bool | None = None
     runQueue: bool | None = None
+    maxPlanRuns: int | None = Field(default=None, ge=0, le=5)
+    maxTasksPerPlan: int | None = Field(default=None, ge=1, le=3)
     maxInboxItems: int | None = Field(default=None, ge=0, le=25)
     maxQueuedTasks: int | None = Field(default=None, ge=0, le=10)
     maxStepsPerTask: int | None = Field(default=None, ge=1, le=50)
     timeoutSeconds: int | None = Field(default=None, ge=1, le=600)
     permissionOverride: str | None = None
     ignorePaused: bool = False
+    runAgent: bool | None = None
 
 
 class AutonomousPilotRunRequest(BaseModel):
@@ -379,11 +385,24 @@ class PlanInboxPilotRunRequest(BaseModel):
     timeoutSeconds: int = Field(default=120, ge=1, le=600)
 
 
+class PlanInboxAutonomousRunRequest(BaseModel):
+    maxTasks: int = Field(default=1, ge=1, le=3)
+    runAgent: bool = True
+    lockedBy: str = Field(default="autonomous-plan-lane", min_length=1)
+    permissionOverride: str | None = PermissionDecision.ALLOW_ONCE.value
+    maxStepsPerTask: int = Field(default=10, ge=1, le=50)
+    timeoutSeconds: int = Field(default=120, ge=1, le=600)
+
+
 class OrchestrationDaemonStateUpdateRequest(BaseModel):
     lockedBy: str | None = Field(default=None, min_length=1)
     status: str | None = None
     autonomyMode: str | None = None
     intervalSeconds: int | None = Field(default=None, ge=5, le=3600)
+    processPlans: bool | None = None
+    maxPlanRuns: int | None = Field(default=None, ge=0, le=5)
+    maxTasksPerPlan: int | None = Field(default=None, ge=1, le=3)
+    runAgent: bool | None = None
     maxInboxItems: int | None = Field(default=None, ge=0, le=25)
     maxQueuedTasks: int | None = Field(default=None, ge=0, le=10)
     maxStepsPerTask: int | None = Field(default=None, ge=1, le=50)
@@ -681,6 +700,14 @@ def _planner_repo_target_ready_path(repo_path: str) -> str | None:
     return None
 
 
+class _PlannerRepoResolver:
+    def resolve(self, repo_path: str) -> str | None:
+        return _planner_repo_target_ready_path(repo_path)
+
+    def is_ready_or_creatable(self, repo_path: str) -> bool:
+        return _planner_repo_target_ready_path(repo_path) is not None
+
+
 def _inspect_existing_project_repo(repo_path: str | None, base_branch: str | None = None) -> dict[str, Any]:
     ready_path = _planner_repo_target_ready_path(str(repo_path or ""))
     if not ready_path:
@@ -763,8 +790,23 @@ def _preview_plan_repo_target(repo_path: str, entry_mode: str, base_branch: str 
     if not raw_path:
         raise ValueError("repo_path_required")
 
-    target = Path(raw_path).expanduser()
-    resolved = target.resolve(strict=False)
+    normalized_path = _explicit_planner_repo_path(raw_path)
+    if not normalized_path:
+        return {
+            "repo_path": raw_path,
+            "parent_path": "",
+            "entry_mode": entry_mode,
+            "base_branch": base_branch or "main",
+            "exists": False,
+            "is_directory": None,
+            "can_use": False,
+            "can_create": False,
+            "requires_setup": False,
+            "status": "blocked",
+            "reason": "repo_path_must_be_absolute",
+        }
+
+    resolved = Path(normalized_path).expanduser()
     parent = resolved.parent
     response: dict[str, Any] = {
         "repo_path": str(resolved),
@@ -1862,8 +1904,25 @@ def _split_planner_pm_sidecar(content: str) -> tuple[str, dict | None]:
     return visible, parsed if isinstance(parsed, dict) else None
 
 
+def _sanitize_planner_tool_markup(content: str) -> str:
+    def replace_call(match: re.Match[str]) -> str:
+        block = match.group(0)
+        name_match = re.search(r'<invoke\s+name="([^"]+)"', block)
+        output_match = re.search(r'<parameter\s+name="output_format">(.+?)</parameter>', block, re.DOTALL)
+        prompt_match = re.search(r'<parameter\s+name="prompt">(.+?)</parameter>', block, re.DOTALL)
+        name = name_match.group(1) if name_match else "provider tool"
+        output = re.sub(r"\s+", " ", output_match.group(1)).strip() if output_match else ""
+        prompt = re.sub(r"\s+", " ", prompt_match.group(1)).strip() if prompt_match else ""
+        summary = output or prompt[:160] or "planning context request"
+        return f"\n\n_Requested planning inspection: `{name}` — {summary}. Nidavellir PM cannot execute tools in planning chat._\n\n"
+
+    sanitized = re.sub(r"<function_calls>.*?</function_calls>", replace_call, content, flags=re.DOTALL)
+    sanitized = re.sub(r"<invoke\s+name=\"[^\"]+\">.*?</invoke>", replace_call, sanitized, flags=re.DOTALL)
+    return sanitized.strip()
+
+
 def _collapse_repeated_planner_response(content: str) -> str:
-    text = content.strip()
+    text = _sanitize_planner_tool_markup(content).strip()
     if not text:
         return ""
     lines = text.splitlines()
@@ -1893,6 +1952,7 @@ def _planner_pm_boundary_violation(content: str) -> str | None:
         "proceeding to step 5",
         "step 5 — implement",
         "step 5 - implement",
+        "implementation steps",
         "writing the complete test suite",
         "now run the tests",
         "red confirmed",
@@ -1902,6 +1962,15 @@ def _planner_pm_boundary_violation(content: str) -> str | None:
         "dependencies added:",
         "done report:",
         "feature:",
+        "ready to implement",
+        "approve this plan to proceed",
+        "let me write the plan file",
+        "git init",
+        "git add .",
+        "git commit",
+        "error: invalid mcp configuration",
+        "requested permissions to use mcp__",
+        "claude requested permissions",
     ]
     for marker in forbidden_markers:
         if marker in text:
@@ -1909,6 +1978,8 @@ def _planner_pm_boundary_violation(content: str) -> str | None:
     completion_claims = [
         r"\bbuilt:\s",
         r"\bimplemented\b",
+        r"\bwhat was built\b",
+        r"\bwhat was tested\b",
         r"\bcreated\s+.+\.(?:ts|tsx|py|sh|md|json)\b",
         r"\bmodified\s+.+\.(?:ts|tsx|py|sh|md|json)\b",
         r"\btests?\s+pass(?:ed|ing)?\b",
@@ -2124,16 +2195,12 @@ async def _run_planner_pm_agent(
         return {"status": "failed", "content": "", "error": "provider_not_found"}
     agent = None
     raw_parts: list[str] = []
-    visible_parts: list[str] = []
     pending_visible = ""
     sidecar_started = False
 
     async def emit_visible(chunk: str) -> None:
         if not chunk:
             return
-        visible_parts.append(chunk)
-        if on_chunk is not None:
-            await on_chunk(chunk)
 
     async def handle_text_chunk(chunk: str) -> None:
         nonlocal pending_visible, sidecar_started
@@ -2153,14 +2220,12 @@ async def _run_planner_pm_agent(
             pending_visible = pending_visible[-keep:]
 
     try:
-        safety_store = getattr(request.app.state, "provider_safety_store", None)
-        dangerousness = safety_store.get_policy(provider).effective_dangerousness if safety_store else "restricted"
         agent = _agent_registry.make_agent(
             provider,
             slot_id=0,
             workdir=_planner_pm_workdir(plan),
             model_id=harness_metadata["model"],
-            dangerousness=dangerousness,
+            dangerousness="restricted",
         )
         await agent.start()
         await agent.send(harness_metadata["_rendered_prompt"])
@@ -2177,6 +2242,19 @@ async def _run_planner_pm_agent(
         raw_content = "".join(raw_parts).strip()
         visible_content, sidecar = _split_planner_pm_sidecar(raw_content)
         visible_content = _collapse_repeated_planner_response(visible_content)
+        boundary_violation = _planner_pm_boundary_violation(visible_content)
+        if boundary_violation:
+            return {
+                "status": "blocked_by_boundary_guard",
+                "content": "",
+                "raw_content": raw_content,
+                "raw_blocked_content": visible_content,
+                "sidecar": None,
+                "error": None,
+                "boundary_violation": boundary_violation,
+            }
+        if on_chunk is not None and visible_content:
+            await on_chunk(visible_content)
         return {"status": "completed", "content": visible_content, "raw_content": raw_content, "sidecar": sidecar, "error": None}
     except Exception as exc:
         raw_content = "".join(raw_parts).strip()
@@ -2222,6 +2300,42 @@ def _planner_pm_structured_turn(plan: dict, user_content: str, user_message_id: 
             "source_message_ids": [user_message_id],
         })
         spec_deltas.append({"section": "Scope", "source_message_id": user_message_id, "content": user_content})
+    language_scope = ""
+    if _checkpoint_status(plan, "scope") != "agreed":
+        if re.fullmatch(r"\s*(?:shell|sh|bash|posix shell|shell script)\s*[.!]?\s*", user_content, re.IGNORECASE):
+            language_scope = "shell"
+        elif re.fullmatch(r"\s*(?:node|node\.js|javascript|typescript|python|go|rust)\s*[.!]?\s*", user_content, re.IGNORECASE):
+            language_scope = user_content.strip()
+    if language_scope:
+        active_gate = "scope"
+        decisions.append(f"CLI runtime preference captured: {language_scope}.")
+        content = "\n".join([
+            f"Runtime preference captured: `{language_scope}`.",
+            "",
+            "Proposed scope:",
+            "- Create the smallest useful CLI that prints `hello nidavellir`.",
+            "- Use a single shell entrypoint script.",
+            "- Add one test command that proves the output exactly matches `hello nidavellir`.",
+            "- Keep this as a new-project proof run for Nidavellir orchestration.",
+            "",
+            "Explicit non-goals:",
+            "- No package manager or external test framework.",
+            "- No argument parsing, install flow, CI, README, or multi-command CLI.",
+            "- No implementation work inside the PM chat.",
+            "",
+            "Approve this scope to lock the scope gate, or deny it and tell me what to change.",
+        ])
+        return {
+            "kind": "question",
+            "content": content,
+            "active_gate": active_gate,
+            "draft_spec": False,
+            "checkpoint_updates": checkpoint_updates,
+            "decisions": decisions,
+            "assumptions": assumptions,
+            "blockers": blockers,
+            "spec_deltas": spec_deltas,
+        }
     if re.search(r"\bverification\s*:", user_content, re.IGNORECASE):
         checkpoint_updates.append({
             "key": "verification",
@@ -2656,6 +2770,161 @@ def create_planner_discussion_message(item_id: str, body: PlannerDiscussionMessa
         raise
 
 
+async def _execute_deterministic_planner_pm_turn(
+    item_id: str,
+    body: PlannerPmTurnRequest,
+    request: Request,
+    on_activity: Callable[[dict], Awaitable[None]] | None = None,
+) -> dict:
+    store = _store(request)
+    plan = store.get_plan_inbox_item(item_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    try:
+        if on_activity is not None:
+            await on_activity({"type": "progress", "content": "Evaluating planner gate"})
+        user_message = store.create_planner_discussion_message(
+            plan_inbox_item_id=item_id,
+            role="user",
+            kind="message",
+            content=body.content,
+            metadata={
+                "source": "pm_turn",
+                "planner_engine": "deterministic",
+                "agent_mode": body.agentMode,
+                "provider": body.provider,
+                "model": body.model,
+            },
+        )
+        plan = store.get_plan_inbox_item(item_id) or plan
+        decision = await run_deterministic_planner_pm_turn(
+            plan,
+            body.content,
+            user_message["id"],
+            repo_resolver=_PlannerRepoResolver(),
+        )
+        if decision.plan_updates.has_changes():
+            plan = store.update_plan_inbox_item(item_id, decision.plan_updates.to_store_updates()) or plan
+
+        checkpoint_updates: list[dict] = []
+        for update in decision.checkpoint_updates:
+            checkpoint = store.update_planning_checkpoint(
+                plan_inbox_item_id=item_id,
+                key=update.key.value,
+                status=update.status,
+                summary=update.summary,
+                source_message_ids=update.source_message_ids,
+            )
+            if checkpoint is not None:
+                checkpoint_updates.append(checkpoint)
+
+        draft_spec = None
+        if decision.draft_spec_request is not None:
+            draft_spec = store.create_agentic_spec(
+                plan_inbox_item_id=item_id,
+                content=decision.draft_spec_request.content,
+                metadata={
+                    "source": "planner-pm",
+                    "engine": "deterministic",
+                    "source_message_ids": [user_message["id"]],
+                    "active_gate": decision.input_gate.value,
+                    **decision.draft_spec_request.metadata,
+                },
+                status=decision.draft_spec_request.status,
+            )
+            store.create_artifact(
+                type="pm_spec",
+                title=f"PM spec draft v{draft_spec['version']}",
+                summary=f"Draft spec generated for plan {item_id}.",
+                content=draft_spec["content"],
+                metadata={
+                    "plan_inbox_item_id": item_id,
+                    "spec_id": draft_spec["id"],
+                    "spec_status": draft_spec["status"],
+                    "version": draft_spec["version"],
+                    "source": "planner-pm",
+                    "engine": "deterministic",
+                },
+            )
+            checkpoint = store.update_planning_checkpoint(
+                plan_inbox_item_id=item_id,
+                key="spec_draft",
+                status="agreed",
+                summary=f"Draft spec v{draft_spec['version']} generated by deterministic Planner PM.",
+                source_message_ids=[user_message["id"]],
+            )
+            if checkpoint is not None:
+                checkpoint_updates.append(checkpoint)
+
+        ready_spec = None
+        if decision.transition.value == "approved":
+            current_plan = store.get_plan_inbox_item(item_id) or plan
+            latest_spec = _latest_spec(current_plan)
+            if latest_spec is not None and latest_spec.get("status") != "ready":
+                ready_spec = store.create_agentic_spec(
+                    plan_inbox_item_id=item_id,
+                    content=latest_spec["content"],
+                    metadata={
+                        "source": "planner-pm",
+                        "engine": "deterministic",
+                        "approved_from_spec_id": latest_spec["id"],
+                        "source_message_ids": [user_message["id"]],
+                    },
+                    status="ready",
+                )
+
+        decision_json = decision.model_dump(mode="json")
+        proposal_json = decision.proposal.model_dump(mode="json") if decision.proposal else None
+        pm_message = store.create_planner_discussion_message(
+            plan_inbox_item_id=item_id,
+            role="planner",
+            kind=decision.message_kind.value,
+            content=decision.ui_message,
+            metadata={
+                "source": "nidavellir_pm_engine",
+                "skill": "planner-pm",
+                "planner_engine": "deterministic",
+                "agent_mode": body.agentMode,
+                "provider": body.provider,
+                "model": body.model,
+                "active_gate": decision.active_gate.value,
+                "input_gate": decision.input_gate.value,
+                "next_gate": decision.next_gate.value,
+                "transition": decision.transition.value,
+                "proposal": proposal_json,
+                "proposal_id": decision.proposal.proposal_id if decision.proposal else None,
+                "clears_proposal_gate": decision.clears_proposal_gate.value if decision.clears_proposal_gate else None,
+                "checkpoint_updates": [{"key": item["key"], "status": item["status"]} for item in checkpoint_updates],
+                "plan_updates": decision.plan_updates.model_dump(mode="json", exclude_none=True),
+                "spec_deltas": [delta.model_dump(mode="json") for delta in decision.spec_deltas],
+                "helper": decision.helper.model_dump(mode="json"),
+                "decisions": decision.decisions,
+                "assumptions": decision.assumptions,
+                "blockers": decision.blockers,
+                "validation_errors": decision.validation_errors,
+                "draft_spec_id": draft_spec["id"] if draft_spec else None,
+                "ready_spec_id": ready_spec["id"] if ready_spec else None,
+            },
+        )
+        refreshed_plan = store.get_plan_inbox_item(item_id)
+        if refreshed_plan is not None:
+            refreshed_plan = _repair_planner_gate_frontier(store, item_id, refreshed_plan)
+        return {
+            "messages": [user_message, pm_message],
+            "plan": refreshed_plan,
+            "structured": {
+                **decision_json,
+                "checkpoint_updates": checkpoint_updates,
+                "draft_spec": draft_spec,
+                "ready_spec": ready_spec,
+                "agent": {"status": "skipped", "engine": "deterministic", "error": None},
+            },
+        }
+    except Exception as err:
+        _handle_store_error(err)
+        raise
+
+
 async def _execute_planner_pm_turn(
     item_id: str,
     body: PlannerPmTurnRequest,
@@ -2667,6 +2936,8 @@ async def _execute_planner_pm_turn(
     plan = store.get_plan_inbox_item(item_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    if body.agentMode != "provider_debug":
+        return await _execute_deterministic_planner_pm_turn(item_id, body, request, on_activity=on_activity)
     try:
         harness_metadata = _planner_pm_harness_metadata(plan, body, request, item_id)
         user_message = store.create_planner_discussion_message(
@@ -2701,14 +2972,26 @@ async def _execute_planner_pm_turn(
             _planner_pm_confirmation_evidence(plan, body.content, user_message["id"]),
         )
         agent_result = {"status": "skipped", "content": "", "error": None}
-        if body.agentMode == "provider":
-            agent_result = await _run_planner_pm_agent(
-                plan,
-                harness_metadata,
-                request,
-                on_chunk=on_chunk,
-                on_activity=on_activity,
-            )
+        if body.agentMode == "provider_debug":
+            try:
+                agent_result = await asyncio.wait_for(
+                    _run_planner_pm_agent(
+                        plan,
+                        harness_metadata,
+                        request,
+                        on_chunk=on_chunk,
+                        on_activity=on_activity,
+                    ),
+                    timeout=body.timeoutSeconds,
+                )
+            except asyncio.TimeoutError:
+                agent_result = {
+                    "status": "failed",
+                    "content": "",
+                    "raw_content": "",
+                    "sidecar": None,
+                    "error": f"planner_pm_timeout_after_{body.timeoutSeconds}s",
+                }
         agent_content = str(agent_result.get("content") or "")
         sidecar = agent_result.get("sidecar") if isinstance(agent_result.get("sidecar"), dict) else None
         boundary_violation = _planner_pm_boundary_violation(agent_content)
@@ -2716,7 +2999,7 @@ async def _execute_planner_pm_turn(
             agent_result = {
                 **agent_result,
                 "status": "blocked_by_boundary_guard",
-                "content": _planner_pm_boundary_guard_message(plan),
+                "content": "",
                 "raw_blocked_content": agent_result.get("raw_content") or agent_content,
                 "boundary_violation": boundary_violation,
                 "sidecar": None,
@@ -2797,11 +3080,13 @@ async def _execute_planner_pm_turn(
             if checkpoint is not None:
                 checkpoint_updates.append(checkpoint)
         planner_content = (agent_result.get("content") or "").strip()
-        if body.agentMode == "provider" and not planner_content:
-            error_detail = agent_result.get("error") or agent_result.get("status") or "no_content"
-            planner_content = f"Planner PM agent did not return a response. Agent status: {error_detail}."
-        elif not planner_content:
+        if not planner_content:
             planner_content = structured["content"]
+            if body.agentMode == "provider_debug" and (agent_result.get("error") or agent_result.get("status") == "failed"):
+                planner_content = (
+                    f"{planner_content}\n\n"
+                    f"_Planner provider fallback: {agent_result.get('error') or agent_result.get('status') or 'no_content'}._"
+                )
         pm_message = store.create_planner_discussion_message(
             plan_inbox_item_id=item_id,
             role="planner",
@@ -3261,6 +3546,213 @@ def _summarize_autonomous_pilot_run(
     }
 
 
+def _plan_has_autonomous_lane_run(store: Any, plan_id: str) -> bool:
+    for event in store.list_events(limit=1000):
+        if event.get("type") not in {"autonomous_plan_run_started", "autonomous_plan_run_finished", "autonomous_plan_run_failed"}:
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if payload.get("plan_inbox_item_id") == plan_id:
+            return True
+    return False
+
+
+def _eligible_autonomous_plan_runs(store: Any, limit: int) -> list[dict]:
+    eligible: list[dict] = []
+    for candidate in store.list_plan_inbox_items(include_archived=False):
+        if len(eligible) >= limit:
+            break
+        plan = store.get_plan_inbox_item(candidate["id"]) or candidate
+        if plan.get("automation_mode") != "autonomous":
+            continue
+        if plan.get("locked_by"):
+            continue
+        if _plan_has_autonomous_lane_run(store, plan["id"]):
+            continue
+        spec = store.get_agentic_spec(plan.get("final_spec_id")) if plan.get("final_spec_id") else _latest_spec(plan)
+        ready, _missing = _spec_ready_for_decomposition(plan, spec)
+        if not ready or spec is None:
+            continue
+        eligible.append(plan)
+    return eligible
+
+
+def _autonomous_lane_history_records(store: Any, plan_id: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for event in store.list_events(limit=500):
+        if event.get("type") != "autonomous_plan_run_finished":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if payload.get("plan_inbox_item_id") != plan_id:
+            continue
+        artifact = store.get_artifact(str(payload.get("artifact_id"))) if payload.get("artifact_id") else None
+        run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+        records.append({
+            "id": event["id"],
+            "created_at": event["created_at"],
+            "status": payload.get("status") or run.get("status") or "unknown",
+            "summary": run.get("summary") or "",
+            "failures": payload.get("failures") or run.get("failures") or [],
+            "task_ids": payload.get("task_ids") or [],
+            "task_inbox_item_ids": payload.get("task_inbox_item_ids") or [],
+            "spec_id": payload.get("spec_id"),
+            "decomposition_run_id": payload.get("decomposition_run_id"),
+            "pilot_artifact_id": payload.get("pilot_artifact_id"),
+            "artifact": artifact,
+            "event": event,
+        })
+    return records
+
+
+async def _run_approved_plan_autonomous_lane(
+    *,
+    plan: dict,
+    spec_id: str,
+    max_tasks: int,
+    run_agent: bool,
+    locked_by: str,
+    permission_override: str | None,
+    max_steps_per_task: int,
+    timeout_seconds: int,
+    request: Request,
+) -> dict:
+    store = _store(request)
+    started = store.append_event(type="autonomous_plan_run_started", payload={
+        "plan_inbox_item_id": plan["id"],
+        "spec_id": spec_id,
+        "locked_by": locked_by,
+        "max_tasks": max_tasks,
+        "run_agent": run_agent,
+    })
+    try:
+        result = await _run_approved_plan_autonomous_pilot(
+            plan=plan,
+            spec_id=spec_id,
+            max_tasks=max_tasks,
+            run_agent=run_agent,
+            locked_by=locked_by,
+            permission_override=permission_override,
+            max_steps_per_task=max_steps_per_task,
+            timeout_seconds=timeout_seconds,
+            request=request,
+        )
+        run_summary = {
+            **result["pilot"],
+            "source": "autonomous_plan_lane",
+            "pilot_artifact_id": result["artifact"]["id"],
+            "pilot_event_id": result["event"]["id"],
+        }
+        task_ids = [task["id"] for task in result.get("tasks", []) if isinstance(task, dict) and task.get("id")]
+        task_inbox_item_ids = [
+            item["id"]
+            for item in result.get("decomposition", {}).get("task_inbox_items", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        decomposition_run = result.get("decomposition", {}).get("decomposition_run") or {}
+        artifact = store.create_artifact(
+            type="autonomous_plan_run",
+            title=f"Autonomous run: {str(plan.get('raw_plan') or 'Approved plan')[:80]}",
+            summary=run_summary["summary"],
+            content=json.dumps(run_summary, indent=2, sort_keys=True),
+            metadata={
+                "plan_inbox_item_id": plan["id"],
+                "spec_id": spec_id,
+                "decomposition_run_id": decomposition_run.get("id"),
+                "task_inbox_item_ids": task_inbox_item_ids,
+                "task_ids": task_ids,
+                "status": run_summary["status"],
+                "failures": run_summary["failures"],
+                "run_agent": run_agent,
+                "max_tasks": max_tasks,
+                "max_steps_per_task": max_steps_per_task,
+                "timeout_seconds": timeout_seconds,
+                "permission_override": permission_override,
+                "pilot_artifact_id": result["artifact"]["id"],
+                "pilot_event_id": result["event"]["id"],
+                "source": "autonomous_plan_lane",
+            },
+        )
+        event = store.append_event(type="autonomous_plan_run_finished", payload={
+            "plan_inbox_item_id": plan["id"],
+            "spec_id": spec_id,
+            "decomposition_run_id": decomposition_run.get("id"),
+            "task_inbox_item_ids": task_inbox_item_ids,
+            "task_ids": task_ids,
+            "artifact_id": artifact["id"],
+            "pilot_artifact_id": result["artifact"]["id"],
+            "pilot_event_id": result["event"]["id"],
+            "started_event_id": started["id"],
+            "run": run_summary,
+            "status": run_summary["status"],
+            "failures": run_summary["failures"],
+            "run_agent": run_agent,
+        })
+        store.update_plan_inbox_item(plan["id"], {"locked_by": None, "locked_at": None})
+        return {
+            "plan": store.get_plan_inbox_item(plan["id"]) or plan,
+            "spec_id": spec_id,
+            "run": run_summary,
+            "artifact": artifact,
+            "event": event,
+            "started_event": started,
+            "pilot": result,
+        }
+    except Exception as err:
+        error = str(getattr(err, "detail", None) or err)
+        event = store.append_event(type="autonomous_plan_run_failed", payload={
+            "plan_inbox_item_id": plan["id"],
+            "spec_id": spec_id,
+            "started_event_id": started["id"],
+            "locked_by": locked_by,
+            "error": error,
+        })
+        store.update_plan_inbox_item(plan["id"], {"locked_by": None, "locked_at": None})
+        if isinstance(err, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail={"code": "autonomous_plan_run_failed", "error": error, "event_id": event["id"]}) from err
+
+
+async def _run_autonomous_plan_lane_batch(
+    *,
+    store: Any,
+    max_plan_runs: int,
+    max_tasks_per_plan: int,
+    run_agent: bool,
+    locked_by: str,
+    permission_override: str | None,
+    max_steps_per_task: int,
+    timeout_seconds: int,
+    request: Request,
+) -> dict[str, Any]:
+    processed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in _eligible_autonomous_plan_runs(store, max_plan_runs):
+        claimed = store.claim_autonomous_plan_inbox_item(candidate["id"], locked_by=locked_by)
+        if claimed is None or claimed.get("locked_by") != locked_by:
+            skipped.append({"plan_inbox_item_id": candidate["id"], "reason": "claim_failed"})
+            continue
+        spec = store.get_agentic_spec(claimed.get("final_spec_id")) if claimed.get("final_spec_id") else _latest_spec(claimed)
+        ready, missing = _spec_ready_for_decomposition(claimed, spec)
+        if not ready or spec is None:
+            store.update_plan_inbox_item(claimed["id"], {"locked_by": None, "locked_at": None})
+            skipped.append({"plan_inbox_item_id": claimed["id"], "reason": "not_ready", "missing": missing})
+            continue
+        try:
+            processed.append(await _run_approved_plan_autonomous_lane(
+                plan=claimed,
+                spec_id=spec["id"],
+                max_tasks=max_tasks_per_plan,
+                run_agent=run_agent,
+                locked_by=locked_by,
+                permission_override=permission_override,
+                max_steps_per_task=max_steps_per_task,
+                timeout_seconds=timeout_seconds,
+                request=request,
+            ))
+        except HTTPException as err:
+            skipped.append({"plan_inbox_item_id": claimed["id"], "reason": "run_failed", "detail": err.detail})
+    return {"processed": processed, "skipped": skipped}
+
+
 def _process_specific_task_inbox_items(store: Any, candidates: list[dict], body: TaskInboxProcessRequest) -> dict:
     processed: list[dict[str, Any]] = []
     for candidate in candidates[:body.maxItems]:
@@ -3494,6 +3986,50 @@ def list_plan_inbox_autonomous_pilot_runs(item_id: str, request: Request) -> lis
             "event": event,
         })
     return records
+
+
+@router.post("/plan-inbox/{item_id}/autonomous-run")
+async def run_plan_inbox_autonomous_lane(item_id: str, body: PlanInboxAutonomousRunRequest, request: Request) -> dict:
+    store = _store(request)
+    plan = store.get_plan_inbox_item(item_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    if plan.get("automation_mode") != "autonomous":
+        raise HTTPException(status_code=400, detail="plan_not_autonomous")
+    if plan.get("locked_by") and plan.get("locked_by") != body.lockedBy:
+        raise HTTPException(status_code=409, detail="plan_already_locked")
+    claimed = store.claim_autonomous_plan_inbox_item(item_id, locked_by=body.lockedBy)
+    if claimed is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    if claimed.get("locked_by") != body.lockedBy:
+        raise HTTPException(status_code=409, detail="plan_already_locked")
+    spec = store.get_agentic_spec(claimed.get("final_spec_id")) if claimed.get("final_spec_id") else _latest_spec(claimed)
+    ready, missing = _spec_ready_for_decomposition(claimed, spec)
+    if not ready or spec is None:
+        store.update_plan_inbox_item(item_id, {"locked_by": None, "locked_at": None})
+        raise HTTPException(status_code=400, detail={"code": "plan_not_ready_for_autonomous_run", "missing": missing})
+    return {
+        **await _run_approved_plan_autonomous_lane(
+            plan=claimed,
+            spec_id=spec["id"],
+            max_tasks=body.maxTasks,
+            run_agent=body.runAgent,
+            locked_by=body.lockedBy,
+            permission_override=body.permissionOverride,
+            max_steps_per_task=body.maxStepsPerTask,
+            timeout_seconds=body.timeoutSeconds,
+            request=request,
+        ),
+        "spec": spec,
+    }
+
+
+@router.get("/plan-inbox/{item_id}/autonomous-runs")
+def list_plan_inbox_autonomous_lane_runs(item_id: str, request: Request) -> list[dict]:
+    store = _store(request)
+    if store.get_plan_inbox_item(item_id) is None:
+        raise HTTPException(status_code=404, detail="plan_inbox_item_not_found")
+    return _autonomous_lane_history_records(store, item_id)
 
 
 @router.get("/task-inbox")
@@ -4020,6 +4556,7 @@ def get_orchestration_readiness(request: Request) -> dict:
     running_task_count = sum(1 for task in tasks if task.get("status") == "running")
     blocked_task_count = sum(1 for task in tasks if task.get("status") == "blocked")
     active_worktree_count = sum(1 for worktree in worktrees if worktree.get("status") != "removed")
+    autonomous_plan_ready_count = len(_eligible_autonomous_plan_runs(store, 100))
     repo_target_missing_count = sum(1 for plan in plans if plan.get("entry_mode") == "new_project" and not str(plan.get("repo_path") or "").strip())
     repo_setup_required_count = sum(
         1
@@ -4037,6 +4574,7 @@ def get_orchestration_readiness(request: Request) -> dict:
         "running_task_count": running_task_count,
         "blocked_task_count": blocked_task_count,
         "active_worktree_count": active_worktree_count,
+        "autonomous_plan_ready_count": autonomous_plan_ready_count,
         "repo_target_missing_count": repo_target_missing_count,
         "repo_setup_required_count": repo_setup_required_count,
     }
@@ -4054,6 +4592,13 @@ def get_orchestration_readiness(request: Request) -> dict:
         "watch" if repo_target_missing_count or repo_setup_required_count else "ready",
         f"{repo_setup_required_count} setup · {repo_target_missing_count} missing",
         "new-project plans must have an initialized repo before autonomous execution",
+    ))
+    checks.append(_readiness_check(
+        "autonomous_plan_lane",
+        "Autonomous plan lane",
+        "watch" if autonomous_plan_ready_count else "ready",
+        f"{autonomous_plan_ready_count} ready",
+        "approved autonomous plans ready for daemon-owned execution",
     ))
     checks.append(_readiness_check(
         "worktrees",
@@ -4087,6 +4632,10 @@ def update_orchestration_daemon_state(body: OrchestrationDaemonStateUpdateReques
         "status": body.status,
         "autonomy_mode": body.autonomyMode,
         "interval_seconds": body.intervalSeconds,
+        "process_plans": body.processPlans,
+        "max_plan_runs": body.maxPlanRuns,
+        "max_tasks_per_plan": body.maxTasksPerPlan,
+        "run_agent": body.runAgent,
         "max_inbox_items": body.maxInboxItems,
         "max_queued_tasks": body.maxQueuedTasks,
         "max_steps_per_task": body.maxStepsPerTask,
@@ -4104,6 +4653,10 @@ def update_orchestration_daemon_state(body: OrchestrationDaemonStateUpdateReques
                     "status": previous.get("status"),
                     "autonomy_mode": previous.get("autonomy_mode"),
                     "interval_seconds": previous.get("interval_seconds"),
+                    "process_plans": previous.get("process_plans"),
+                    "max_plan_runs": previous.get("max_plan_runs"),
+                    "max_tasks_per_plan": previous.get("max_tasks_per_plan"),
+                    "run_agent": previous.get("run_agent"),
                     "max_inbox_items": previous.get("max_inbox_items"),
                     "max_queued_tasks": previous.get("max_queued_tasks"),
                     "max_steps_per_task": previous.get("max_steps_per_task"),
@@ -4114,6 +4667,10 @@ def update_orchestration_daemon_state(body: OrchestrationDaemonStateUpdateReques
                     "status": updated.get("status"),
                     "autonomy_mode": updated.get("autonomy_mode"),
                     "interval_seconds": updated.get("interval_seconds"),
+                    "process_plans": updated.get("process_plans"),
+                    "max_plan_runs": updated.get("max_plan_runs"),
+                    "max_tasks_per_plan": updated.get("max_tasks_per_plan"),
+                    "run_agent": updated.get("run_agent"),
                     "max_inbox_items": updated.get("max_inbox_items"),
                     "max_queued_tasks": updated.get("max_queued_tasks"),
                     "max_steps_per_task": updated.get("max_steps_per_task"),
@@ -4143,21 +4700,46 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
             "last_tick_event_id": event["id"],
             "last_tick_summary": summary,
         })
-        return {"mode": state["autonomy_mode"], "state": state, "event": event, "skipped": True, "task_inbox": {"processed": []}, "execution_queue": {"processed": []}}
+        return {
+            "mode": state["autonomy_mode"],
+            "state": state,
+            "event": event,
+            "skipped": True,
+            "plan_runs": {"processed": [], "skipped": []},
+            "task_inbox": {"processed": []},
+            "execution_queue": {"processed": []},
+        }
 
     locked_by = body.lockedBy or "orchestration-daemon"
     autonomy_mode = body.autonomyMode or state["autonomy_mode"]
+    process_plans = state.get("process_plans", False) if body.processPlans is None else body.processPlans
     process_inbox = state["process_inbox"] if body.processInbox is None else body.processInbox
     run_queue = state["run_queue"] if body.runQueue is None else body.runQueue
+    max_plan_runs = int(state.get("max_plan_runs") or 0) if body.maxPlanRuns is None else body.maxPlanRuns
+    max_tasks_per_plan = int(state.get("max_tasks_per_plan") or 1) if body.maxTasksPerPlan is None else body.maxTasksPerPlan
     max_inbox_items = state["max_inbox_items"] if body.maxInboxItems is None else body.maxInboxItems
     max_queued_tasks = state["max_queued_tasks"] if body.maxQueuedTasks is None else body.maxQueuedTasks
     max_steps_per_task = state["max_steps_per_task"] if body.maxStepsPerTask is None else body.maxStepsPerTask
     timeout_seconds = 120 if body.timeoutSeconds is None else body.timeoutSeconds
+    run_agent = bool(state.get("run_agent", True)) if body.runAgent is None else body.runAgent
     run_steps = autonomy_mode == "autonomous"
     started_at = _utc_now()
     store.update_daemon_state({"status": "running", "last_tick_started_at": started_at})
+    plan_result = {"processed": [], "skipped": []}
     inbox_result = {"processed": []}
     queue_result = {"processed": []}
+    if process_plans and max_plan_runs > 0:
+        plan_result = await _run_autonomous_plan_lane_batch(
+            store=store,
+            max_plan_runs=max_plan_runs,
+            max_tasks_per_plan=max_tasks_per_plan,
+            run_agent=run_agent,
+            locked_by=locked_by,
+            permission_override=body.permissionOverride,
+            max_steps_per_task=max_steps_per_task,
+            timeout_seconds=timeout_seconds,
+            request=request,
+        )
     if process_inbox and max_inbox_items > 0:
         inbox_result = process_task_inbox(
             TaskInboxProcessRequest(
@@ -4184,8 +4766,11 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
     event = store.append_event(type="orchestration_daemon_tick_finished", payload={
         "locked_by": locked_by,
         "autonomy_mode": autonomy_mode,
+        "plan_run_count": len(plan_result.get("processed", [])),
+        "plan_run_skipped_count": len(plan_result.get("skipped", [])),
         "inbox_processed_count": len(inbox_result.get("processed", [])),
         "queue_processed_count": len(queue_result.get("processed", [])),
+        "process_plans": process_plans,
         "process_inbox": process_inbox,
         "run_queue": run_queue,
         "run_steps": run_steps,
@@ -4193,8 +4778,19 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
     summary = {
         "skipped": False,
         "event_id": event["id"],
+        "plan_run_count": len(plan_result.get("processed", [])),
+        "plan_run_skipped_count": len(plan_result.get("skipped", [])),
         "inbox_processed_count": len(inbox_result.get("processed", [])),
         "queue_processed_count": len(queue_result.get("processed", [])),
+        "autonomous_plan_runs": [
+            {
+                "plan_inbox_item_id": item.get("plan", {}).get("id"),
+                "status": item.get("run", {}).get("status"),
+                "summary": item.get("run", {}).get("summary"),
+                "artifact_id": item.get("artifact", {}).get("id"),
+            }
+            for item in plan_result.get("processed", [])
+        ],
         "review_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "review"),
         "blocked_count": sum(1 for item in queue_result.get("processed", []) if item.get("status") == "blocked"),
         "waiting_for_autonomy_count": sum(1 for item in queue_result.get("processed", []) if item.get("waiting_for_autonomy")),
@@ -4212,6 +4808,7 @@ async def run_orchestration_daemon_tick(body: OrchestrationDaemonTickRequest, re
         "mode": autonomy_mode,
         "state": state,
         "event": event,
+        "plan_runs": plan_result,
         "task_inbox": inbox_result,
         "execution_queue": queue_result,
     }

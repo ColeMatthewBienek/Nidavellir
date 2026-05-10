@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -119,6 +120,27 @@ class PlannerPmImplementationReportAgent(PlannerPmFakeAgent):
         )
 
 
+class PlannerPmToolMarkupAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        yield (
+            "Let me explore the current state of the repo before we discuss scope.\n\n"
+            "<function_calls> <invoke name=\"mcp__claude-code-runner__explore_codebase\">"
+            "<parameter name=\"prompt\">List all files in /tmp/example.</parameter>"
+            "<parameter name=\"output_format\">Current repo state: what files exist, what's missing, is it a git repo.</parameter>"
+            "</invoke> </function_calls>\n\n"
+            "The key scope question is: what language/runtime should the CLI use?\n\n"
+            "| Option | CLI invocation | Test command |\n"
+            "|---|---|---|\n"
+            "| Shell script | `./hello.sh` | inline assertion |\n"
+        )
+
+
+class PlannerPmHangingAgent(PlannerPmFakeAgent):
+    async def stream(self):
+        await asyncio.sleep(10)
+        yield "late planner response"
+
+
 class PilotWorkerFakeAgent:
     def __init__(self, slot_id, workdir, model_id=None, dangerousness="restricted"):
         self.workdir = Path(workdir)
@@ -154,6 +176,24 @@ def test_planner_pm_absolute_new_repo_workdir_resolves_and_creates_target(tmp_pa
 
     assert workdir == target
     assert workdir.is_dir()
+
+
+def test_plan_repo_target_preview_normalizes_windows_paths():
+    preview = orchestration_router._preview_plan_repo_target(
+        "C:\\Users\\colebienek\\projects\\hello-nidavellir",
+        "new_project",
+        "main",
+    )
+
+    assert preview["repo_path"].replace("\\", "/") == "/mnt/c/Users/colebienek/projects/hello-nidavellir"
+    assert not preview["repo_path"].startswith(str(Path.cwd()))
+
+
+def test_plan_repo_target_preview_blocks_relative_paths():
+    preview = orchestration_router._preview_plan_repo_target("hello-nidavellir", "new_project", "main")
+
+    assert preview["status"] == "blocked"
+    assert preview["reason"] == "repo_path_must_be_absolute"
 
 
 def test_planner_pm_repo_gate_requires_resolved_path():
@@ -538,6 +578,7 @@ async def test_plan_inbox_planner_discussion_flow(tmp_path: Path, monkeypatch: p
             "content": "The repo is local and verification should run the orchestration API tests.",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
         assert turn.status_code == 200
         turn_body = turn.json()
@@ -595,6 +636,7 @@ async def test_pm_turn_generates_draft_spec_when_gate_evidence_is_complete(tmp_p
             ),
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert turn.status_code == 200
@@ -626,6 +668,7 @@ async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, m
             "content": "Verification should run orchestration API tests.",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert response.status_code == 200
@@ -637,6 +680,245 @@ async def test_pm_turn_stream_emits_activity_and_answer_chunks(tmp_path: Path, m
         assert events[1]["event"]["content"] == "Reviewing planning gates"
         assert "".join(event["content"] for event in events if event["type"] == "chunk") == "As Nidavellir PM, agent-backed planning reply."
         assert events[-2]["result"]["messages"][1]["content"] == "As Nidavellir PM, agent-backed planning reply."
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_stream_blocks_implementation_report_before_streaming_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmImplementationReportAgent())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a tiny CLI.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn/stream", json={
+            "content": "Approved",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "agentMode": "provider_debug",
+        })
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    streamed_text = "".join(event["content"] for event in events if event["type"] == "chunk")
+    final_message = events[-2]["result"]["messages"][1]
+    assert "FILES CREATED" not in streamed_text
+    assert "hello.sh" not in streamed_text
+    assert streamed_text == ""
+    assert "I cannot approve this for decomposition yet" in final_message["content"]
+    assert final_message["metadata"]["agent_status"] == "blocked_by_boundary_guard"
+    assert final_message["metadata"]["boundary_violation"]
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_forces_restricted_provider_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    captured: dict[str, str] = {}
+
+    def make_agent(*args, **kwargs):
+        captured["dangerousness"] = kwargs["dangerousness"]
+        return PlannerPmFakeAgent()
+
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", make_agent)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a tiny CLI.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Discuss scope.",
+            "provider": "claude",
+            "model": "claude-sonnet-4-6",
+            "agentMode": "provider_debug",
+        })
+
+    assert response.status_code == 200
+    assert captured["dangerousness"] == "restricted"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_sanitizes_provider_tool_markup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmToolMarkupAgent())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a tiny CLI.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Lets chat about the scope",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "agentMode": "provider_debug",
+        })
+
+    assert response.status_code == 200
+    content = response.json()["messages"][1]["content"]
+    assert "<function_calls>" not in content
+    assert "<invoke" not in content
+    assert "mcp__claude-code-runner__explore_codebase" in content
+    assert "Requested planning inspection" in content
+    assert "what language/runtime should the CLI use" in content
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_shell_scope_preference_progresses_scope_gate(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Shell",
+            "agentMode": "deterministic",
+        })
+        approval = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Approved",
+            "agentMode": "deterministic",
+        })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "Proposed scope:" in body["messages"][1]["content"]
+    assert "hello nidavellir" in body["messages"][1]["content"]
+    assert body["messages"][1]["metadata"]["active_gate"] == "scope"
+    assert approval.status_code == 200
+    checkpoints = {item["key"]: item for item in approval.json()["plan"]["planning_checkpoints"]}
+    assert checkpoints["scope"]["status"] == "agreed"
+    assert approval.json()["structured"]["active_gate"] == "verification"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_defaults_to_deterministic_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+
+    def fail_agent(*args, **kwargs):
+        raise AssertionError("provider agent should not run for default planner turns")
+
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", fail_agent)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Shell",
+        })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["messages"][1]["metadata"]["source"] == "nidavellir_pm_engine"
+    assert body["messages"][1]["metadata"]["planner_engine"] == "deterministic"
+    assert body["structured"]["agent"]["status"] == "skipped"
+    assert body["messages"][1]["metadata"]["proposal"]["gate"] == "scope"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_stream_is_atomic_for_deterministic_engine(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn/stream", json={
+            "content": "Shell",
+        })
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert events[0]["type"] == "start"
+    assert [event["type"] for event in events].count("chunk") == 0
+    assert any(event["type"] == "activity" for event in events)
+    assert events[-2]["type"] == "result"
+    assert events[-2]["result"]["messages"][1]["metadata"]["planner_engine"] == "deterministic"
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_denial_clears_latest_proposal_without_locking_gate(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        proposed = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={"content": "Shell"})
+        denied = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={"content": "Deny, make it a Node CLI instead."})
+        approved = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={"content": "Approved"})
+
+    assert proposed.status_code == 200
+    assert denied.status_code == 200
+    assert approved.status_code == 200
+    assert denied.json()["messages"][1]["metadata"]["clears_proposal_gate"] == "scope"
+    checkpoints = {item["key"]: item for item in approved.json()["plan"]["planning_checkpoints"]}
+    assert checkpoints["scope"]["status"] == "missing"
+    assert approved.json()["structured"]["transition"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_pm_turn_provider_timeout_returns_structured_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    setup_app(tmp_path)
+    monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmHangingAgent())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Build a tiny CLI.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Discuss scope and non-goals.",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "timeoutSeconds": 1,
+            "agentMode": "provider_debug",
+        })
+
+    assert response.status_code == 200
+    planner_message = response.json()["messages"][1]
+    assert "As Nidavellir PM" in planner_message["content"]
+    assert "planner_pm_timeout_after_1s" in planner_message["content"]
+    assert planner_message["metadata"]["agent_status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -661,7 +943,8 @@ async def test_pm_turn_locks_repo_target_from_user_evidence(tmp_path: Path):
         assert body["plan"]["base_branch"] == "main"
         repo_checkpoint = next(item for item in body["plan"]["planning_checkpoints"] if item["key"] == "repo_target")
         assert repo_checkpoint["status"] == "agreed"
-        assert repo_checkpoint["summary"] == f"{target} @ main"
+        assert str(target) in repo_checkpoint["summary"]
+        assert "main" in repo_checkpoint["summary"]
         assert body["structured"]["checkpoint_updates"][0]["key"] == "repo_target"
 
 
@@ -680,6 +963,7 @@ async def test_pm_turn_locks_repo_and_scope_from_agent_gate_response(tmp_path: P
             "content": "That repo target and scope work for me.",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert turn.status_code == 200
@@ -711,6 +995,7 @@ async def test_pm_turn_locks_acceptance_without_locking_proposed_verification(tm
             "content": "Lock them",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert turn.status_code == 200
@@ -860,6 +1145,7 @@ async def test_pm_turn_rejects_invalid_sidecar_gate_action(tmp_path: Path, monke
             "content": "Please continue.",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert turn.status_code == 200
@@ -888,6 +1174,7 @@ async def test_pm_turn_collapses_duplicate_provider_response(tmp_path: Path, mon
             "content": "Continue planning.",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert turn.status_code == 200
@@ -915,6 +1202,7 @@ async def test_pm_turn_blocks_implementation_completion_reports(tmp_path: Path, 
             "content": "Continue, approved.",
             "provider": "codex",
             "model": "gpt-5.5",
+            "agentMode": "provider_debug",
         })
 
         assert turn.status_code == 200
@@ -922,7 +1210,7 @@ async def test_pm_turn_blocks_implementation_completion_reports(tmp_path: Path, 
         planner_message = body["messages"][1]
         assert planner_message["metadata"]["agent_status"] == "blocked_by_boundary_guard"
         assert planner_message["metadata"]["boundary_violation"]
-        assert planner_message["content"].startswith("Planner PM boundary guard engaged.")
+        assert planner_message["content"].startswith("I cannot approve this for decomposition yet.")
         assert "FILES CREATED" not in planner_message["content"]
         assert "TESTS: 73 tests" not in planner_message["content"]
         assert body["structured"]["agent"]["raw_blocked_content"].startswith("Step 4")
@@ -1725,6 +2013,186 @@ async def test_approved_plan_pilot_run_records_command_failure(tmp_path: Path):
         runs = history.json()
         assert runs[0]["status"] == "failed"
         assert runs[0]["failures"]
+
+
+@pytest.mark.asyncio
+async def test_approved_plan_autonomous_lane_run_records_durable_run(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "approved-plan-lane")
+    (target_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node -e \"console.log('approved-plan-lane-ok')\""}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json"], cwd=target_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Add autonomous lane test script"], cwd=target_repo, check=True, capture_output=True, text=True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Run the approved autonomous lane verification.",
+            "entryMode": "existing_project",
+            "workLane": "chore",
+            "automationMode": "autonomous",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "provider": "codex",
+            "model": "gpt-5.5",
+        })).json()
+        for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for autonomous lane.",
+            })
+            assert checkpoint.status_code == 200
+        spec = (await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+            "content": "\n".join([
+                "# Agentic Forward Spec",
+                "",
+                "## Task Breakdown",
+                "- Run the approved autonomous lane verification",
+                "",
+                "## Acceptance Criteria",
+                "- The lane run records a durable artifact.",
+                "",
+                "## Verification Strategy",
+                "- `npm run test`",
+                "",
+                "## Risks and Dependencies",
+                "- The daemon must own execution lifecycle.",
+            ]),
+            "status": "ready",
+        })).json()
+
+        result = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/autonomous-run", json={
+            "runAgent": False,
+            "maxTasks": 1,
+            "maxStepsPerTask": 4,
+            "timeoutSeconds": 90,
+            "lockedBy": "approved-plan-lane-test",
+        })
+
+        assert result.status_code == 200
+        body = result.json()
+        assert body["plan"]["id"] == plan["id"]
+        assert body["plan"]["locked_by"] is None
+        assert body["spec"]["id"] == spec["id"]
+        assert body["run"]["status"] == "succeeded"
+        assert body["artifact"]["type"] == "autonomous_plan_run"
+        assert body["artifact"]["metadata"]["plan_inbox_item_id"] == plan["id"]
+        assert body["artifact"]["metadata"]["pilot_artifact_id"] == body["pilot"]["artifact"]["id"]
+        assert body["event"]["type"] == "autonomous_plan_run_finished"
+        assert body["event"]["payload"]["artifact_id"] == body["artifact"]["id"]
+        assert body["pilot"]["pilot"]["status"] == "succeeded"
+        final_task = body["pilot"]["tasks"][0]
+        assert final_task["status"] == "review"
+        assert [step["type"] for step in final_task["steps"]] == ["command"]
+        assert "approved-plan-lane-ok" in final_task["steps"][0]["output_summary"]
+
+        history = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/autonomous-runs")
+        assert history.status_code == 200
+        runs = history.json()
+        assert len(runs) == 1
+        assert runs[0]["status"] == "succeeded"
+        assert runs[0]["artifact"]["id"] == body["artifact"]["id"]
+        assert runs[0]["pilot_artifact_id"] == body["pilot"]["artifact"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_daemon_tick_claims_approved_autonomous_plan_lane_once(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "daemon-plan-lane")
+    (target_repo / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node -e \"console.log('daemon-plan-lane-ok')\""}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json"], cwd=target_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "Add daemon lane test script"], cwd=target_repo, check=True, capture_output=True, text=True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Let the daemon run the approved autonomous lane.",
+            "entryMode": "existing_project",
+            "workLane": "chore",
+            "automationMode": "autonomous",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+        })).json()
+        for gate in ["repo_target", "scope", "acceptance", "verification", "risks", "spec_draft", "spec_approved"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for daemon autonomous lane.",
+            })
+            assert checkpoint.status_code == 200
+        await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/specs", json={
+            "content": "\n".join([
+                "# Agentic Forward Spec",
+                "",
+                "## Task Breakdown",
+                "- Let the daemon run the approved autonomous lane",
+                "",
+                "## Acceptance Criteria",
+                "- Daemon tick claims the plan exactly once.",
+                "",
+                "## Verification Strategy",
+                "- `npm run test`",
+                "",
+                "## Risks and Dependencies",
+                "- Repeated daemon ticks must not rerun the same plan.",
+            ]),
+            "status": "ready",
+        })
+
+        daemon_state = await c.patch("/api/orchestration/daemon/state", json={
+            "lockedBy": "daemon-plan-lane-test",
+            "status": "active",
+            "autonomyMode": "autonomous",
+            "processPlans": True,
+            "maxPlanRuns": 1,
+            "maxTasksPerPlan": 1,
+            "runAgent": False,
+        })
+        assert daemon_state.status_code == 200
+        assert daemon_state.json()["process_plans"] is True
+        assert daemon_state.json()["max_plan_runs"] == 1
+        assert daemon_state.json()["max_tasks_per_plan"] == 1
+        assert daemon_state.json()["run_agent"] is False
+
+        first_tick = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "daemon-plan-lane-test",
+            "processInbox": False,
+            "runQueue": False,
+            "maxStepsPerTask": 4,
+            "timeoutSeconds": 90,
+            "permissionOverride": "allow_once",
+        })
+
+        assert first_tick.status_code == 200
+        first_body = first_tick.json()
+        assert first_body["plan_runs"]["processed"][0]["plan"]["id"] == plan["id"]
+        assert first_body["plan_runs"]["processed"][0]["run"]["status"] == "succeeded"
+        assert first_body["state"]["last_tick_summary"]["plan_run_count"] == 1
+        assert first_body["state"]["last_tick_summary"]["queue_processed_count"] == 0
+        assert first_body["event"]["payload"]["plan_run_count"] == 1
+        assert first_body["task_inbox"]["processed"] == []
+        assert first_body["execution_queue"]["processed"] == []
+
+        detail = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}")
+        assert detail.status_code == 200
+        assert detail.json()["locked_by"] is None
+
+        second_tick = await c.post("/api/orchestration/daemon/tick", json={
+            "lockedBy": "daemon-plan-lane-test",
+            "processInbox": False,
+            "runQueue": False,
+        })
+
+        assert second_tick.status_code == 200
+        second_body = second_tick.json()
+        assert second_body["plan_runs"]["processed"] == []
+        assert second_body["state"]["last_tick_summary"]["plan_run_count"] == 0
+
+        history = await c.get(f"/api/orchestration/plan-inbox/{plan['id']}/autonomous-runs")
+        assert history.status_code == 200
+        assert len(history.json()) == 1
 
 
 @pytest.mark.asyncio

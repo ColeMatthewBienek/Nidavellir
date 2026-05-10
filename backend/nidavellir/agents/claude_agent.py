@@ -31,6 +31,11 @@ class ClaudeAgent(CLIAgent):
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--mcp-config",
+            '{"mcpServers":{}}',
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-session-persistence",
         ]
         if self.model_id:
             base += ["--model", self.model_id]

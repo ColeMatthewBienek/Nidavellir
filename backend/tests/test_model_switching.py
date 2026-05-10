@@ -58,7 +58,14 @@ def test_claude_cmd_is_restricted_by_default():
     from nidavellir.agents.claude_agent import ClaudeAgent
     agent = ClaudeAgent(slot_id=0, workdir=Path("/tmp"), model_id="claude-sonnet-4-6")
     assert "--dangerously-skip-permissions" not in agent.cmd
+    assert "--permission-mode" in agent.cmd
+    assert agent.cmd[agent.cmd.index("--permission-mode") + 1] == "plan"
     assert "--tools" in agent.cmd
+    assert "--mcp-config" in agent.cmd
+    assert agent.cmd[agent.cmd.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert "--strict-mcp-config" in agent.cmd
+    assert "--disable-slash-commands" in agent.cmd
+    assert "--no-session-persistence" in agent.cmd
 
 
 def test_claude_cmd_free_rein_includes_dangerously_skip_permissions():
