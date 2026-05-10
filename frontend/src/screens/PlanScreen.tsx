@@ -223,6 +223,10 @@ interface OrchestrationDaemonState {
   status: string;
   autonomy_mode: 'supervised' | 'autonomous';
   interval_seconds: number;
+  process_plans: boolean;
+  max_plan_runs: number;
+  max_tasks_per_plan: number;
+  run_agent: boolean;
   max_inbox_items: number;
   max_queued_tasks: number;
   max_steps_per_task: number;
@@ -263,6 +267,7 @@ interface OrchestrationReadinessReport {
     running_task_count: number;
     blocked_task_count: number;
     active_worktree_count: number;
+    autonomous_plan_ready_count?: number;
     repo_target_missing_count?: number;
     repo_setup_required_count?: number;
   };
@@ -399,6 +404,19 @@ function plannerHasText(events: StreamEvent[]): boolean {
   return events.some((event) => (event.type === 'answer_delta' || event.type === 'text') && Boolean(event.content));
 }
 
+function plannerMessageRequestsDecision(message: PlannerDiscussionMessage, item: PlanInboxDetail | null): boolean {
+  if (!item || message.role !== 'planner' || plannerMessageStreaming(message)) return false;
+  const messages = item.discussion_messages ?? [];
+  if (messages.length === 0 || messages[messages.length - 1]?.id !== message.id) return false;
+  const text = message.content.toLowerCase();
+  return (
+    /\b(?:approve|approved|approval|deny|reject|lock|confirm)\b/.test(text)
+    || /does this .*look good/.test(text)
+    || /should i .*lock/.test(text)
+    || /ready .*decomposition/.test(text)
+  );
+}
+
 function planReadyForDecomposition(item: PlanInboxDetail | null): boolean {
   if (!item?.final_spec_id) return false;
   const required = ['repo_target', 'scope', 'acceptance', 'verification', 'risks', 'spec_draft', 'spec_approved'];
@@ -457,7 +475,7 @@ interface PlanPilotRunResult {
   event: OrchestrationEvent;
 }
 
-interface PlanPilotRunRecord {
+interface PlanRunRecord {
   id: string;
   created_at: string;
   status: string;
@@ -469,6 +487,20 @@ interface PlanPilotRunRecord {
   decomposition_run_id?: string | null;
   artifact?: OrchestrationArtifact | null;
   event: OrchestrationEvent;
+}
+
+interface PlanAutonomousRunResult {
+  plan: PlanInboxDetail;
+  spec: AgenticSpec;
+  spec_id: string;
+  run: {
+    status: string;
+    summary: string;
+    failures: Array<Record<string, unknown>>;
+  };
+  artifact: OrchestrationArtifact;
+  event: OrchestrationEvent;
+  pilot: PlanPilotRunResult;
 }
 
 function pilotFailureRecovery(failure: Record<string, unknown> | undefined): string {
@@ -498,6 +530,8 @@ interface PlanPilotRunOptions {
   timeoutSeconds: number;
   permissionOverride: string | null;
 }
+
+type PlanAutonomousRunOptions = PlanPilotRunOptions;
 
 interface PlanRepoInspectResult {
   plan: PlanInboxDetail;
@@ -549,10 +583,11 @@ function orchestrationEventSummary(event: OrchestrationEvent): string | null {
     return `${actor}${changed ? ` changed ${changed}` : ' changed daemon state'}${mode ? ` · ${mode}` : ''}${status ? ` · ${status}` : ''}`;
   }
   if (event.type === 'orchestration_daemon_tick_finished') {
+    const plans = Number(payload.plan_run_count ?? 0);
     const inbox = Number(payload.inbox_processed_count ?? 0);
     const queue = Number(payload.queue_processed_count ?? 0);
     const runSteps = Boolean(payload.run_steps);
-    return `${inbox} inbox · ${queue} queue · ${runSteps ? 'autonomous' : 'supervised'}`;
+    return `${plans} plans · ${inbox} inbox · ${queue} queue · ${runSteps ? 'autonomous' : 'supervised'}`;
   }
   if (event.type === 'execution_queue_run_finished') {
     return `${Number(payload.processed_count ?? 0)} processed · ${Number(payload.completed_count ?? 0)} review · ${Number(payload.blocked_count ?? 0)} blocked`;
@@ -608,6 +643,7 @@ function OrchestrationReadinessPanel({
   daemonMode,
   newInboxCount,
   queuedCount,
+  autonomousPlanReadyCount,
   selectedTask,
 }: {
   report?: OrchestrationReadinessReport | null;
@@ -618,6 +654,7 @@ function OrchestrationReadinessPanel({
   daemonMode: 'supervised' | 'autonomous';
   newInboxCount: number;
   queuedCount: number;
+  autonomousPlanReadyCount: number;
   selectedTask?: OrchestrationTaskDetail | null;
 }) {
   const selectedWorktrees = selectedTask?.worktrees?.filter((worktree) => worktree.status !== 'removed') ?? [];
@@ -629,7 +666,7 @@ function OrchestrationReadinessPanel({
   const runnableTone = blockedCount > 0 ? 'blocked' : runnableCount > 0 ? 'ready' : 'watch';
   const panelTone = report?.status ?? daemonTone;
   const reportChecks = Array.isArray(report?.checks) ? report.checks : [];
-  const environmentChecks = reportChecks.filter((check) => ['command_runner', 'git_worktree', 'repo_setup', 'queue_pressure'].includes(check.key));
+  const environmentChecks = reportChecks.filter((check) => ['command_runner', 'git_worktree', 'repo_setup', 'autonomous_plan_lane', 'queue_pressure'].includes(check.key));
 
   return (
     <section style={{ border: '1px solid var(--bd)', borderRadius: 8, background: 'var(--bg1)', minWidth: 260, width: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -646,6 +683,7 @@ function OrchestrationReadinessPanel({
         <ReadinessRow label="Daemon" value={daemonPaused ? `Paused${daemonState ? ` · ${daemonState}` : ''}` : 'Daemon active'} tone={daemonTone} />
         <ReadinessRow label="Mode" value={daemonMode === 'autonomous' ? 'Autonomous armed' : 'Supervised queueing'} tone={daemonMode === 'autonomous' ? 'watch' : 'ready'} />
         <ReadinessRow label="Inbox" value={`${newInboxCount} new inbox`} tone={newInboxCount > 0 ? 'watch' : 'ready'} />
+        <ReadinessRow label="Plan lane" value={`${autonomousPlanReadyCount} ready plans`} tone={autonomousPlanReadyCount > 0 ? 'watch' : 'ready'} />
         <ReadinessRow label="Queue" value={`${queuedCount} queued tasks`} tone={queueTone} />
         <ReadinessRow label="Selected worktree" value={!selectedTask ? 'No task selected' : selectedWorktrees.length > 0 ? `${selectedWorktrees.length} available` : 'No selected worktree'} tone={worktreeTone} />
         <ReadinessRow label="Selected readiness" value={blockedCount > 0 ? `${blockedCount} blocked` : `${runnableCount} runnable`} tone={runnableTone} />
@@ -1052,12 +1090,12 @@ function CheckpointRail({
   checkpoints: PlanningCheckpoint[];
 }) {
   return (
-    <section style={{ background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flex: '1 1 auto' }}>
+    <section style={{ background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 0, flex: '0 0 auto' }}>
       <div style={{ borderBottom: '1px solid var(--bd)', padding: 12 }}>
         <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 800 }}>Checkpoints</div>
         <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.4, marginTop: 3 }}>Autosaved requirements for spec generation.</div>
       </div>
-      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto', minHeight: 0 }}>
+      <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
         {checkpoints.length === 0 ? (
           <div style={{ color: 'var(--t1)', fontSize: 12, lineHeight: 1.45 }}>
             Loading checkpoint requirements...
@@ -1068,24 +1106,24 @@ function CheckpointRail({
           const proposed = checkpoint.status === 'proposed';
           const requirements = CHECKPOINT_REQUIREMENTS[checkpoint.key] ?? ['Requirement defined by PM'];
           return (
-          <div key={checkpoint.key} style={{ border: `1px solid ${complete ? '#3fb95066' : blocked ? '#f8514966' : proposed ? '#d2992266' : 'var(--bd)'}`, borderRadius: 7, background: complete ? '#23863614' : 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 7, height: 116, boxSizing: 'border-box', overflow: 'hidden' }}>
+          <div key={checkpoint.key} style={{ border: `1px solid ${complete ? '#3fb95066' : blocked ? '#f8514966' : proposed ? '#d2992266' : 'var(--bd)'}`, borderRadius: 7, background: complete ? '#23863614' : 'var(--bg0)', padding: 10, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 106, boxSizing: 'border-box', overflow: 'hidden' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
               <div style={{ color: complete ? 'var(--t1)' : 'var(--t0)', fontSize: 12, fontWeight: 700, lineHeight: 1.35, display: 'flex', gap: 8, alignItems: 'flex-start', textDecoration: complete ? 'line-through' : 'none', minWidth: 0 }}>
                 <span aria-hidden="true" style={{ color: complete ? 'var(--grn)' : blocked ? 'var(--red)' : proposed ? 'var(--ylw)' : 'var(--t1)', fontFamily: 'var(--mono)', flex: '0 0 auto' }}>
                   {complete ? '[x]' : blocked ? '[!]' : proposed ? '[~]' : '[ ]'}
                 </span>
-                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{checkpoint.title}</span>
+                <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{checkpoint.title}</span>
               </div>
               <StatusPill status={checkpoint.status} />
             </div>
-            <div style={{ minHeight: 0, overflowY: 'auto', paddingRight: 3 }}>
+            <div style={{ paddingRight: 3 }}>
               <ul style={{ margin: 0, paddingLeft: 24, color: 'var(--t1)', fontSize: 11, lineHeight: 1.45 }}>
                 {requirements.map((requirement) => (
                   <li key={requirement} style={{ textDecoration: complete ? 'line-through' : 'none' }}>{requirement}</li>
                 ))}
               </ul>
             </div>
-            <div style={{ color: 'var(--t1)', fontSize: 10, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 'auto' }}>
+            <div style={{ color: 'var(--t1)', fontSize: 10, lineHeight: 1.35, marginTop: 'auto' }}>
               {complete ? 'Satisfied by saved planning state.' : blocked ? 'Blocked by unresolved planning state.' : 'Waiting for PM/spec analysis.'}
             </div>
           </div>
@@ -1098,31 +1136,37 @@ function CheckpointRail({
 
 function PilotRunHistory({
   runs,
+  title = 'Pilot Runs',
+  emptyLabel = 'No pilot runs yet.',
   onOpenTask,
   onQueueTask,
   onMarkTaskDone,
   onArchiveTask,
   onOpenArtifact,
   onRetryPilot,
+  retryLabel = 'Retry Pilot',
 }: {
-  runs: PlanPilotRunRecord[];
+  runs: PlanRunRecord[];
+  title?: string;
+  emptyLabel?: string;
   onOpenTask: (taskId: string) => void;
   onQueueTask: (taskId: string) => void;
   onMarkTaskDone: (taskId: string) => void;
   onArchiveTask: (taskId: string) => void;
   onOpenArtifact: (artifact: OrchestrationArtifact) => void;
   onRetryPilot: () => void;
+  retryLabel?: string;
 }) {
   return (
     <section style={{ borderTop: '1px solid var(--bd)', display: 'flex', flexDirection: 'column', minHeight: 0, flex: '0 0 210px' }}>
       <div style={{ padding: '10px 12px 8px' }}>
-        <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 800 }}>Pilot Runs</div>
+        <div style={{ color: 'var(--t0)', fontSize: 12, fontWeight: 800 }}>{title}</div>
         <div style={{ color: 'var(--t1)', fontSize: 11, lineHeight: 1.4, marginTop: 3 }}>Durable execution history for this plan.</div>
       </div>
       <div style={{ padding: '0 10px 10px', display: 'flex', flexDirection: 'column', gap: 7, minHeight: 0, overflow: 'auto' }}>
         {runs.length === 0 ? (
           <div style={{ color: 'var(--t1)', fontSize: 12, border: '1px dashed var(--bd)', borderRadius: 7, padding: 10 }}>
-            No pilot runs yet.
+            {emptyLabel}
           </div>
         ) : runs.map((run) => (
           <div key={run.id} style={{ border: '1px solid var(--bd)', borderRadius: 7, background: 'var(--bg0)', padding: 9, display: 'flex', flexDirection: 'column', gap: 7 }}>
@@ -1150,7 +1194,7 @@ function PilotRunHistory({
               {run.task_ids[0] && <Btn small onClick={() => onMarkTaskDone(run.task_ids[0])}>Mark Done</Btn>}
               {run.task_ids[0] && <Btn small onClick={() => onArchiveTask(run.task_ids[0])}>Archive Task</Btn>}
               {run.artifact && <Btn small onClick={() => onOpenArtifact(run.artifact as OrchestrationArtifact)}>Artifact</Btn>}
-              <Btn small onClick={onRetryPilot}>Retry Pilot</Btn>
+              <Btn small onClick={onRetryPilot}>{retryLabel}</Btn>
             </div>
           </div>
         ))}
@@ -1314,6 +1358,18 @@ function PlannerDiscussionPanel({
                         )}
                       </div>
                     )}
+                    {plannerMessageRequestsDecision(message, item) && (
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+                        <Btn small disabled={loading} onClick={() => onSend('Approved')}>Approve</Btn>
+                        <Btn
+                          small
+                          disabled={loading}
+                          onClick={() => onSend('Deny. This is not approved yet. Review the prior discussion, identify what is missing or incorrect, and ask the next focused PM question.')}
+                        >
+                          Deny
+                        </Btn>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1351,6 +1407,7 @@ function PlannerDiscussionPanel({
 function PlannerModal({
   item,
   pilotRuns,
+  autonomousRuns,
   models,
   plannerProvider,
   plannerModel,
@@ -1359,6 +1416,7 @@ function PlannerModal({
   onViewSpec,
   onDecompose,
   onRunPilot,
+  onRunAutonomous,
   onOpenPilotTask,
   onQueuePilotTask,
   onMarkPilotTaskDone,
@@ -1371,7 +1429,8 @@ function PlannerModal({
   loading,
 }: {
   item: PlanInboxDetail | null;
-  pilotRuns: PlanPilotRunRecord[];
+  pilotRuns: PlanRunRecord[];
+  autonomousRuns: PlanRunRecord[];
   models: AgentModelDef[];
   plannerProvider: string;
   plannerModel: string;
@@ -1380,6 +1439,7 @@ function PlannerModal({
   onViewSpec: () => void;
   onDecompose: () => void;
   onRunPilot: (options: PlanPilotRunOptions) => void;
+  onRunAutonomous: (options: PlanAutonomousRunOptions) => void;
   onOpenPilotTask: (taskId: string) => void;
   onQueuePilotTask: (taskId: string) => void;
   onMarkPilotTaskDone: (taskId: string) => void;
@@ -1406,6 +1466,13 @@ function PlannerModal({
     timeoutSeconds: pilotTimeout,
     permissionOverride: pilotPermissionOverride || null,
   });
+  const runAutonomous = () => onRunAutonomous({
+    runAgent: pilotRunAgent,
+    maxTasks: pilotMaxTasks,
+    maxStepsPerTask: pilotMaxSteps,
+    timeoutSeconds: pilotTimeout,
+    permissionOverride: pilotPermissionOverride || null,
+  });
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="planner-modal-title" style={{
       position: 'fixed',
@@ -1418,11 +1485,20 @@ function PlannerModal({
       padding: 12,
       boxSizing: 'border-box',
     }}>
-      <div style={{ width: 'min(1180px, 100%)', height: 'calc(100vh - 24px)', maxHeight: 820, border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', minHeight: 0 }}>
+      <div style={{ width: 'min(1280px, calc(100vw - 24px))', height: 'calc(100vh - 24px)', maxHeight: 860, border: '1px solid var(--bd)', borderRadius: 9, background: 'var(--bg1)', overflow: 'hidden', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(360px, 380px)', minHeight: 0, position: 'relative' }}>
+        <div style={{ position: 'absolute', top: 8, right: 10, zIndex: 3 }}>
+          <Btn
+            small
+            onClick={onClose}
+            title="Close this session. Messages and checkpoint changes are already saved."
+          >
+            Close
+          </Btn>
+        </div>
         <div style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ height: 44, borderBottom: '1px solid var(--bd)', padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, background: 'var(--bg1)' }}>
-            <div id="planner-modal-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800 }}>PM Planning Session</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ minHeight: 44, borderBottom: '1px solid var(--bd)', padding: '6px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, background: 'var(--bg1)', boxSizing: 'border-box' }}>
+            <div id="planner-modal-title" style={{ color: 'var(--t0)', fontSize: 13, fontWeight: 800, lineHeight: 1.25 }}>PM Planning Session</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               <span style={{ color: 'var(--t1)', fontSize: 11 }}>Autosaved</span>
               <Btn
                 small
@@ -1486,6 +1562,14 @@ function PlannerModal({
               >
                 Run Pilot
               </Btn>
+              <Btn
+                small
+                disabled={!canDecompose || loading}
+                onClick={runAutonomous}
+                title={canDecompose ? 'Promote this approved spec into the autonomous plan lane' : 'Requires an approved ready spec and all PM gates'}
+              >
+                Run Lane
+              </Btn>
               {item?.entry_mode === 'existing_project' && (
                 <>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--t1)', fontSize: 11, whiteSpace: 'nowrap' }}>
@@ -1507,7 +1591,6 @@ function PlannerModal({
                   </Btn>
                 </>
               )}
-              <Btn small onClick={onClose} title="Close this session. Messages and checkpoint changes are already saved.">Close</Btn>
             </div>
           </div>
           <PlannerDiscussionPanel
@@ -1523,8 +1606,20 @@ function PlannerModal({
             loading={loading}
           />
         </div>
-        <aside style={{ borderLeft: '1px solid var(--bd)', background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 300, minHeight: 0 }}>
+        <aside style={{ borderLeft: '1px solid var(--bd)', background: 'var(--bg1)', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflowY: 'auto', paddingTop: 34 }}>
           <CheckpointRail checkpoints={item?.planning_checkpoints ?? []} />
+          <PilotRunHistory
+            title="Autonomous Runs"
+            emptyLabel="No autonomous runs yet."
+            runs={autonomousRuns}
+            onOpenTask={onOpenPilotTask}
+            onQueueTask={onQueuePilotTask}
+            onMarkTaskDone={onMarkPilotTaskDone}
+            onArchiveTask={onArchivePilotTask}
+            onOpenArtifact={onOpenArtifact}
+            onRetryPilot={runAutonomous}
+            retryLabel="Run Again"
+          />
           <PilotRunHistory
             runs={pilotRuns}
             onOpenTask={onOpenPilotTask}
@@ -2877,7 +2972,8 @@ export function PlanScreen() {
   const [taskInboxItems, setTaskInboxItems] = useState<TaskInboxItem[]>([]);
   const [selectedPlanInboxId, setSelectedPlanInboxId] = useState<string | null>(null);
   const [selectedPlanInboxItem, setSelectedPlanInboxItem] = useState<PlanInboxDetail | null>(null);
-  const [pilotRuns, setPilotRuns] = useState<PlanPilotRunRecord[]>([]);
+  const [pilotRuns, setPilotRuns] = useState<PlanRunRecord[]>([]);
+  const [autonomousRuns, setAutonomousRuns] = useState<PlanRunRecord[]>([]);
   const [plannerModalOpen, setPlannerModalOpen] = useState(false);
   const [specViewerOpen, setSpecViewerOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<OrchestrationTaskDetail | null>(null);
@@ -2900,6 +2996,8 @@ export function PlanScreen() {
   const [worktreeProposals, setWorktreeProposals] = useState<Record<string, WorktreeIntegrationProposal>>({});
   const [worktreePreflights, setWorktreePreflights] = useState<Record<string, WorktreeIntegrationPreflight>>({});
   const [stagedIntegrations, setStagedIntegrations] = useState<Record<string, StagedIntegration>>({});
+  const autoStartRequestedPlannerIds = useRef<Set<string>>(new Set());
+  const autoStartedPlannerIds = useRef<Set<string>>(new Set());
 
   const grouped = useMemo(() => {
     const groups: Record<string, OrchestrationTaskSummary[]> = {};
@@ -3026,9 +3124,10 @@ export function PlanScreen() {
         setSelectedPlanInboxId(item.id);
         setSelectedPlanInboxItem(item);
         setPlanInboxItems((current) => [item, ...current.filter((existing) => existing.id !== item.id)]);
-      })
+    })
       .catch((err) => setError(err instanceof Error ? err.message : 'plan_inbox_detail_failed'));
     loadPilotRuns(itemId);
+    loadAutonomousRuns(itemId);
   };
 
   const loadPilotRuns = (itemId: string) => {
@@ -3036,10 +3135,21 @@ export function PlanScreen() {
     fetch(`${API}/api/orchestration/plan-inbox/${itemId}/pilot-runs`)
       .then(async (response) => {
         if (!response.ok) throw new Error(`plan_pilot_runs_${response.status}`);
-        return response.json() as Promise<PlanPilotRunRecord[]>;
+        return response.json() as Promise<PlanRunRecord[]>;
       })
       .then(setPilotRuns)
       .catch(() => setPilotRuns([]));
+  };
+
+  const loadAutonomousRuns = (itemId: string) => {
+    if (typeof fetch !== 'function') return;
+    fetch(`${API}/api/orchestration/plan-inbox/${itemId}/autonomous-runs`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_autonomous_runs_${response.status}`);
+        return response.json() as Promise<PlanRunRecord[]>;
+      })
+      .then(setAutonomousRuns)
+      .catch(() => setAutonomousRuns([]));
   };
 
   const openPlannerModal = (itemId: string) => {
@@ -3128,6 +3238,7 @@ export function PlanScreen() {
         return response.json() as Promise<PlanInboxItem>;
       })
       .then((item) => {
+        autoStartRequestedPlannerIds.current.add(item.id);
         setPlanInboxItems((current) => [item, ...current.filter((existing) => existing.id !== item.id)]);
         loadPlanInboxDetail(item.id);
         setPlannerModalOpen(true);
@@ -3208,7 +3319,7 @@ export function PlanScreen() {
     fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxId}/pm-turn/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, provider: plannerProvider || null, model: plannerModel || null }),
+      body: JSON.stringify({ content, provider: plannerProvider || null, model: plannerModel || null, agentMode: 'deterministic' }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(`planner_pm_turn_${response.status}`);
@@ -3276,9 +3387,43 @@ export function PlanScreen() {
         setSelectedPlanInboxItem(result.plan);
         setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'planner_pm_turn_failed'))
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : 'planner_pm_turn_failed';
+        setError(message);
+        setSelectedPlanInboxItem((current) => current ? {
+          ...current,
+          discussion_messages: current.discussion_messages.map((discussionMessage) => (
+            discussionMessage.id === plannerTempId ? {
+              ...discussionMessage,
+              kind: 'question',
+              content: `Planner PM turn failed before a response was completed. ${message}`,
+              metadata: {
+                ...discussionMessage.metadata,
+                streaming: false,
+                error: message,
+              },
+            } : discussionMessage
+          )),
+        } : current);
+      })
       .finally(() => setLoading(false));
   };
+
+  useEffect(() => {
+    if (!plannerModalOpen || loading || !selectedPlanInboxItem) return;
+    if (selectedPlanInboxItem.entry_mode !== 'new_project') return;
+    if (!autoStartRequestedPlannerIds.current.has(selectedPlanInboxItem.id)) return;
+    if (planReadyForDecomposition(selectedPlanInboxItem)) return;
+    const plannerMessages = selectedPlanInboxItem.discussion_messages.filter((message) => message.role === 'planner');
+    if (plannerMessages.length > 0) return;
+    if (autoStartedPlannerIds.current.has(selectedPlanInboxItem.id)) return;
+    autoStartedPlannerIds.current.add(selectedPlanInboxItem.id);
+    autoStartRequestedPlannerIds.current.delete(selectedPlanInboxItem.id);
+    createPlannerDiscussionMessage(
+      'Begin PM planning from this intake. Start at the first missing gate, summarize only the current planning state, and ask the next focused question. Do not inspect tools, write files, create an implementation plan, or move to implementation.'
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plannerModalOpen, selectedPlanInboxItem?.id, selectedPlanInboxItem?.discussion_messages?.length, loading]);
 
   const createTask = (title: string, description: string) => {
     fetch(`${API}/api/orchestration/tasks`, {
@@ -3459,6 +3604,72 @@ export function PlanScreen() {
         loadPilotRuns(result.plan.id);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'plan_pilot_run_failed'))
+      .finally(() => setLoading(false));
+  };
+
+  const runSelectedPlanAutonomousLane = (options: PlanAutonomousRunOptions) => {
+    if (!selectedPlanInboxItem) return;
+    setLoading(true);
+    fetch(`${API}/api/orchestration/plan-inbox/${selectedPlanInboxItem.id}/autonomous-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        maxTasks: options.maxTasks,
+        runAgent: options.runAgent,
+        maxStepsPerTask: options.maxStepsPerTask,
+        timeoutSeconds: options.timeoutSeconds,
+        lockedBy: 'plan-screen-autonomous-lane',
+        permissionOverride: options.permissionOverride,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`plan_autonomous_run_${response.status}`);
+        return response.json() as Promise<PlanAutonomousRunResult>;
+      })
+      .then((result) => {
+        setSelectedPlanInboxItem(result.plan);
+        setPlanInboxItems((current) => [result.plan, ...current.filter((item) => item.id !== result.plan.id)]);
+        setAutonomousRuns((current) => [{
+          id: result.event.id,
+          created_at: result.event.created_at,
+          status: result.run.status,
+          summary: result.run.summary,
+          failures: result.run.failures,
+          task_ids: result.pilot.tasks.map((task) => task.id),
+          task_inbox_item_ids: result.pilot.decomposition.task_inbox_items.map((item) => item.id),
+          spec_id: result.spec.id,
+          decomposition_run_id: result.pilot.decomposition.decomposition_run.id,
+          artifact: result.artifact,
+          event: result.event,
+        }, ...current.filter((item) => item.id !== result.event.id)]);
+        setTaskInboxItems((current) => [
+          ...result.pilot.decomposition.task_inbox_items,
+          ...current.filter((item) => !result.pilot.decomposition.task_inbox_items.some((created) => created.id === item.id)),
+        ]);
+        if (result.pilot.tasks.length > 0) {
+          const selected = result.pilot.tasks[0];
+          setTasks((current) => [
+            ...result.pilot.tasks,
+            ...current.filter((item) => !result.pilot.tasks.some((task) => task.id === item.id)),
+          ]);
+          setSelectedTask({
+            ...selected,
+            nodes: selected.nodes ?? [],
+            edges: selected.edges ?? [],
+            steps: selected.steps ?? [],
+            worktrees: selected.worktrees ?? [],
+            readiness: selected.readiness ?? { runnable: [], blocked: [] },
+          });
+          setLastPilotTaskId(selected.id);
+          setTaskEvidence(result.pilot.evidence[0] ?? null);
+          setSelectedNodeId(selected.nodes?.[0]?.id ?? null);
+        }
+        loadDaemonEvents();
+        loadDaemonState();
+        loadReadinessReport();
+        loadAutonomousRuns(result.plan.id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'plan_autonomous_run_failed'))
       .finally(() => setLoading(false));
   };
 
@@ -4071,20 +4282,38 @@ export function PlanScreen() {
         if (!response.ok) throw new Error(`orchestration_daemon_tick_${response.status}`);
         return response.json() as Promise<{
           state: OrchestrationDaemonState;
+          plan_runs: { processed: PlanAutonomousRunResult[] };
           task_inbox: { processed: Array<{ task_inbox_item: TaskInboxItem; materialization?: { task: OrchestrationTaskDetail } }> };
           execution_queue: { processed: Array<{ task: OrchestrationTaskDetail }> };
         }>;
       })
       .then((result) => {
         setDaemonState(result.state);
+        const planRunPlans = (result.plan_runs?.processed ?? []).map((item) => item.plan).filter(Boolean);
+        const planRunTasks = (result.plan_runs?.processed ?? []).flatMap((item) => item.pilot?.tasks ?? []);
+        const planRunInboxItems = (result.plan_runs?.processed ?? []).flatMap((item) => item.pilot?.decomposition?.task_inbox_items ?? []);
+        if (planRunPlans.length > 0) {
+          setPlanInboxItems((current) => [
+            ...planRunPlans,
+            ...current.filter((item) => !planRunPlans.some((updated) => updated.id === item.id)),
+          ]);
+          if (selectedPlanInboxId) {
+            const selectedPlanUpdate = planRunPlans.find((item) => item.id === selectedPlanInboxId);
+            if (selectedPlanUpdate) {
+              setSelectedPlanInboxItem(selectedPlanUpdate);
+              loadAutonomousRuns(selectedPlanUpdate.id);
+            }
+          }
+        }
         const inboxItems = result.task_inbox.processed.map((item) => item.task_inbox_item).filter(Boolean);
         const materializedTasks = result.task_inbox.processed.map((item) => item.materialization?.task).filter(Boolean) as OrchestrationTaskDetail[];
         const queueTasks = result.execution_queue.processed.map((item) => item.task).filter(Boolean);
-        const updatedTasks = [...queueTasks, ...materializedTasks];
-        if (inboxItems.length > 0) {
+        const updatedTasks = [...planRunTasks, ...queueTasks, ...materializedTasks];
+        const updatedInboxItems = [...planRunInboxItems, ...inboxItems];
+        if (updatedInboxItems.length > 0) {
           setTaskInboxItems((current) => [
-            ...inboxItems,
-            ...current.filter((item) => !inboxItems.some((updated) => updated.id === item.id)),
+            ...updatedInboxItems,
+            ...current.filter((item) => !updatedInboxItems.some((updated) => updated.id === item.id)),
           ]);
         }
         if (updatedTasks.length > 0) {
@@ -4105,6 +4334,10 @@ export function PlanScreen() {
     status: string;
     autonomyMode: 'supervised' | 'autonomous';
     intervalSeconds: number;
+    processPlans: boolean;
+    maxPlanRuns: number;
+    maxTasksPerPlan: number;
+    runAgent: boolean;
   }>) => {
     setLoading(true);
     fetch(`${API}/api/orchestration/daemon/state`, {
@@ -4128,7 +4361,7 @@ export function PlanScreen() {
     if (nextMode === daemonMode) return;
     if (nextMode === 'autonomous') {
       const accepted = window.confirm(
-        'Switch daemon to autonomous mode? Queued tasks may execute ready command steps on the next daemon tick.'
+        'Switch daemon to autonomous mode? Approved autonomous plans and queued tasks may execute on the next daemon tick.'
       );
       if (!accepted) return;
     }
@@ -4140,12 +4373,14 @@ export function PlanScreen() {
   const queuedCount = tasks.filter((task) => task.status === 'queued_for_execution').length;
   const cleanupCount = tasks.filter((task) => task.status === 'done' || task.status === 'cancelled').length;
   const newInboxCount = taskInboxItems.filter((item) => item.status === 'new').length;
+  const autonomousPlanReadyCount = Number(readinessReport?.counts?.autonomous_plan_ready_count ?? 0);
   const daemonPaused = daemonState?.status !== 'active';
   const lastTickSummary = daemonState?.last_tick_summary ?? {};
   const daemonHealth = daemonState?.health;
   const daemonIssue = daemonHealth?.last_error || daemonHealth?.last_reason;
   const inboxProcessedCount = Number(lastTickSummary.inbox_processed_count ?? 0);
   const queueProcessedCount = Number(lastTickSummary.queue_processed_count ?? 0);
+  const planRunCount = Number(lastTickSummary.plan_run_count ?? 0);
   const reviewCount = Number(lastTickSummary.review_count ?? 0);
   const blockedCount = Number(lastTickSummary.blocked_count ?? 0);
   const waitingForAutonomyCount = Number(lastTickSummary.waiting_for_autonomy_count ?? 0);
@@ -4176,7 +4411,47 @@ export function PlanScreen() {
           <Btn small onClick={() => updateDaemonState({ status: daemonPaused ? 'active' : 'paused' })} disabled={loading}>
             {daemonPaused ? 'Resume Daemon' : 'Pause Daemon'}
           </Btn>
-          <Btn small onClick={runDaemonTick} disabled={loading || daemonPaused || (queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
+          <label style={{ height: 28, display: 'flex', alignItems: 'center', gap: 6, border: '1px solid var(--bd)', borderRadius: 6, padding: '0 8px', color: 'var(--t0)', fontSize: 12, background: 'var(--bg1)' }}>
+            <input
+              type="checkbox"
+              aria-label="Daemon process plan lane"
+              checked={Boolean(daemonState?.process_plans)}
+              onChange={(event) => updateDaemonState({ processPlans: event.target.checked })}
+              disabled={loading}
+              style={{ accentColor: 'var(--blue)' }}
+            />
+            Plan Lane
+          </label>
+          <select
+            aria-label="Daemon max plan runs"
+            value={daemonState?.max_plan_runs ?? 1}
+            onChange={(event) => updateDaemonState({ maxPlanRuns: Number(event.target.value) })}
+            disabled={loading || !daemonState?.process_plans}
+            style={{ height: 28, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 12, padding: '0 6px' }}
+          >
+            {[0, 1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value} plans</option>)}
+          </select>
+          <select
+            aria-label="Daemon max tasks per plan"
+            value={daemonState?.max_tasks_per_plan ?? 1}
+            onChange={(event) => updateDaemonState({ maxTasksPerPlan: Number(event.target.value) })}
+            disabled={loading || !daemonState?.process_plans}
+            style={{ height: 28, border: '1px solid var(--bd)', borderRadius: 6, background: 'var(--bg1)', color: 'var(--t0)', fontSize: 12, padding: '0 6px' }}
+          >
+            {[1, 2, 3].map((value) => <option key={value} value={value}>{value} task{value === 1 ? '' : 's'}/plan</option>)}
+          </select>
+          <label style={{ height: 28, display: 'flex', alignItems: 'center', gap: 6, border: '1px solid var(--bd)', borderRadius: 6, padding: '0 8px', color: 'var(--t0)', fontSize: 12, background: 'var(--bg1)' }}>
+            <input
+              type="checkbox"
+              aria-label="Daemon run worker agents"
+              checked={Boolean(daemonState?.run_agent)}
+              onChange={(event) => updateDaemonState({ runAgent: event.target.checked })}
+              disabled={loading || !daemonState?.process_plans}
+              style={{ accentColor: 'var(--blue)' }}
+            />
+            Workers
+          </label>
+          <Btn small onClick={runDaemonTick} disabled={loading || daemonPaused || (!daemonState?.process_plans && queuedCount === 0 && newInboxCount === 0)}>Daemon Tick</Btn>
           <Btn small onClick={runExecutionQueue} disabled={loading || queuedCount === 0}>Run Queue</Btn>
           <Btn small onClick={() => cleanupTerminalTasks(false)} disabled={loading || cleanupCount === 0} title="Archive done and cancelled tasks">
             Clean Done
@@ -4193,7 +4468,7 @@ export function PlanScreen() {
           <span>interval {daemonState?.interval_seconds ?? 30}s</span>
           <span>last tick {daemonState?.last_tick_finished_at ? new Date(daemonState.last_tick_finished_at).toLocaleTimeString() : 'never'}</span>
           <span>next {daemonHealth?.next_tick_at ? new Date(daemonHealth.next_tick_at).toLocaleTimeString() : 'paused'}</span>
-          <span>{inboxProcessedCount} inbox · {queueProcessedCount} queue</span>
+          <span>{planRunCount} plans · {inboxProcessedCount} inbox · {queueProcessedCount} queue</span>
           <span>{reviewCount} review · {blockedCount} blocked · {waitingForAutonomyCount} waiting</span>
           {latestProcessedTitle && (
             <span
@@ -4245,6 +4520,7 @@ export function PlanScreen() {
             daemonMode={daemonMode}
             newInboxCount={newInboxCount}
             queuedCount={queuedCount}
+            autonomousPlanReadyCount={autonomousPlanReadyCount}
             selectedTask={selectedTask}
           />
         </div>
@@ -4253,6 +4529,7 @@ export function PlanScreen() {
           <PlannerModal
             item={selectedPlanInboxItem}
             pilotRuns={pilotRuns}
+            autonomousRuns={autonomousRuns}
             models={agentModels}
             plannerProvider={plannerProvider}
             plannerModel={plannerModel}
@@ -4261,6 +4538,7 @@ export function PlanScreen() {
             onViewSpec={() => setSpecViewerOpen(true)}
             onDecompose={decomposeSelectedPlan}
             onRunPilot={runSelectedPlanPilot}
+            onRunAutonomous={runSelectedPlanAutonomousLane}
             onOpenPilotTask={(taskId) => {
               setLastPilotTaskId(taskId);
               loadTask(taskId);

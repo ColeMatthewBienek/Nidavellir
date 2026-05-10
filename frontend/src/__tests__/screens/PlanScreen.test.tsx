@@ -333,6 +333,15 @@ describe('PlanScreen orchestration board', () => {
             status: 'active',
             autonomy_mode: 'supervised',
             interval_seconds: 30,
+            process_plans: false,
+            max_plan_runs: 1,
+            max_tasks_per_plan: 1,
+            run_agent: true,
+            max_inbox_items: 5,
+            max_queued_tasks: 3,
+            max_steps_per_task: 10,
+            process_inbox: true,
+            run_queue: true,
             last_tick_started_at: '2026-05-03T00:01:00Z',
             last_tick_finished_at: '2026-05-03T00:01:02Z',
             last_tick_summary: {
@@ -370,6 +379,7 @@ describe('PlanScreen orchestration board', () => {
               { key: 'command_runner', label: 'Command runner', status: 'ready', value: 'Available', detail: 'execution commands can be dispatched' },
               { key: 'git_worktree', label: 'Git worktree', status: 'ready', value: 'Available', detail: 'worktree command is available' },
               { key: 'repo_setup', label: 'Repo setup', status: 'watch', value: '1 setup · 0 missing', detail: 'new-project plans must have an initialized repo before autonomous execution' },
+              { key: 'autonomous_plan_lane', label: 'Autonomous plan lane', status: 'watch', value: '1 ready', detail: 'approved autonomous plans ready for daemon-owned execution' },
               { key: 'queue_pressure', label: 'Queue pressure', status: 'watch', value: '1 inbox · 0 queued', detail: '0 running · 0 blocked' },
             ],
             counts: {
@@ -380,6 +390,7 @@ describe('PlanScreen orchestration board', () => {
               running_task_count: 0,
               blocked_task_count: 0,
               active_worktree_count: 0,
+              autonomous_plan_ready_count: 1,
               repo_target_missing_count: 0,
               repo_setup_required_count: 1,
             },
@@ -392,8 +403,17 @@ describe('PlanScreen orchestration board', () => {
           ok: true,
           json: async () => ({
             status: body.status ?? 'active',
-            autonomy_mode: body.autonomyMode ?? 'supervised',
+            autonomy_mode: body.autonomyMode ?? (body.processPlans !== undefined || body.maxPlanRuns !== undefined || body.maxTasksPerPlan !== undefined || body.runAgent !== undefined ? 'autonomous' : 'supervised'),
             interval_seconds: body.intervalSeconds ?? 30,
+            process_plans: body.processPlans ?? false,
+            max_plan_runs: body.maxPlanRuns ?? 1,
+            max_tasks_per_plan: body.maxTasksPerPlan ?? 1,
+            run_agent: body.runAgent ?? true,
+            max_inbox_items: 5,
+            max_queued_tasks: 3,
+            max_steps_per_task: 10,
+            process_inbox: true,
+            run_queue: true,
             last_tick_started_at: '2026-05-03T00:01:00Z',
             last_tick_finished_at: '2026-05-03T00:01:02Z',
             last_tick_summary: {
@@ -410,6 +430,62 @@ describe('PlanScreen orchestration board', () => {
               last_reason: null,
               last_error: null,
             },
+          }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/daemon/tick') && options?.method === 'POST') {
+        const body = JSON.parse(String(options.body));
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            mode: body.autonomyMode ?? 'supervised',
+            state: {
+              status: 'active',
+              autonomy_mode: body.autonomyMode ?? 'supervised',
+              interval_seconds: 30,
+              process_plans: body.processPlans ?? body.autonomyMode === 'autonomous',
+              max_plan_runs: 1,
+              max_tasks_per_plan: 1,
+              run_agent: true,
+              max_inbox_items: 5,
+              max_queued_tasks: 3,
+              max_steps_per_task: 10,
+              process_inbox: true,
+              run_queue: true,
+              last_tick_started_at: '2026-05-03T00:05:00Z',
+              last_tick_finished_at: '2026-05-03T00:05:01Z',
+              last_tick_event_id: 'daemon-tick-event',
+              last_tick_summary: {
+                plan_run_count: body.autonomyMode === 'autonomous' ? 1 : 0,
+                inbox_processed_count: 0,
+                queue_processed_count: 0,
+                review_count: 0,
+                blocked_count: 0,
+                waiting_for_autonomy_count: 0,
+                processed_tasks: [],
+              },
+              health: {
+                is_active: true,
+                state: 'idle',
+                next_tick_at: '2026-05-03T00:05:31Z',
+                last_reason: null,
+                last_error: null,
+              },
+            },
+            event: {
+              id: 'daemon-tick-event',
+              type: 'orchestration_daemon_tick_finished',
+              payload: {
+                plan_run_count: body.autonomyMode === 'autonomous' ? 1 : 0,
+                inbox_processed_count: 0,
+                queue_processed_count: 0,
+                run_steps: body.autonomyMode === 'autonomous',
+              },
+              created_at: '2026-05-03T00:05:01Z',
+            },
+            plan_runs: { processed: [], skipped: [] },
+            task_inbox: { processed: [] },
+            execution_queue: { processed: [] },
           }),
         });
       }
@@ -679,6 +755,133 @@ describe('PlanScreen orchestration board', () => {
           }),
         });
       }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/autonomous-run') && options?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            plan: {
+              id: 'plan-1',
+              raw_plan: 'Ready pilot plan',
+              repo_path: '/repo',
+              base_branch: 'main',
+              provider: 'codex',
+              model: 'gpt-5.5',
+              entry_mode: 'existing_project',
+              work_lane: 'chore',
+              repo_profile: {},
+              automation_mode: 'autonomous',
+              max_concurrency: 1,
+              priority: null,
+              source: 'plan_tab',
+              constraints: [],
+              acceptance_criteria: ['Vague specs are blocked'],
+              status: 'decomposed',
+              locked_by: null,
+              locked_at: null,
+              final_spec_id: 'spec-ready-1',
+              created_at: '2026-05-03T00:00:00Z',
+              updated_at: '2026-05-03T00:03:00Z',
+              discussion_messages: [],
+              planning_checkpoints: readyPlanningCheckpoints,
+              specs: [],
+              decomposition_runs: [],
+            },
+            spec: {
+              id: 'spec-ready-1',
+              plan_inbox_item_id: 'plan-1',
+              version: 1,
+              content: '# Agentic Forward Spec',
+              metadata: {},
+              status: 'ready',
+              created_at: '2026-05-03T00:00:00Z',
+              updated_at: '2026-05-03T00:00:00Z',
+            },
+            spec_id: 'spec-ready-1',
+            run: {
+              status: 'succeeded',
+              summary: 'Autonomous lane succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+              failures: [],
+            },
+            artifact: {
+              id: 'artifact-lane',
+              task_id: null,
+              node_id: null,
+              step_id: null,
+              run_attempt_id: null,
+              type: 'autonomous_plan_run',
+              title: 'Autonomous run: Ready pilot plan',
+              summary: 'Autonomous lane succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+              content: '{}',
+              metadata: { plan_inbox_item_id: 'plan-1', status: 'succeeded' },
+              created_at: '2026-05-03T00:04:00Z',
+            },
+            event: {
+              id: 'event-lane',
+              type: 'autonomous_plan_run_finished',
+              payload: { plan_inbox_item_id: 'plan-1', status: 'succeeded', artifact_id: 'artifact-lane' },
+              created_at: '2026-05-03T00:04:00Z',
+            },
+            pilot: {
+              plan: { id: 'plan-1' },
+              spec: { id: 'spec-ready-1' },
+              decomposition: {
+                plan: { id: 'plan-1' },
+                decomposition_run: {
+                  id: 'decomp-lane',
+                  plan_inbox_item_id: 'plan-1',
+                  spec_id: 'spec-ready-1',
+                  pass_index: 1,
+                  decomposer_output: {},
+                  status: 'created',
+                  created_at: '2026-05-03T00:04:00Z',
+                  updated_at: '2026-05-03T00:04:00Z',
+                },
+                task_inbox_items: [{
+                  ...taskInboxItem,
+                  id: 'task-inbox-lane',
+                  title: 'Ready pilot plan',
+                  status: 'materialized',
+                  materialized_task_id: 'task-lane',
+                }],
+              },
+              daemon_tick: { mode: 'autonomous' },
+              tasks: [{
+                ...detailWithEvidence,
+                id: 'task-lane',
+                title: 'Ready pilot plan',
+                status: 'review',
+                base_repo_path: '/repo',
+                base_branch: 'main',
+              }],
+              evidence: [{
+                ...taskEvidence,
+                task_id: 'task-lane',
+                task_status: 'review',
+              }],
+              pilot: {
+                status: 'succeeded',
+                summary: 'Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+                failures: [],
+              },
+              artifact: {
+                id: 'artifact-pilot-lane',
+                type: 'pilot_run',
+                title: 'Pilot run: Ready pilot plan',
+                summary: 'Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+                content: '{}',
+                metadata: { plan_inbox_item_id: 'plan-1', status: 'succeeded' },
+                created_at: '2026-05-03T00:04:00Z',
+              },
+              event: {
+                id: 'event-pilot-lane',
+                type: 'autonomous_pilot_run_finished',
+                payload: { plan_inbox_item_id: 'plan-1', status: 'succeeded', artifact_id: 'artifact-pilot-lane' },
+                created_at: '2026-05-03T00:04:00Z',
+              },
+            },
+          }),
+        });
+      }
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pilot-runs') && !options) {
         return Promise.resolve({
           ok: true,
@@ -729,6 +932,42 @@ describe('PlanScreen orchestration board', () => {
             base_repo_path: '/repo',
             base_branch: 'main',
           }),
+        });
+      }
+      if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1/autonomous-runs') && !options) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{
+            id: 'event-lane',
+            created_at: '2026-05-03T00:04:00Z',
+            status: 'succeeded',
+            summary: 'Autonomous lane succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+            failures: [],
+            task_ids: ['task-lane'],
+            task_inbox_item_ids: ['task-inbox-lane'],
+            spec_id: 'spec-ready-1',
+            decomposition_run_id: 'decomp-lane',
+            pilot_artifact_id: 'artifact-pilot-lane',
+            artifact: {
+              id: 'artifact-lane',
+              task_id: null,
+              node_id: null,
+              step_id: null,
+              run_attempt_id: null,
+              type: 'autonomous_plan_run',
+              title: 'Autonomous run: Ready pilot plan',
+              summary: 'Autonomous lane succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).',
+              content: '{}',
+              metadata: { plan_inbox_item_id: 'plan-1', status: 'succeeded' },
+              created_at: '2026-05-03T00:04:00Z',
+            },
+            event: {
+              id: 'event-lane',
+              type: 'autonomous_plan_run_finished',
+              payload: { plan_inbox_item_id: 'plan-1', status: 'succeeded', artifact_id: 'artifact-lane' },
+              created_at: '2026-05-03T00:04:00Z',
+            },
+          }],
         });
       }
       if (String(url).includes('/api/orchestration/tasks/task-pilot') && !options) {
@@ -1427,7 +1666,7 @@ describe('PlanScreen orchestration board', () => {
   it('shows a compact daemon run result from the last tick summary', async () => {
     render(<PlanScreen />);
 
-    expect(await screen.findByText('1 inbox · 2 queue')).toBeTruthy();
+    expect(await screen.findByText('0 plans · 1 inbox · 2 queue')).toBeTruthy();
     expect(screen.getByText('3 review · 4 blocked · 5 waiting')).toBeTruthy();
     expect(screen.getByText('last result: Run tiny verification · review · 1 ran · tiny-ok')).toBeTruthy();
   });
@@ -1453,7 +1692,7 @@ describe('PlanScreen orchestration board', () => {
     render(<PlanScreen />);
 
     expect(await screen.findByText('plan-screen-daemon-controls changed autonomy mode · autonomous · active')).toBeTruthy();
-    expect(screen.getByText('1 inbox · 2 queue · autonomous')).toBeTruthy();
+    expect(screen.getByText('0 plans · 1 inbox · 2 queue · autonomous')).toBeTruthy();
   });
 
   it('requires confirmation before switching the daemon to autonomous mode', async () => {
@@ -1487,6 +1726,40 @@ describe('PlanScreen orchestration board', () => {
       const body = JSON.parse(String(calls[0][1]?.body));
       expect(body.lockedBy).toBe('plan-screen-daemon-controls');
       expect(body.autonomyMode).toBe('autonomous');
+    });
+  });
+
+  it('lets autonomous daemon ticks claim approved plan lane work', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PlanScreen />);
+
+    const mode = await screen.findByRole('combobox', { name: 'Daemon mode' });
+    fireEvent.change(mode, { target: { value: 'autonomous' } });
+    await waitFor(() => expect(screen.getByText('Autonomous armed')).toBeTruthy());
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Daemon process plan lane' }));
+
+    await waitFor(() => {
+      const stateCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/daemon/state') && options?.method === 'PATCH'
+      );
+      expect(stateCalls.length).toBe(2);
+      const body = JSON.parse(String(stateCalls[1][1]?.body));
+      expect(body.processPlans).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Daemon Tick' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/daemon/tick') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.autonomyMode).toBe('autonomous');
+      expect(body.processPlans).toBeUndefined();
+      expect(body.maxPlanRuns).toBeUndefined();
+      expect(body.maxTasksPerPlan).toBeUndefined();
+      expect(body.runAgent).toBeUndefined();
     });
   });
 
@@ -1544,20 +1817,28 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('Nidavellir PM')).toBeTruthy();
     expect(screen.getByText('Checkpoints')).toBeTruthy();
     expect((await screen.findAllByText('Automate orchestration')).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream'))).toBe(true);
+    });
+    const initialPmTurnCount = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+      String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST'
+    ).length;
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), {
       target: { value: 'Decomposer should consume only the approved spec.' },
     });
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), { key: 'Enter', shiftKey: true });
-    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream'))).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+      String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST'
+    ).length).toBe(initialPmTurnCount);
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message Nidavellir PM' }), { key: 'Enter' });
 
     await waitFor(() => {
       const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST'
       );
-      expect(calls.length).toBe(1);
-      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(calls.length).toBe(initialPmTurnCount + 1);
+      const body = JSON.parse(String(calls.at(-1)?.[1]?.body));
       expect(body.content).toBe('Decomposer should consume only the approved spec.');
       expect(body.provider).toBe('claude');
       expect(body.model).toBe('claude-sonnet-4-6');
@@ -1568,6 +1849,28 @@ describe('PlanScreen orchestration board', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View Spec' }));
     expect(await screen.findByText('Spec Snapshot')).toBeTruthy();
     expect(screen.getByText(/# Working Spec Snapshot/)).toBeTruthy();
+  });
+
+  it('shows PM approval buttons and sends explicit approve or deny responses', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Automate orchestration' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('As Nidavellir PM, what verification should we lock before I draft the spec?')).toBeTruthy();
+    const initialPmTurnCount = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+      String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST'
+    ).length;
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/pm-turn/stream') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(initialPmTurnCount + 1);
+      expect(JSON.parse(String(calls.at(-1)?.[1]?.body)).content).toBe('Approved');
+    });
   });
 
   it('runs an autonomous pilot from an approved PM plan', async () => {
@@ -1604,7 +1907,7 @@ describe('PlanScreen orchestration board', () => {
     expect(await screen.findByText('Pilot succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).')).toBeTruthy();
     expect(await screen.findByText('marker artifact written')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Queue Task' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Queue Task' })[1]);
     await waitFor(() => {
       const queueCalls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
         String(url).includes('/api/orchestration/tasks/task-pilot') && options?.method === 'PATCH'
@@ -1612,6 +1915,38 @@ describe('PlanScreen orchestration board', () => {
       expect(queueCalls.length).toBe(1);
       expect(JSON.parse(String(queueCalls[0][1]?.body)).status).toBe('queued_for_execution');
     });
+  });
+
+  it('promotes an approved PM plan into the autonomous lane', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Ready pilot plan' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Plan repo path' }), { target: { value: '/repo' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('PM Planning Session')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Pilot max tasks'), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText('Pilot max steps'), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText('Pilot timeout seconds'), { target: { value: '90' } });
+    const runLane = await screen.findByRole('button', { name: 'Run Lane' });
+    expect(runLane).not.toBeDisabled();
+    fireEvent.click(runLane);
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls.filter(([url, options]) =>
+        String(url).endsWith('/api/orchestration/plan-inbox/plan-1/autonomous-run') && options?.method === 'POST'
+      );
+      expect(calls.length).toBe(1);
+      const body = JSON.parse(String(calls[0][1]?.body));
+      expect(body.maxTasks).toBe(2);
+      expect(body.runAgent).toBe(true);
+      expect(body.maxStepsPerTask).toBe(5);
+      expect(body.timeoutSeconds).toBe(90);
+      expect(body.permissionOverride).toBe('allow_once');
+      expect(body.lockedBy).toBe('plan-screen-autonomous-lane');
+    });
+    expect(await screen.findByText('Autonomous Runs')).toBeTruthy();
+    expect(await screen.findByText('Autonomous lane succeeded: 1 task(s), 1 evidence bundle(s), 0 failure(s).')).toBeTruthy();
   });
 
   it('materializes accepted atomic task inbox items into executable tasks', async () => {

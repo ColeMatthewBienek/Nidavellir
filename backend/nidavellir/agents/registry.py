@@ -135,7 +135,7 @@ def _build_registry() -> dict[str, ProviderManifest]:
                 supports_worktree_isolation=True,
                 supports_mediated_tool_approval=False,
                 default_dangerousness="restricted",
-                restricted_flags=["--tools", ""],
+                restricted_flags=["--permission-mode", "plan", "--tools", ""],
                 ask_flags=["--permission-mode", "default"],
                 trusted_flags=["--permission-mode", "acceptEdits"],
                 free_rein_flags=["--dangerously-skip-permissions"],
