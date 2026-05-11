@@ -927,6 +927,48 @@ async def test_pm_turn_approved_drafts_spec_at_spec_draft_gate(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_pm_turn_continue_after_spec_approval_is_terminal_noop(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+        for gate in ["scope", "verification", "risks"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for terminal approval test.",
+            })
+            assert checkpoint.status_code == 200
+        draft = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Approved",
+            "agentMode": "deterministic",
+        })
+        assert draft.status_code == 200
+        approval = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Approved",
+            "agentMode": "deterministic",
+        })
+        assert approval.status_code == 200
+
+        terminal = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "continue",
+            "agentMode": "deterministic",
+        })
+
+    assert terminal.status_code == 200
+    body = terminal.json()
+    assert body["structured"]["transition"] == "noop"
+    assert body["structured"]["checkpoint_updates"] == []
+    assert "already approved for decomposition" in body["messages"][1]["content"]
+    assert "Do you approve this spec" not in body["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_pm_turn_provider_timeout_returns_structured_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmHangingAgent())
