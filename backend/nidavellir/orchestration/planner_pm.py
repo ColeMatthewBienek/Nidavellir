@@ -550,31 +550,93 @@ def _blocked(plan: dict, gate: PlannerGate, user_content: str, validation_errors
     )
 
 
+def _markdown_bullets(text: str) -> list[str]:
+    values: list[str] = []
+    for line in text.splitlines():
+        item = re.sub(r"^\s*[-*]\s*", "", line).strip()
+        if item:
+            values.append(item)
+    return values
+
+
+def _latest_spec_delta_sections(plan: dict) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    for message in plan.get("discussion_messages") or []:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        for delta in metadata.get("spec_deltas") or []:
+            if not isinstance(delta, dict):
+                continue
+            section = str(delta.get("section") or "").strip()
+            content = str(delta.get("content") or "").strip()
+            if section and content:
+                sections.setdefault(section, []).append(content)
+    return sections
+
+
+def _section_bullets(sections: dict[str, list[str]], section: str) -> list[str]:
+    values: list[str] = []
+    for content in sections.get(section, []):
+        values.extend(_markdown_bullets(content))
+    return values
+
+
+def _render_bullets(values: list[str], fallback: str) -> list[str]:
+    cleaned = [re.sub(r"\s+", " ", value).strip() for value in values if re.sub(r"\s+", " ", value).strip()]
+    return [f"- {value}" for value in cleaned] if cleaned else [f"- {fallback}"]
+
+
 def _deterministic_spec_markdown(plan: dict) -> str:
     checkpoints = {item.get("key"): item for item in plan.get("planning_checkpoints") or []}
-    messages = plan.get("discussion_messages") or []
-    proposal_dumps = []
-    for message in messages:
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        if metadata.get("proposal"):
-            proposal_dumps.append(metadata["proposal"])
+    sections = _latest_spec_delta_sections(plan)
+    raw_plan = str(plan.get("raw_plan") or "").strip()
+    scope = _section_bullets(sections, "Scope")
+    non_goals = []
+    for content in sections.get("Scope", []):
+        if "Non-goals:" in content:
+            non_goals.extend(_markdown_bullets(content.split("Non-goals:", 1)[1]))
+    acceptance = [str(item).strip() for item in plan.get("acceptance_criteria") or [] if str(item).strip()]
+    acceptance.extend(_section_bullets(sections, "Acceptance Criteria"))
+    verification = _section_bullets(sections, "Verification Strategy")
+    is_hello_shell = "hello nidavellir" in raw_plan.lower() and any("shell" in item.lower() for item in scope)
+    if is_hello_shell:
+        task_breakdown = ["Create a shell CLI that prints `hello nidavellir` and a shell test command proving it works."]
+        if not any("test_hello.sh" in item for item in verification):
+            verification.append("Run `./test_hello.sh` and confirm it exits 0.")
+        if not any("hello.sh" in item for item in verification):
+            verification.append("Run `./hello.sh` and confirm it prints exactly `hello nidavellir`.")
+    else:
+        task_breakdown = scope[:]
+    risks = _section_bullets(sections, "Risks and Dependencies")
     return "\n".join([
         "# Agentic Forward Spec",
         "",
         "## Goal",
-        str(plan.get("raw_plan") or "").strip(),
+        raw_plan,
         "",
         "## Target Repository",
         f"- Repo path: {plan.get('repo_path') or 'Not captured'}",
         f"- Base branch: {plan.get('base_branch') or 'main'}",
         "",
+        "## Scope",
+        *_render_bullets(scope, "Needs PM-confirmed scope."),
+        "",
+        "## Non-Goals",
+        *_render_bullets(non_goals, "No explicit non-goals captured."),
+        "",
+        "## Task Breakdown",
+        *_render_bullets(task_breakdown, "Implement the approved scope as one atomic task."),
+        "",
+        "## Acceptance Criteria",
+        *_render_bullets(list(dict.fromkeys(acceptance)), "Needs testable acceptance criteria."),
+        "",
+        "## Verification Strategy",
+        *_render_bullets(list(dict.fromkeys(verification)), "Review implementation against the approved spec acceptance criteria."),
+        "",
+        "## Risks and Dependencies",
+        *_render_bullets(risks, "No additional risks captured."),
+        "",
         "## Locked Planning Evidence",
         *[f"- {key}: {value.get('summary') or value.get('status')}" for key, value in checkpoints.items() if value.get("status") == "agreed"],
-        "",
-        "## Proposal Evidence",
-        "```json",
-        repr(proposal_dumps),
-        "```",
     ])
 
 

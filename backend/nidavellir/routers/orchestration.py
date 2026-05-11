@@ -1029,7 +1029,7 @@ def _decompose_spec_to_candidates(plan: dict, spec: dict, max_tasks: int) -> dic
     for line in verification_lines:
         command_match = re.search(r"`([^`]+)`", line)
         command = (command_match.group(1) if command_match else line).strip()
-        if command and re.search(r"\b(?:pytest|vitest|npm|pnpm|uv|ruff|mypy|tsc|go test|cargo test)\b", command):
+        if command and re.search(r"(?:\b(?:pytest|vitest|npm|pnpm|uv|ruff|mypy|tsc|go test|cargo test)\b|(?:bash|sh)\s+\S+\.sh\b|\./\S+\.sh\b)", command):
             verification_steps.append({"type": "command", "command": command})
     if not verification_steps:
         verification_steps = [{"type": "manual", "command": "Review implementation against the approved spec acceptance criteria."}]
