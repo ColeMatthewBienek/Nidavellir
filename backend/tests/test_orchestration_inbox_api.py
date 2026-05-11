@@ -893,6 +893,40 @@ async def test_pm_turn_denial_clears_latest_proposal_without_locking_gate(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_pm_turn_approved_drafts_spec_at_spec_draft_gate(tmp_path: Path):
+    setup_app(tmp_path)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir.",
+            "repoPath": str(tmp_path / "hello-nidavellir"),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "acceptanceCriteria": ["CLI command runs successfully."],
+        })).json()
+        for gate in ["scope", "verification", "risks"]:
+            checkpoint = await c.patch(f"/api/orchestration/plan-inbox/{plan['id']}/checkpoints/{gate}", json={
+                "status": "agreed",
+                "summary": f"{gate} locked for spec draft approval test.",
+            })
+            assert checkpoint.status_code == 200
+
+        response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+            "content": "Approved",
+            "agentMode": "deterministic",
+        })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["structured"]["transition"] == "drafted"
+    assert body["structured"]["draft_spec"]["status"] == "draft"
+    assert body["structured"]["draft_spec"]["content"].startswith("# Agentic Forward Spec")
+    checkpoints = {item["key"]: item for item in body["plan"]["planning_checkpoints"]}
+    assert checkpoints["spec_draft"]["status"] == "agreed"
+    assert body["messages"][1]["metadata"]["draft_spec_id"] == body["structured"]["draft_spec"]["id"]
+
+
+@pytest.mark.asyncio
 async def test_pm_turn_provider_timeout_returns_structured_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmHangingAgent())

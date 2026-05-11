@@ -348,6 +348,13 @@ def _approval(user_content: str, proposal: PlannerGateProposal | None, active_ga
     return is_approval and not is_denial, is_denial
 
 
+def _is_approval_text(user_content: str) -> bool:
+    text = user_content.lower()
+    is_denial = any(re.search(pattern, text) for pattern in DENIAL_PATTERNS)
+    is_approval = any(re.search(pattern, text) for pattern in APPROVAL_PATTERNS)
+    return is_approval and not is_denial
+
+
 def validate_proposal_for_lock(proposal: PlannerGateProposal, repo_resolver: RepoResolver | None = None) -> list[str]:
     errors: list[str] = []
     if proposal.gate == PlannerGate.REPO_TARGET:
@@ -640,7 +647,10 @@ async def run_planner_pm_turn(
             )
 
     if active_gate == PlannerGate.SPEC_DRAFT:
-        if not re.search(r"\b(?:draft|generate|create)\b", user_content, re.IGNORECASE):
+        if not (
+            re.search(r"\b(?:draft|generate|create)\b", user_content, re.IGNORECASE)
+            or _is_approval_text(user_content)
+        ):
             return PlannerPmTurnDecision(
                 input_gate=active_gate,
                 next_gate=active_gate,
