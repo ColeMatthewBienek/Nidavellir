@@ -260,6 +260,13 @@ def determine_active_gate(plan: dict) -> PlannerGate:
     return PlannerGate.SPEC_APPROVED
 
 
+def gate_is_agreed(plan: dict, gate: PlannerGate) -> bool:
+    return any(
+        item.get("key") == gate.value and item.get("status") == "agreed"
+        for item in plan.get("planning_checkpoints") or []
+    )
+
+
 def next_gate_after(plan: dict, updates: list[PlannerCheckpointUpdate]) -> PlannerGate:
     agreed = {item.key.value for item in updates if item.status == "agreed"}
     checkpoints = {item.get("key"): item.get("status", "missing") for item in plan.get("planning_checkpoints") or []}
@@ -346,6 +353,13 @@ def _approval(user_content: str, proposal: PlannerGateProposal | None, active_ga
     is_denial = any(re.search(pattern, text) for pattern in DENIAL_PATTERNS)
     is_approval = any(re.search(pattern, text) for pattern in APPROVAL_PATTERNS)
     return is_approval and not is_denial, is_denial
+
+
+def _is_approval_text(user_content: str) -> bool:
+    text = user_content.lower()
+    is_denial = any(re.search(pattern, text) for pattern in DENIAL_PATTERNS)
+    is_approval = any(re.search(pattern, text) for pattern in APPROVAL_PATTERNS)
+    return is_approval and not is_denial
 
 
 def validate_proposal_for_lock(proposal: PlannerGateProposal, repo_resolver: RepoResolver | None = None) -> list[str]:
@@ -640,7 +654,10 @@ async def run_planner_pm_turn(
             )
 
     if active_gate == PlannerGate.SPEC_DRAFT:
-        if not re.search(r"\b(?:draft|generate|create)\b", user_content, re.IGNORECASE):
+        if not (
+            re.search(r"\b(?:draft|generate|create)\b", user_content, re.IGNORECASE)
+            or _is_approval_text(user_content)
+        ):
             return PlannerPmTurnDecision(
                 input_gate=active_gate,
                 next_gate=active_gate,
@@ -665,6 +682,16 @@ async def run_planner_pm_turn(
         spec = (plan.get("specs") or [None])[0]
         if spec is None:
             return _blocked(plan, PlannerGate.SPEC_DRAFT, user_content, ["spec approval blocked because no spec exists"])
+        if gate_is_agreed(plan, PlannerGate.SPEC_APPROVED):
+            return PlannerPmTurnDecision(
+                input_gate=active_gate,
+                next_gate=active_gate,
+                active_gate=active_gate,
+                transition=PlannerTransition.NOOP,
+                message_kind=PlannerMessageKind.APPROVAL,
+                ui_message="Spec is already approved for decomposition. Nidavellir can create candidate tasks now.",
+                decisions=[f"Spec {spec.get('id')} was already approved for decomposition."],
+            )
         is_final_approval = any(re.search(pattern, user_content.lower()) for pattern in APPROVAL_PATTERNS)
         if not is_final_approval:
             return PlannerPmTurnDecision(

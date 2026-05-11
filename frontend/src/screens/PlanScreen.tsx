@@ -408,6 +408,8 @@ function plannerMessageRequestsDecision(message: PlannerDiscussionMessage, item:
   if (!item || message.role !== 'planner' || plannerMessageStreaming(message)) return false;
   const messages = item.discussion_messages ?? [];
   if (messages.length === 0 || messages[messages.length - 1]?.id !== message.id) return false;
+  if (message.kind === 'approval') return false;
+  if (message.metadata?.transition === 'approved') return false;
   const text = message.content.toLowerCase();
   return (
     /\b(?:approve|approved|approval|deny|reject|lock|confirm)\b/.test(text)

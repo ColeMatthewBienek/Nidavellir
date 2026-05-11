@@ -1078,6 +1078,7 @@ describe('PlanScreen orchestration board', () => {
       if (String(url).endsWith('/api/orchestration/plan-inbox/plan-1') && !options) {
         const created = planInboxCreateBody ?? {};
         const readyPilot = created.rawPlan === 'Ready pilot plan';
+        const terminalApproval = created.rawPlan === 'Terminal approval plan';
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -1101,24 +1102,45 @@ describe('PlanScreen orchestration board', () => {
             source: 'plan_tab',
             constraints: [],
             acceptance_criteria: ['Vague specs are blocked'],
-            status: readyPilot ? 'spec_ready' : 'new',
+            status: readyPilot || terminalApproval ? 'spec_ready' : 'new',
             locked_by: null,
             locked_at: null,
-            final_spec_id: readyPilot ? 'spec-ready-1' : null,
+            final_spec_id: readyPilot || terminalApproval ? 'spec-ready-1' : null,
             created_at: '2026-05-03T00:00:00Z',
             updated_at: '2026-05-03T00:00:00Z',
-            discussion_messages: [{
-              id: 'discussion-1',
-              plan_inbox_item_id: 'plan-1',
-              role: 'user',
-              kind: 'message',
-              content: 'Automate orchestration',
-              linked_artifact_id: null,
-              metadata: { source: 'raw_plan' },
-              created_at: '2026-05-03T00:00:00Z',
-            }],
-            planning_checkpoints: readyPilot ? readyPlanningCheckpoints : planningCheckpoints,
-            specs: readyPilot ? [{
+            discussion_messages: terminalApproval ? [
+              {
+                id: 'discussion-1',
+                plan_inbox_item_id: 'plan-1',
+                role: 'user',
+                kind: 'message',
+                content: 'Terminal approval plan',
+                linked_artifact_id: null,
+                metadata: { source: 'raw_plan' },
+                created_at: '2026-05-03T00:00:00Z',
+              },
+              {
+                id: 'approval-terminal',
+                plan_inbox_item_id: 'plan-1',
+                role: 'planner',
+                kind: 'approval',
+                content: 'Spec approved for decomposition. Nidavellir can now create candidate tasks.',
+                linked_artifact_id: null,
+                metadata: { transition: 'approved' },
+                created_at: '2026-05-03T00:03:00Z',
+              },
+            ] : [{
+                id: 'discussion-1',
+                plan_inbox_item_id: 'plan-1',
+                role: 'user',
+                kind: 'message',
+                content: 'Automate orchestration',
+                linked_artifact_id: null,
+                metadata: { source: 'raw_plan' },
+                created_at: '2026-05-03T00:00:00Z',
+              }],
+            planning_checkpoints: readyPilot || terminalApproval ? readyPlanningCheckpoints : planningCheckpoints,
+            specs: readyPilot || terminalApproval ? [{
               id: 'spec-ready-1',
               plan_inbox_item_id: 'plan-1',
               version: 1,
@@ -1871,6 +1893,17 @@ describe('PlanScreen orchestration board', () => {
       expect(calls.length).toBe(initialPmTurnCount + 1);
       expect(JSON.parse(String(calls.at(-1)?.[1]?.body)).content).toBe('Approved');
     });
+  });
+
+  it('does not show PM approval buttons on terminal approval messages', async () => {
+    render(<PlanScreen />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Plan inbox raw plan' }), { target: { value: 'Terminal approval plan' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start PM Chat' }));
+
+    expect(await screen.findByText('Spec approved for decomposition. Nidavellir can now create candidate tasks.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Deny' })).toBeNull();
   });
 
   it('runs an autonomous pilot from an approved PM plan', async () => {
