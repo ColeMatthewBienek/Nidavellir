@@ -969,6 +969,60 @@ async def test_pm_turn_continue_after_spec_approval_is_terminal_noop(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_deterministic_pm_spec_decomposes_tiny_cli_with_command_verification(tmp_path: Path):
+    setup_app(tmp_path)
+    target_repo = create_git_repo(tmp_path / "hello-nidavellir")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        plan = (await c.post("/api/orchestration/plan-inbox", json={
+            "rawPlan": "Create a tiny CLI in a new repo that prints hello nidavellir and has one test command proving it works.",
+            "repoPath": str(target_repo),
+            "baseBranch": "main",
+            "entryMode": "new_project",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "acceptanceCriteria": [
+                "CLI command runs successfully.",
+                "CLI prints exactly hello nidavellir.",
+                "Test command passes.",
+                "No network calls.",
+            ],
+        })).json()
+
+        for content in [
+            "Shell",
+            "Approved",
+            "Verification:\n- Run the CLI command and confirm it prints exactly hello nidavellir.\n- Run the test command and confirm it exits 0.",
+            "Risks:\n- Keep all implementation inside the selected project repo.\nDependencies:\n- Target repo must be initialized on main.\nGuardrails:\n- No network calls or external dependencies.",
+            "Approved",
+            "Approved",
+        ]:
+            response = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/pm-turn", json={
+                "content": content,
+                "agentMode": "deterministic",
+            })
+            assert response.status_code == 200
+
+        detail = (await c.get(f"/api/orchestration/plan-inbox/{plan['id']}")).json()
+        spec = detail["specs"][0]
+        assert "## Task Breakdown" in spec["content"]
+        assert "`./test_hello.sh`" in spec["content"]
+        assert detail["final_spec_id"] == spec["id"]
+
+        decomposed = await c.post(f"/api/orchestration/plan-inbox/{plan['id']}/decompose", json={
+            "maxTasks": 1,
+            "createTaskInboxItems": True,
+        })
+
+    assert decomposed.status_code == 200
+    body = decomposed.json()
+    assert body["decomposition_run"]["decomposer_output"]["candidate_count"] == 1
+    task = body["task_inbox_items"][0]
+    assert task["objective"] == "Create a shell CLI that prints `hello nidavellir` and a shell test command proving it works."
+    assert task["payload"]["verification_steps"] == [{"type": "command", "command": "./test_hello.sh"}]
+
+
+@pytest.mark.asyncio
 async def test_pm_turn_provider_timeout_returns_structured_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     setup_app(tmp_path)
     monkeypatch.setattr("nidavellir.routers.orchestration._agent_registry.make_agent", lambda *args, **kwargs: PlannerPmHangingAgent())
